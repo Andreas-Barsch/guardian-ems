@@ -1,0 +1,52 @@
+name: Guardian Battery
+version: "0.4.0"
+slug: guardian_battery
+description: Pylontech-US2000C-Monitoring mit Health Engine, MQTT und Dashboard-Unterstützung.
+arch:
+  - aarch64
+startup: application
+boot: auto
+init: false
+uart: true
+services:
+  - mqtt:need
+map:
+  - share:rw
+options:
+  serial_port: auto
+  baudrate: 115200
+  poll_interval_seconds: 10
+  module_count: 6
+  command: pwr
+  command_timeout_seconds: 5
+  mqtt_topic_prefix: guardian
+  publish_discovery: true
+  warning_cell_delta_mv: 30
+  critical_cell_delta_mv: 80
+  warning_soc_deviation_pct: 10
+  critical_soc_deviation_pct: 30
+  missing_module_is_critical: true
+  raw_log: false
+  detailed_log: true
+  trend_window_minutes: 60
+  trend_min_change_mv: 10
+  incident_hold_minutes: 30
+schema:
+  serial_port: str
+  baudrate: int
+  poll_interval_seconds: int(5,3600)
+  module_count: int(1,16)
+  command: str
+  command_timeout_seconds: int(1,30)
+  mqtt_topic_prefix: str
+  publish_discovery: bool
+  warning_cell_delta_mv: int(1,1000)
+  critical_cell_delta_mv: int(1,1000)
+  warning_soc_deviation_pct: int(1,100)
+  critical_soc_deviation_pct: int(1,100)
+  missing_module_is_critical: bool
+  raw_log: bool
+  detailed_log: bool
+  trend_window_minutes: int(10,1440)
+  trend_min_change_mv: int(1,500)
+  incident_hold_minutes: int(1,1440)

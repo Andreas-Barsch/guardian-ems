@@ -1,0 +1,32 @@
+- alias: Guardian Batteriealarm
+  id: guardian_battery_alarm_push
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: sensor.guardian_battery_guardian_batteriestatus
+      to:
+        - warning
+        - critical
+  action:
+    - service: notify.mobile_app_DEIN_IPHONE
+      data:
+        title: "Guardian Battery"
+        message: >
+          Status: {{ states('sensor.guardian_battery_guardian_batteriestatus') }}.
+          {{ states('sensor.guardian_battery_guardian_letzter_batteriealarm') }}
+
+- alias: Guardian Batterie Entwarnung
+  id: guardian_battery_clear_push
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: sensor.guardian_battery_guardian_batteriestatus
+      to: ok
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state is not none and trigger.from_state.state in ['warning', 'critical'] }}"
+  action:
+    - service: notify.mobile_app_DEIN_IPHONE
+      data:
+        title: "Guardian Battery – Entwarnung"
+        message: "Der Batteriestatus ist wieder OK."

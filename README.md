@@ -1,35 +1,28 @@
-# Guardian Battery 0.3.0
+# Guardian Battery 0.4.0
 
-Version 0.3.0 ergänzt eine regelbasierte Health Engine. Sie ist bewusst
-nachvollziehbar und verwendet noch keine externe KI.
+Phase 3A ergänzt eine nachvollziehbare Trend- und Incident-Engine.
 
 ## Neue Sensoren
 
-Gesamtsystem:
-
-- Guardian Health Score
-- Guardian Empfehlung
-- Guardian auffälligstes Modul
-
 Je Modul:
 
-- Health Score
-- Gesundheit
-- Bewertung
-- Empfehlung
-- SOC-Abweichung zum Median des Stacks
+- Zellspreizung Trend: `rising`, `stable`, `falling`
+- Änderung der Zellspreizung im Trendfenster
+- SOC-Änderung im Trendfenster
 
-## Ereignisspeicher
+Gesamtsystem:
 
-Neue und beendete Alarmzustände werden unter
+- Incident aktiv
+- Incident-Zusammenfassung
 
-`/share/guardian_battery/events.jsonl`
+## Konfiguration
 
-gespeichert. Alarmzähler und letzter Status liegen in
+- `trend_window_minutes`: Standard 60 Minuten
+- `trend_min_change_mv`: Standard 10 mV
+- `incident_hold_minutes`: Standard 30 Minuten
 
-`/share/guardian_battery/guardian_state.json`.
+## Push-Automationen
 
-## Aktualisierung über GitHub
-
-Im GitHub-Repository den Ordner `guardian_battery` vollständig ersetzen,
-committen und anschließend im Home-Assistant-App-Store nach Updates suchen.
+Die Datei `automations_guardian.yaml` enthält Vorlagen. Darin muss
+`notify.mobile_app_DEIN_IPHONE` durch den tatsächlichen Benachrichtigungsdienst
+der Home-Assistant-Companion-App ersetzt werden.
