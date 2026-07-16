@@ -1,0 +1,141 @@
+title: Guardian EMS
+views:
+  - title: Batterie
+    path: batterie
+    icon: mdi:shield-battery
+    type: sections
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Gesamtzustand
+            icon: mdi:shield-battery
+          - type: entities
+            entities:
+              - entity: sensor.guardian_batteriestatus
+                name: Batteriestatus
+              - entity: sensor.guardian_erkannte_module
+                name: Erkannte Module
+              - entity: sensor.guardian_aktive_batteriealarme
+                name: Aktive Alarme
+              - entity: sensor.guardian_letzter_batteriealarm
+                name: Letzter Alarm
+              - entity: sensor.guardian_letzte_aktualisierung
+                name: Letzte Aktualisierung
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Module
+            icon: mdi:battery-multiple
+          - type: entities
+            title: Modul 1
+            entities:
+              - sensor.modul_1_gesundheit
+              - sensor.modul_1_bewertung
+              - sensor.modul_1_soc
+              - sensor.modul_1_zustand
+              - sensor.modul_1_spannung
+              - sensor.modul_1_strom
+              - sensor.modul_1_temperatur
+              - sensor.modul_1_zellspreizung
+          - type: entities
+            title: Modul 2
+            entities:
+              - sensor.modul_2_gesundheit
+              - sensor.modul_2_bewertung
+              - sensor.modul_2_soc
+              - sensor.modul_2_zustand
+              - sensor.modul_2_spannung
+              - sensor.modul_2_strom
+              - sensor.modul_2_temperatur
+              - sensor.modul_2_zellspreizung
+          - type: entities
+            title: Modul 3
+            entities:
+              - sensor.modul_3_gesundheit
+              - sensor.modul_3_bewertung
+              - sensor.modul_3_soc
+              - sensor.modul_3_zustand
+              - sensor.modul_3_spannung
+              - sensor.modul_3_strom
+              - sensor.modul_3_temperatur
+              - sensor.modul_3_zellspreizung
+          - type: entities
+            title: Modul 4
+            entities:
+              - sensor.modul_4_gesundheit
+              - sensor.modul_4_bewertung
+              - sensor.modul_4_soc
+              - sensor.modul_4_zustand
+              - sensor.modul_4_spannung
+              - sensor.modul_4_strom
+              - sensor.modul_4_temperatur
+              - sensor.modul_4_zellspreizung
+          - type: entities
+            title: Modul 5
+            entities:
+              - sensor.modul_5_gesundheit
+              - sensor.modul_5_bewertung
+              - sensor.modul_5_soc
+              - sensor.modul_5_zustand
+              - sensor.modul_5_spannung
+              - sensor.modul_5_strom
+              - sensor.modul_5_temperatur
+              - sensor.modul_5_zellspreizung
+          - type: entities
+            title: Modul 6
+            entities:
+              - sensor.modul_6_gesundheit
+              - sensor.modul_6_bewertung
+              - sensor.modul_6_soc
+              - sensor.modul_6_zustand
+              - sensor.modul_6_spannung
+              - sensor.modul_6_strom
+              - sensor.modul_6_temperatur
+              - sensor.modul_6_zellspreizung
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Zellspreizung – Verlauf
+            icon: mdi:chart-line
+          - type: history-graph
+            hours_to_show: 24
+            entities:
+              - sensor.modul_1_zellspreizung
+              - sensor.modul_2_zellspreizung
+              - sensor.modul_3_zellspreizung
+              - sensor.modul_4_zellspreizung
+              - sensor.modul_5_zellspreizung
+              - sensor.modul_6_zellspreizung
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Ladezustand – Verlauf
+            icon: mdi:battery-clock
+          - type: history-graph
+            hours_to_show: 24
+            entities:
+              - sensor.modul_1_soc
+              - sensor.modul_2_soc
+              - sensor.modul_3_soc
+              - sensor.modul_4_soc
+              - sensor.modul_5_soc
+              - sensor.modul_6_soc
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Strom – Verlauf
+            icon: mdi:current-dc
+          - type: history-graph
+            hours_to_show: 6
+            entities:
+              - sensor.modul_1_strom
+              - sensor.modul_2_strom
+              - sensor.modul_3_strom
+              - sensor.modul_4_strom
+              - sensor.modul_5_strom
+              - sensor.modul_6_strom
