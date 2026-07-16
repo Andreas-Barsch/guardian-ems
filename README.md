@@ -1,33 +1,35 @@
-# Guardian EMS Apps
+# Guardian Battery 0.3.0
 
-Home-Assistant-App-Repository für das Guardian EMS.
+Version 0.3.0 ergänzt eine regelbasierte Health Engine. Sie ist bewusst
+nachvollziehbar und verwendet noch keine externe KI.
 
-## Enthaltene Apps
+## Neue Sensoren
 
-### Guardian Battery
+Gesamtsystem:
 
-Direkte Überwachung eines Pylontech-US2000C-Stacks über den Console-Port:
+- Guardian Health Score
+- Guardian Empfehlung
+- Guardian auffälligstes Modul
 
-- Spannung und Strom je Modul
-- SOC und Betriebszustand
-- Temperaturen
-- minimale und maximale Zellspannung
-- Zellspreizung
-- Gesundheitsstatus je Modul
-- MQTT Discovery
-- Home-Assistant-Dashboard-Unterstützung
+Je Modul:
 
-## Installation in Home Assistant
+- Health Score
+- Gesundheit
+- Bewertung
+- Empfehlung
+- SOC-Abweichung zum Median des Stacks
 
-Nach dem Hochladen dieses Repositorys zu GitHub:
+## Ereignisspeicher
 
-1. Home Assistant öffnen.
-2. Einstellungen → Apps → App-Store.
-3. Drei-Punkte-Menü → Repositories.
-4. GitHub-URL dieses Repositorys eintragen.
-5. Guardian Battery installieren.
+Neue und beendete Alarmzustände werden unter
 
-## Sicherheit
+`/share/guardian_battery/events.jsonl`
 
-Guardian Battery sendet ausschließlich den lesenden Pylontech-Console-Befehl `pwr`.
-Es werden keine Reset-, Firmware-, MOS- oder Konfigurationsbefehle verwendet.
+gespeichert. Alarmzähler und letzter Status liegen in
+
+`/share/guardian_battery/guardian_state.json`.
+
+## Aktualisierung über GitHub
+
+Im GitHub-Repository den Ordner `guardian_battery` vollständig ersetzen,
+committen und anschließend im Home-Assistant-App-Store nach Updates suchen.
