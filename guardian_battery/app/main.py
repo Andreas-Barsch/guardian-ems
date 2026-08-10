@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from cell_diagnostics import CellDiagnosticStore, CellSample
+
 import paho.mqtt.client as mqtt
 import serial
 
@@ -29,6 +31,7 @@ STATE_FILE = SHARE_DIR / "guardian_state.json"
 EVENT_FILE = SHARE_DIR / "events.jsonl"
 HISTORY_FILE = SHARE_DIR / "trend_history.json"
 INCIDENT_FILE = SHARE_DIR / "incident_state.json"
+CELL_DIAG_FILE = SHARE_DIR / "cell_diagnostics.json"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -331,6 +334,25 @@ def parse_pwr(text: str, expected_modules: int) -> list[Module]:
     return [unique[number] for number in sorted(unique)]
 
 
+
+BAT_ROW = re.compile(r"^(\d{1,2})\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+(?:\.\d+)?)%\s+(-?\d+)\s+mAH\s+([YN])$")
+def parse_bat(text: str) -> list[dict]:
+    rows=[]
+    for raw in text.splitlines():
+        m=BAT_ROW.match(re.sub(r"\s+"," ",raw.strip()))
+        if m: rows.append({'cell':int(m.group(1))+1,'voltage_mv':int(m.group(2)),'temperature_c':int(m.group(4))/1000,'balancing':m.group(11)=='Y'})
+    return rows if len(rows)==15 else []
+
+def parse_stat(text: str) -> dict:
+    out={}; wanted={'CYCLE Times':'cycles','SOH':'soh_percent','LifeWarn Times':'life_warn','LifeAlarm Times':'life_alarm'}
+    for raw in text.splitlines():
+        if ':' in raw:
+            k,v=(x.strip() for x in raw.split(':',1))
+            if k in wanted:
+                try: out[wanted[k]]=int(v)
+                except ValueError: pass
+    return out
+
 def abnormal_states(module: Module) -> list[str]:
     result = []
     for label, value in (
@@ -522,7 +544,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.0",
+            "sw_version": "0.4.2",
         }
 
         sensors = [
@@ -536,6 +558,8 @@ class Mqtt:
             ("last_update", "Guardian letzte Aktualisierung", None, "timestamp", "mdi:clock-check"),
             ("incident_active", "Guardian Incident aktiv", None, None, "mdi:alert-decagram"),
             ("incident_summary", "Guardian Incident Zusammenfassung", None, None, "mdi:text-box-alert"),
+            ("bms_soh", "Pylontech BMS SOH", "%", None, "mdi:battery-heart"),
+            ("bms_cycles", "Pylontech BMS Zyklen", None, None, "mdi:counter"),
         ]
 
         for module in range(1, module_count + 1):
@@ -557,7 +581,28 @@ class Mqtt:
                 (f"module_{module}_max_cell", f"Modul {module} maximale Zellspannung", "V", "voltage", "mdi:arrow-up-bold"),
                 (f"module_{module}_cell_delta", f"Modul {module} Zellspreizung", "mV", None, "mdi:delta"),
                 (f"module_{module}_mos_temperature", f"Modul {module} MOS-Temperatur", "°C", "temperature", "mdi:thermometer-lines"),
+                (f"module_{module}_cell_diag_status", f"Modul {module} Zelldiagnostik Status", None, None, "mdi:battery-search"),
+                (f"module_{module}_cell_diag_confidence", f"Modul {module} Zelldiagnostik Confidence", None, None, "mdi:check-decagram"),
+                (f"module_{module}_cell_diag_samples", f"Modul {module} Zelldiagnostik Messpunkte", None, None, "mdi:counter"),
+                (f"module_{module}_cell_diag_worst_cell", f"Modul {module} auffälligste Zelle", None, None, "mdi:battery-alert"),
+                (f"module_{module}_cell_diag_evidence", f"Modul {module} Zelldiagnostik Evidenzabweichung", "mV", None, "mdi:delta"),
             ])
+            for cell in range(1, 16):
+                sensors.extend([
+                    (f"module_{module}_cell_{cell}_status", f"Modul {module} Zelle {cell} Bewertung", None, None, "mdi:battery-medium"),
+                    (f"module_{module}_cell_{cell}_confidence", f"Modul {module} Zelle {cell} Confidence", None, None, "mdi:check-decagram"),
+                    (f"module_{module}_cell_{cell}_voltage", f"Modul {module} Zelle {cell} Spannung", "mV", None, "mdi:sine-wave"),
+                    (f"module_{module}_cell_{cell}_deviation", f"Modul {module} Zelle {cell} Abweichung", "mV", None, "mdi:delta"),
+                    (f"module_{module}_cell_{cell}_evidence", f"Modul {module} Zelle {cell} Evidenzabweichung", "mV", None, "mdi:chart-bell-curve"),
+                    (f"module_{module}_cell_{cell}_low_deviation", f"Modul {module} Zelle {cell} Tiefbereich Abweichung", "mV", None, "mdi:arrow-collapse-down"),
+                    (f"module_{module}_cell_{cell}_discharge_deviation", f"Modul {module} Zelle {cell} Entladung Abweichung", "mV", None, "mdi:battery-minus"),
+                    (f"module_{module}_cell_{cell}_charge_deviation", f"Modul {module} Zelle {cell} Ladung Abweichung", "mV", None, "mdi:battery-plus"),
+                    (f"module_{module}_cell_{cell}_high_deviation", f"Modul {module} Zelle {cell} Hochbereich Abweichung", "mV", None, "mdi:arrow-collapse-up"),
+                    (f"module_{module}_cell_{cell}_low_lowest", f"Modul {module} Zelle {cell} Tiefbereich Lowest", "%", None, "mdi:arrow-down-bold"),
+                    (f"module_{module}_cell_{cell}_discharge_lowest", f"Modul {module} Zelle {cell} Entladung Lowest", "%", None, "mdi:arrow-down-bold-circle"),
+                    (f"module_{module}_cell_{cell}_low_rank", f"Modul {module} Zelle {cell} Tiefbereich mittlerer Rang", None, None, "mdi:order-numeric-ascending"),
+                    (f"module_{module}_cell_{cell}_discharge_rank", f"Modul {module} Zelle {cell} Entladung mittlerer Rang", None, None, "mdi:order-numeric-ascending"),
+                ])
 
         for object_id, name, unit, device_class, icon in sensors:
             payload = {
@@ -601,8 +646,12 @@ class Mqtt:
         persistent: dict,
         trends: dict[int, dict],
         incident: dict,
+        cell_results: dict[int, dict] | None = None,
+        bms_stat: dict | None = None,
     ) -> None:
         median_soc = statistics.median([m.soc_percent for m in modules]) if modules else 0
+        cell_results = cell_results or {}
+        bms_stat = bms_stat or {}
         assessments = {}
 
         for module in modules:
@@ -624,6 +673,8 @@ class Mqtt:
         self.state("last_update", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
         self.state("incident_active", "on" if incident.get("active") else "off")
         self.state("incident_summary", incident.get("last_summary", "kein Incident"))
+        self.state("bms_soh", bms_stat.get("soh_percent"))
+        self.state("bms_cycles", bms_stat.get("cycles"))
 
         payload_modules = []
         for module in modules:
@@ -639,6 +690,8 @@ class Mqtt:
             "incident": incident,
             "alarms": alarms,
             "modules": payload_modules,
+            "cell_diagnostics": cell_results,
+            "bms_stat": bms_stat,
         }
         self.client.publish(f"{self.prefix}/battery/state", json.dumps(payload, ensure_ascii=False), retain=True)
         self.client.publish(f"{self.prefix}/battery/alarms", json.dumps(alarms, ensure_ascii=False), retain=True)
@@ -665,8 +718,28 @@ class Mqtt:
                 f"{base}_cell_delta": module.delta_mv,
                 f"{base}_mos_temperature": module.mos_temperature_c,
             }
-            for key, value in values.items():
-                self.state(key, value)
+            diag = cell_results.get(module.module, {})
+            values.update({
+                f"{base}_cell_diag_status": diag.get("status"),
+                f"{base}_cell_diag_confidence": diag.get("confidence"),
+                f"{base}_cell_diag_samples": diag.get("sample_count"),
+                f"{base}_cell_diag_worst_cell": diag.get("evidence_worst_cell"),
+                f"{base}_cell_diag_evidence": diag.get("evidence_deviation_mv"),
+            })
+            for key, value in values.items(): self.state(key, value)
+            for cell in diag.get("cells", []):
+                cp=f"{base}_cell_{cell['cell']}"
+                self.state(f"{cp}_status", cell.get("status")); self.state(f"{cp}_confidence", cell.get("confidence"))
+                self.state(f"{cp}_voltage", cell.get("current_voltage_mv")); self.state(f"{cp}_deviation", cell.get("current_deviation_mv")); self.state(f"{cp}_evidence", cell.get("evidence_deviation_mv"))
+                phases = cell.get("phases", {})
+                self.state(f"{cp}_low_deviation", phases.get("low", {}).get("median_deviation_mv"))
+                self.state(f"{cp}_discharge_deviation", phases.get("discharge", {}).get("median_deviation_mv"))
+                self.state(f"{cp}_charge_deviation", phases.get("charge", {}).get("median_deviation_mv"))
+                self.state(f"{cp}_high_deviation", phases.get("high", {}).get("median_deviation_mv"))
+                self.state(f"{cp}_low_lowest", phases.get("low", {}).get("lowest_percent"))
+                self.state(f"{cp}_discharge_lowest", phases.get("discharge", {}).get("lowest_percent"))
+                self.state(f"{cp}_low_rank", phases.get("low", {}).get("mean_rank"))
+                self.state(f"{cp}_discharge_rank", phases.get("discharge", {}).get("mean_rank"))
 
 
 def update_events(status: str, alarms: list[dict], persistent: dict) -> None:
@@ -750,6 +823,10 @@ def main() -> None:
     )
     publisher = Mqtt(options)
     publisher.discovery(int(options["module_count"]))
+    cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
+    last_cell_poll = 0.0
+    last_stat_poll = 0.0
+    bms_stat = {}
 
     try:
         while RUNNING:
@@ -778,7 +855,22 @@ def main() -> None:
                 trends = update_trends(modules, options)
                 incident = update_incident_state(status, alarms, options)
                 log_result(modules, status, alarms, bool(options["detailed_log"]))
-                publisher.publish(modules, status, alarms, options, persistent, trends, incident)
+                now_wall=time.time(); cell_results={}
+                if options["cell_diagnostics_enabled"] and modules and now_wall-last_cell_poll >= int(options["cell_diagnostics_interval_seconds"]):
+                    for module in modules:
+                        try:
+                            rows=parse_bat(console.command(f"bat {module.module}"))
+                            if rows: cell_store.add(CellSample(time.time(),module.module,[r['voltage_mv'] for r in rows],module.current_a,module.soc_percent,[r['temperature_c'] for r in rows],[r['balancing'] for r in rows]))
+                        except Exception as exc: LOG.warning("Zelldiagnostik Modul %s: %s",module.module,exc)
+                    last_cell_poll=now_wall; cell_store.save()
+                if modules and now_wall-last_stat_poll >= int(options["bms_stat_interval_seconds"]):
+                    try:
+                        parsed=parse_stat(console.command("stat"))
+                        if parsed: bms_stat=parsed
+                    except Exception as exc: LOG.warning("BMS stat: %s",exc)
+                    last_stat_poll=now_wall
+                for module in modules: cell_results[module.module]=cell_store.analyse(module.module,options)
+                publisher.publish(modules, status, alarms, options, persistent, trends, incident, cell_results, bms_stat)
 
             except Exception as exc:
                 LOG.exception("Abfrage fehlgeschlagen: %s", exc)
