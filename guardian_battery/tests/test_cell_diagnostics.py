@@ -48,3 +48,11 @@ def test_phase_sample_counts(tmp_path):
  r=s.analyse(1,opts())
  assert r["cells"][4]["phases"]["low"]["samples"]==8
  assert r["cells"][4]["phases"]["discharge"]["samples"]==8
+
+def test_current_module_median(tmp_path):
+ s=CellDiagnosticStore(tmp_path/"median.json")
+ v=[3300,3301,3302,3303,3304,3305,3306,3307,3308,3309,3310,3311,3312,3313,3400]
+ s.add(CellSample(1,1,v,-2,50,[25]*15,[False]*15))
+ r=s.analyse(1,opts())
+ assert r["current_median_mv"] == 3307
+ assert r["cells"][0]["current_deviation_mv"] == -7

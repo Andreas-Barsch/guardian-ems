@@ -79,7 +79,7 @@ class CellDiagnosticStore:
         return a
     def analyse(self,module,o):
         vals=list(self.samples.get(module,()))
-        if not vals: return {'module':module,'status':'LERNPHASE','confidence':'LOW','sample_count':0,'cells':[],'method':'Phase-Resolved Cell Voltage Consistency'}
+        if not vals: return {'module':module,'status':'LERNPHASE','confidence':'LOW','sample_count':0,'current_median_mv':None,'cells':[],'method':'Phase-Resolved Cell Voltage Consistency'}
         n=15; names=('discharge','low','charge','high','rest'); st={p:[{'n':0,'dev':[],'low':0,'high':0,'ranks':[]} for _ in range(n)] for p in names}
         for s in vals:
             v=s['voltages_mv'];
@@ -105,4 +105,4 @@ class CellDiagnosticStore:
             lv=vals[-1]['voltages_mv']; lm=statistics.median(lv)
             cells.append({'cell':j+1,'status':status,'confidence':conf,'current_voltage_mv':lv[j],'current_deviation_mv':round(lv[j]-lm,1),'evidence_deviation_mv':ev,'phases':pp})
         order={'KRITISCH':4,'AUFFÄLLIG':3,'BEOBACHTEN':2,'NORMAL':1,'LERNPHASE':0}; worst=max(cells,key=lambda c:(order[c['status']],c['evidence_deviation_mv']))
-        return {'module':module,'status':worst['status'],'confidence':worst['confidence'],'sample_count':len(vals),'evidence_worst_cell':worst['cell'],'evidence_deviation_mv':worst['evidence_deviation_mv'],'method':'Phase-Resolved Cell Voltage Consistency','cells':cells,'dynamic_resistance':'DATENSAMMLUNG','capacity_consistency':'NICHT BEWERTBAR','rest_drift':'DATENSAMMLUNG','ica_dva':'NICHT BEWERTBAR'}
+        return {'module':module,'status':worst['status'],'confidence':worst['confidence'],'sample_count':len(vals),'current_median_mv':round(statistics.median(vals[-1]['voltages_mv']),1),'evidence_worst_cell':worst['cell'],'evidence_deviation_mv':worst['evidence_deviation_mv'],'method':'Phase-Resolved Cell Voltage Consistency','cells':cells,'dynamic_resistance':'DATENSAMMLUNG','capacity_consistency':'NICHT BEWERTBAR','rest_drift':'DATENSAMMLUNG','ica_dva':'NICHT BEWERTBAR'}

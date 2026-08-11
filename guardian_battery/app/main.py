@@ -544,7 +544,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.3",
+            "sw_version": "0.4.4",
         }
 
         sensors = [
@@ -580,6 +580,7 @@ class Mqtt:
                 (f"module_{module}_min_cell", f"Modul {module} minimale Zellspannung", "V", "voltage", "mdi:arrow-down-bold"),
                 (f"module_{module}_max_cell", f"Modul {module} maximale Zellspannung", "V", "voltage", "mdi:arrow-up-bold"),
                 (f"module_{module}_cell_delta", f"Modul {module} Zellspreizung", "mV", None, "mdi:delta"),
+                (f"module_{module}_cell_median", f"Modul {module} Zellmedian", "mV", None, "mdi:chart-bell-curve"),
                 (f"module_{module}_mos_temperature", f"Modul {module} MOS-Temperatur", "°C", "temperature", "mdi:thermometer-lines"),
                 (f"module_{module}_cell_diag_status", f"Modul {module} Zelldiagnostik Status", None, None, "mdi:battery-search"),
                 (f"module_{module}_cell_diag_confidence", f"Modul {module} Zelldiagnostik Confidence", None, None, "mdi:check-decagram"),
@@ -745,9 +746,11 @@ class Mqtt:
                 f"{base}_min_cell": module.min_cell_v,
                 f"{base}_max_cell": module.max_cell_v,
                 f"{base}_cell_delta": module.delta_mv,
+                f"{base}_cell_median": None,
                 f"{base}_mos_temperature": module.mos_temperature_c,
             }
             diag = cell_results.get(module.module, {})
+            values[f"{base}_cell_median"] = diag.get("current_median_mv")
             values.update({
                 f"{base}_cell_diag_status": diag.get("status"),
                 f"{base}_cell_diag_confidence": diag.get("confidence"),
@@ -756,6 +759,19 @@ class Mqtt:
                 f"{base}_cell_diag_evidence": diag.get("evidence_deviation_mv"),
             })
             for key, value in values.items(): self.state(key, value)
+            if diag.get("current_median_mv") is not None:
+                self.attributes(
+                    f"{base}_cell_median",
+                    {
+                        "label": "Modul-Zellmedian",
+                        "unit": "mV",
+                        "source": "Guardian-Berechnung aus Pylontech bat <module>",
+                        "definition": "Median der 15 gleichzeitig erfassten Zellspannungen des Moduls.",
+                        "interpretation": "Referenzlinie für die relative Zellkonsistenz. Einzelne Zellspannungen werden relativ zu diesem Median betrachtet.",
+                        "method": "Median(V1…V15)",
+                        "soh_hinweis": "Kein SOH-Wert und keine eigenständige Zellgesundheitsbewertung.",
+                    },
+                )
             for cell in diag.get("cells", []):
                 cp=f"{base}_cell_{cell['cell']}"
                 self.state(f"{cp}_status", cell.get("status")); self.state(f"{cp}_confidence", cell.get("confidence"))

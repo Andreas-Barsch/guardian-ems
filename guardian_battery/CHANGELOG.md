@@ -30,3 +30,9 @@
 - Adds mean ranks for charge/high-SOC and Highest shares for charge/high-SOC.
 - Keeps Guardian cell-consistency evidence strictly separate from Pylontech BMS SOH.
 - No retroactive modification of 0.4.2 raw cell history.
+
+## 0.4.4
+- Publishes the current median of all 15 cell voltages for every detected module as a dedicated MQTT/Home Assistant sensor.
+- Adds explainability metadata for the module median; unit is mV.
+- Enables direct overlay of each cell voltage with the module median in Guardian Cell Diagnostics.
+- Does not change historical 0.4.2/0.4.3 raw cell samples or the Cell Voltage Consistency assessment thresholds.
