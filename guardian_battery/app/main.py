@@ -544,7 +544,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.5",
+            "sw_version": "0.4.6",
         }
 
         sensors = [
@@ -678,10 +678,12 @@ class Mqtt:
         incident: dict,
         cell_results: dict[int, dict] | None = None,
         bms_stat: dict | None = None,
+        median_histories: dict[int, list[dict]] | None = None,
     ) -> None:
         median_soc = statistics.median([m.soc_percent for m in modules]) if modules else 0
         cell_results = cell_results or {}
         bms_stat = bms_stat or {}
+        median_histories = median_histories or {}
         assessments = {}
 
         for module in modules:
@@ -770,7 +772,7 @@ class Mqtt:
                         "interpretation": "Referenzlinie für die relative Zellkonsistenz. Einzelne Zellspannungen werden relativ zu diesem Median betrachtet.",
                         "method": "Median(V1…V15)",
                         "soh_hinweis": "Kein SOH-Wert und keine eigenständige Zellgesundheitsbewertung.",
-                        "history_24h": self.cell_store.median_history(module.module, hours=24, bucket_seconds=300),
+                        "history_24h": median_histories.get(module.module, []),
                         "history_24h_unit": "mV",
                         "history_24h_resolution": "5 min buckets; median of module medians",
                         "history_24h_source": "Guardian cell_diagnostics.json; reconstructed retrospectively",
@@ -940,7 +942,19 @@ def main() -> None:
                     except Exception as exc: LOG.warning("BMS stat: %s",exc)
                     last_stat_poll=now_wall
                 for module in modules: cell_results[module.module]=cell_store.analyse(module.module,options)
-                publisher.publish(modules, status, alarms, options, persistent, trends, incident, cell_results, bms_stat)
+                median_histories = {}
+                for module in modules:
+                    try:
+                        median_histories[module.module] = cell_store.median_history(
+                            module.module, hours=24, bucket_seconds=300
+                        )
+                    except Exception as exc:
+                        LOG.warning("Median-Historie Modul %s nicht verfügbar: %s", module.module, exc)
+                        median_histories[module.module] = []
+                publisher.publish(
+                    modules, status, alarms, options, persistent, trends, incident,
+                    cell_results, bms_stat, median_histories
+                )
 
             except Exception as exc:
                 LOG.exception("Abfrage fehlgeschlagen: %s", exc)

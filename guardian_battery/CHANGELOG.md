@@ -43,3 +43,8 @@
 - Publishes reconstructed history as `history_24h` on every module Zellmedian sensor.
 - Does not write into or manipulate the Home Assistant Recorder database.
 - Adds support for a Guardian custom Lovelace card that overlays historical cell voltage with the reconstructed module median.
+
+## 0.4.6
+- Fixes historical median publication: `CellDiagnosticStore` is now used at the main-loop call site instead of being incorrectly dereferenced from the MQTT publisher.
+- Historical median reconstruction is failure-isolated per module; a UI-history failure can no longer abort the battery polling cycle.
+- Keeps the 0.4.5 historical reconstruction method and MQTT attribute format unchanged.
