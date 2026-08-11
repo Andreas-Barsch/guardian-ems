@@ -9,6 +9,55 @@ class CellSample:
     timestamp: float; module: int; voltages_mv: list[int]; current_a: float; soc_percent: float
     temperatures_c: list[float]; balancing: list[bool]
 
+
+DIAGNOSTIC_PARAMETER_META = {
+    "status": {
+        "label": "Bewertung", "unit": "dimensionslos", "source": "Guardian-Berechnung",
+        "definition": "Phasenbezogener diagnostischer Status der Zelle.",
+        "interpretation": "NORMAL / BEOBACHTEN / AUFFÄLLIG / KRITISCH / LERNPHASE. Kein SOH-Prozentwert."
+    },
+    "confidence": {
+        "label": "Confidence", "unit": "dimensionslos", "source": "Guardian-Berechnung",
+        "definition": "Vertrauensstufe aus Zahl geeigneter Messpunkte und Datenabdeckung.",
+        "interpretation": "LOW / MEDIUM / HIGH. Ein auffälliger Status mit LOW Confidence ist ein vorläufiger Hinweis."
+    },
+    "voltage": {
+        "label": "Zellspannung", "unit": "mV", "source": "Pylontech BMS / bat",
+        "definition": "Aktuell gemessene Spannung der Zellgruppe.",
+        "interpretation": "Ein Einzelwert allein erlaubt keine Aussage über Zellgesundheit."
+    },
+    "deviation": {
+        "label": "Abweichung zum Modulmedian", "unit": "mV", "source": "Guardian-Berechnung",
+        "definition": "ΔVᵢ = Vᵢ − Median(V₁…V₁₅).",
+        "interpretation": "Negativ = unter Modulmedian; positiv = über Modulmedian. Bedeutung ist phasenabhängig."
+    },
+    "evidence": {
+        "label": "Evidenzabweichung", "unit": "mV", "source": "Guardian-Berechnung",
+        "definition": "Größte absolute phasenbezogene Medianabweichung aus ausreichend belegten relevanten Phasen.",
+        "interpretation": "Nur zusammen mit Phase, Messpunktzahl, Persistenz und Confidence interpretieren."
+    },
+    "lowest": {
+        "label": "Lowest-Anteil", "unit": "%", "source": "Guardian-Berechnung",
+        "definition": "Anteil gültiger Messpunkte einer Phase, in denen die Zelle die niedrigste Spannung im Modul hatte.",
+        "interpretation": "Ein hoher Anteil allein beweist keinen Defekt; Betrag und Persistenz sind mit zu bewerten."
+    },
+    "highest": {
+        "label": "Highest-Anteil", "unit": "%", "source": "Guardian-Berechnung",
+        "definition": "Anteil gültiger Messpunkte einer Phase, in denen die Zelle die höchste Spannung im Modul hatte.",
+        "interpretation": "Ein hoher Anteil allein beweist keinen Defekt; Betrag und Persistenz sind mit zu bewerten."
+    },
+    "rank": {
+        "label": "Mittlerer Rang", "unit": "Rang von 15", "source": "Guardian-Berechnung",
+        "definition": "Mittlere Spannungsrangposition innerhalb der 15 Zellgruppen; Rang 1 = höchste, Rang 15 = niedrigste Spannung.",
+        "interpretation": "Dimensionsloser relativer Kennwert. Nur zusammen mit Spannungsabweichung und Stichprobengröße bewerten."
+    },
+    "samples": {
+        "label": "Gültige Messpunkte", "unit": "Messpunkte", "source": "Guardian-Berechnung",
+        "definition": "Anzahl der Messpunkte, die der jeweiligen Betriebsphase zugeordnet wurden.",
+        "interpretation": "Kleine Stichproben reduzieren die Aussagekraft und damit die Confidence."
+    }
+}
+
 class CellDiagnosticStore:
     def __init__(self, path: Path, max_samples_per_module: int = 8640):
         self.path=path; self.max_samples=max_samples_per_module

@@ -21,3 +21,12 @@
 - Adds phase-resolved low/discharge/charge/high deviations per cell.
 - Adds Lowest shares and mean ranks for low-SOC/discharge evidence.
 - Keeps Pylontech BMS SOH separate from Guardian cell consistency assessment.
+
+## 0.4.3
+- Explainable Diagnostics UI foundation.
+- Every new diagnostic numeric entity has an explicit unit or a clear dimensionless/rank meaning.
+- MQTT diagnostic entities publish Home Assistant attributes with definition, source, unit, method, phase and interpretation limits.
+- Adds valid sample counts for low-SOC, discharge, charge and high-SOC phases.
+- Adds mean ranks for charge/high-SOC and Highest shares for charge/high-SOC.
+- Keeps Guardian cell-consistency evidence strictly separate from Pylontech BMS SOH.
+- No retroactive modification of 0.4.2 raw cell history.

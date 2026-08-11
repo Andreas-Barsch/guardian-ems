@@ -32,3 +32,19 @@ def test_each_cell(tmp_path):
  for n in range(25):
   v=[3330]*15; v[1]=3295; s.add(CellSample(n,1,v,-2,25,[26]*15,[False]*15))
  r=s.analyse(1,opts()); assert len(r['cells'])==15; assert r['cells'][1]['status']=='AUFFÄLLIG'; assert r['cells'][1]['confidence']=='HIGH'; assert r['evidence_worst_cell']==2
+
+def test_explainability_metadata():
+ from cell_diagnostics import DIAGNOSTIC_PARAMETER_META
+ assert DIAGNOSTIC_PARAMETER_META["deviation"]["unit"]=="mV"
+ assert "Median" in DIAGNOSTIC_PARAMETER_META["deviation"]["definition"]
+ assert DIAGNOSTIC_PARAMETER_META["rank"]["unit"]=="Rang von 15"
+ assert DIAGNOSTIC_PARAMETER_META["confidence"]["unit"]=="dimensionslos"
+
+def test_phase_sample_counts(tmp_path):
+ s=CellDiagnosticStore(tmp_path/"y.json")
+ for n in range(8):
+  v=[3330]*15; v[4]=3327
+  s.add(CellSample(n,1,v,-2,25,[26]*15,[False]*15))
+ r=s.analyse(1,opts())
+ assert r["cells"][4]["phases"]["low"]["samples"]==8
+ assert r["cells"][4]["phases"]["discharge"]["samples"]==8

@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-from cell_diagnostics import CellDiagnosticStore, CellSample
+from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
 
 import paho.mqtt.client as mqtt
 import serial
@@ -544,7 +544,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.2",
+            "sw_version": "0.4.3",
         }
 
         sensors = [
@@ -602,6 +602,14 @@ class Mqtt:
                     (f"module_{module}_cell_{cell}_discharge_lowest", f"Modul {module} Zelle {cell} Entladung Lowest", "%", None, "mdi:arrow-down-bold-circle"),
                     (f"module_{module}_cell_{cell}_low_rank", f"Modul {module} Zelle {cell} Tiefbereich mittlerer Rang", None, None, "mdi:order-numeric-ascending"),
                     (f"module_{module}_cell_{cell}_discharge_rank", f"Modul {module} Zelle {cell} Entladung mittlerer Rang", None, None, "mdi:order-numeric-ascending"),
+                    (f"module_{module}_cell_{cell}_charge_rank", f"Modul {module} Zelle {cell} Ladung mittlerer Rang", None, None, "mdi:order-numeric-ascending"),
+                    (f"module_{module}_cell_{cell}_high_rank", f"Modul {module} Zelle {cell} Hochbereich mittlerer Rang", None, None, "mdi:order-numeric-ascending"),
+                    (f"module_{module}_cell_{cell}_charge_highest", f"Modul {module} Zelle {cell} Ladung Highest", "%", None, "mdi:arrow-up-bold-circle"),
+                    (f"module_{module}_cell_{cell}_high_highest", f"Modul {module} Zelle {cell} Hochbereich Highest", "%", None, "mdi:arrow-up-bold"),
+                    (f"module_{module}_cell_{cell}_low_samples", f"Modul {module} Zelle {cell} Tiefbereich Messpunkte", "Messpunkte", None, "mdi:counter"),
+                    (f"module_{module}_cell_{cell}_discharge_samples", f"Modul {module} Zelle {cell} Entladung Messpunkte", "Messpunkte", None, "mdi:counter"),
+                    (f"module_{module}_cell_{cell}_charge_samples", f"Modul {module} Zelle {cell} Ladung Messpunkte", "Messpunkte", None, "mdi:counter"),
+                    (f"module_{module}_cell_{cell}_high_samples", f"Modul {module} Zelle {cell} Hochbereich Messpunkte", "Messpunkte", None, "mdi:counter"),
                 ])
 
         for object_id, name, unit, device_class, icon in sensors:
@@ -612,6 +620,7 @@ class Mqtt:
                 "availability_topic": f"{self.prefix}/battery/availability",
                 "device": device,
                 "icon": icon,
+                "json_attributes_topic": f"{self.prefix}/battery/sensor/{object_id}/attributes",
             }
             if unit:
                 payload["unit_of_measurement"] = unit
@@ -636,6 +645,26 @@ class Mqtt:
             str(value),
             retain=True,
         )
+
+    def attributes(self, name: str, attributes: dict) -> None:
+        self.client.publish(
+            f"{self.prefix}/battery/sensor/{name}/attributes",
+            json.dumps(attributes, ensure_ascii=False),
+            retain=True,
+        )
+
+    @staticmethod
+    def _diag_meta(metric: str, phase: str | None = None) -> dict:
+        meta = dict(DIAGNOSTIC_PARAMETER_META.get(metric, {}))
+        if phase:
+            phase_labels = {
+                "low": "Tiefbereich", "discharge": "Entladung",
+                "charge": "Ladung", "high": "Hochbereich", "rest": "Ruhe"
+            }
+            meta["betriebsphase"] = phase_labels.get(phase, phase)
+        meta["method"] = "Phase-Resolved Cell Voltage Consistency"
+        meta["soh_hinweis"] = "Guardian-Zellkonsistenzdiagnostik; nicht mit Pylontech BMS SOH verrechnen."
+        return meta
 
     def publish(
         self,
@@ -740,6 +769,27 @@ class Mqtt:
                 self.state(f"{cp}_discharge_lowest", phases.get("discharge", {}).get("lowest_percent"))
                 self.state(f"{cp}_low_rank", phases.get("low", {}).get("mean_rank"))
                 self.state(f"{cp}_discharge_rank", phases.get("discharge", {}).get("mean_rank"))
+                self.state(f"{cp}_charge_rank", phases.get("charge", {}).get("mean_rank"))
+                self.state(f"{cp}_high_rank", phases.get("high", {}).get("mean_rank"))
+                self.state(f"{cp}_charge_highest", phases.get("charge", {}).get("highest_percent"))
+                self.state(f"{cp}_high_highest", phases.get("high", {}).get("highest_percent"))
+                for phase in ("low", "discharge", "charge", "high"):
+                    self.state(f"{cp}_{phase}_samples", phases.get(phase, {}).get("samples"))
+
+                # Explainability metadata appears in Home Assistant's entity "More info" dialog.
+                self.attributes(f"{cp}_status", self._diag_meta("status"))
+                self.attributes(f"{cp}_confidence", self._diag_meta("confidence"))
+                self.attributes(f"{cp}_voltage", self._diag_meta("voltage"))
+                self.attributes(f"{cp}_deviation", self._diag_meta("deviation"))
+                self.attributes(f"{cp}_evidence", self._diag_meta("evidence"))
+                for phase in ("low", "discharge", "charge", "high"):
+                    self.attributes(f"{cp}_{phase}_deviation", self._diag_meta("deviation", phase))
+                    self.attributes(f"{cp}_{phase}_rank", self._diag_meta("rank", phase))
+                    self.attributes(f"{cp}_{phase}_samples", self._diag_meta("samples", phase))
+                self.attributes(f"{cp}_low_lowest", self._diag_meta("lowest", "low"))
+                self.attributes(f"{cp}_discharge_lowest", self._diag_meta("lowest", "discharge"))
+                self.attributes(f"{cp}_charge_highest", self._diag_meta("highest", "charge"))
+                self.attributes(f"{cp}_high_highest", self._diag_meta("highest", "high"))
 
 
 def update_events(status: str, alarms: list[dict], persistent: dict) -> None:
