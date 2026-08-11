@@ -544,7 +544,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.4",
+            "sw_version": "0.4.5",
         }
 
         sensors = [
@@ -770,6 +770,10 @@ class Mqtt:
                         "interpretation": "Referenzlinie für die relative Zellkonsistenz. Einzelne Zellspannungen werden relativ zu diesem Median betrachtet.",
                         "method": "Median(V1…V15)",
                         "soh_hinweis": "Kein SOH-Wert und keine eigenständige Zellgesundheitsbewertung.",
+                        "history_24h": self.cell_store.median_history(module.module, hours=24, bucket_seconds=300),
+                        "history_24h_unit": "mV",
+                        "history_24h_resolution": "5 min buckets; median of module medians",
+                        "history_24h_source": "Guardian cell_diagnostics.json; reconstructed retrospectively",
                     },
                 )
             for cell in diag.get("cells", []):

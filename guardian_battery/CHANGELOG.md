@@ -36,3 +36,10 @@
 - Adds explainability metadata for the module median; unit is mV.
 - Enables direct overlay of each cell voltage with the module median in Guardian Cell Diagnostics.
 - Does not change historical 0.4.2/0.4.3 raw cell samples or the Cell Voltage Consistency assessment thresholds.
+
+## 0.4.5
+- Reconstructs the last 24 hours of module-cell median history from persisted Guardian `cell_diagnostics.json`.
+- Uses 5-minute buckets to keep MQTT attribute size bounded.
+- Publishes reconstructed history as `history_24h` on every module Zellmedian sensor.
+- Does not write into or manipulate the Home Assistant Recorder database.
+- Adds support for a Guardian custom Lovelace card that overlays historical cell voltage with the reconstructed module median.

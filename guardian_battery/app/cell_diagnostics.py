@@ -77,6 +77,30 @@ class CellDiagnosticStore:
         if soc<=o['cell_diag_low_soc_percent'] or mean<=3.22: a.append('low')
         if soc>=o['cell_diag_high_soc_percent'] or mean>=3.38: a.append('high')
         return a
+    def median_history(self, module, hours=24, bucket_seconds=300):
+        """Reconstruct a downsampled module-median series from Guardian's persisted raw cell samples.
+
+        No Home Assistant Recorder data is modified. Each returned point is the median of the
+        15 simultaneously sampled cell voltages. Multiple samples inside one bucket are reduced
+        to the median of their module medians.
+        """
+        vals = list(self.samples.get(module, ()))
+        if not vals:
+            return []
+        cutoff = vals[-1].get("timestamp", 0) - float(hours) * 3600
+        buckets = defaultdict(list)
+        for s in vals:
+            ts = float(s.get("timestamp", 0))
+            v = s.get("voltages_mv") or []
+            if ts < cutoff or len(v) != 15:
+                continue
+            bucket = int(ts // bucket_seconds) * bucket_seconds
+            buckets[bucket].append(float(statistics.median(v)))
+        return [
+            {"t": ts, "mv": round(statistics.median(values), 1)}
+            for ts, values in sorted(buckets.items())
+        ]
+
     def analyse(self,module,o):
         vals=list(self.samples.get(module,()))
         if not vals: return {'module':module,'status':'LERNPHASE','confidence':'LOW','sample_count':0,'current_median_mv':None,'cells':[],'method':'Phase-Resolved Cell Voltage Consistency'}

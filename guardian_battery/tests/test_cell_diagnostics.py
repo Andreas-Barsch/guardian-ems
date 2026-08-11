@@ -56,3 +56,12 @@ def test_current_module_median(tmp_path):
  r=s.analyse(1,opts())
  assert r["current_median_mv"] == 3307
  assert r["cells"][0]["current_deviation_mv"] == -7
+
+def test_reconstructed_median_history(tmp_path):
+ s=CellDiagnosticStore(tmp_path/"median-history.json")
+ for k in range(3):
+  v=[3300+k,3301+k,3302+k,3303+k,3304+k,3305+k,3306+k,3307+k,3308+k,3309+k,3310+k,3311+k,3312+k,3313+k,3400+k]
+  s.add(CellSample(1000+k*301,1,v,-2,50,[25]*15,[False]*15))
+ h=s.median_history(1,hours=24,bucket_seconds=300)
+ assert len(h) >= 2
+ assert h[0]["mv"] >= 3307
