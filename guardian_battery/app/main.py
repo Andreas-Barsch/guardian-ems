@@ -544,7 +544,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.6",
+            "sw_version": "0.4.7",
         }
 
         sensors = [
@@ -560,6 +560,7 @@ class Mqtt:
             ("incident_summary", "Guardian Incident Zusammenfassung", None, None, "mdi:text-box-alert"),
             ("bms_soh", "Pylontech BMS SOH", "%", None, "mdi:battery-heart"),
             ("bms_cycles", "Pylontech BMS Zyklen", None, None, "mdi:counter"),
+            ("cell_diag_config", "Zelldiagnostik Konfiguration", None, None, "mdi:tune-variant"),
         ]
 
         for module in range(1, module_count + 1):
@@ -678,12 +679,10 @@ class Mqtt:
         incident: dict,
         cell_results: dict[int, dict] | None = None,
         bms_stat: dict | None = None,
-        median_histories: dict[int, list[dict]] | None = None,
     ) -> None:
         median_soc = statistics.median([m.soc_percent for m in modules]) if modules else 0
         cell_results = cell_results or {}
         bms_stat = bms_stat or {}
-        median_histories = median_histories or {}
         assessments = {}
 
         for module in modules:
@@ -707,6 +706,41 @@ class Mqtt:
         self.state("incident_summary", incident.get("last_summary", "kein Incident"))
         self.state("bms_soh", bms_stat.get("soh_percent"))
         self.state("bms_cycles", bms_stat.get("cycles"))
+
+        # Aktive Zelldiagnostik-Konfiguration für UI/Explainability veröffentlichen.
+        # Die Werte stammen direkt aus den App-Optionen, damit Dashboard und
+        # Bewertungslogik immer die tatsächlich verwendete Parametrierung zeigen.
+        self.state("cell_diag_config", "aktiv" if options.get("cell_diagnostics_enabled") else "deaktiviert")
+        self.attributes(
+            "cell_diag_config",
+            {
+                "version": "0.4.7",
+                "methode": "Phase-Resolved Cell Voltage Consistency",
+                "aktiv": bool(options.get("cell_diagnostics_enabled")),
+                "intervall_s": options.get("cell_diagnostics_interval_seconds"),
+                "min_phase_samples": options.get("cell_diag_min_phase_samples"),
+                "confidence_medium_samples": options.get("cell_diag_confidence_medium_samples"),
+                "confidence_high_samples": options.get("cell_diag_confidence_high_samples"),
+                "low_soc_percent": options.get("cell_diag_low_soc_percent"),
+                "high_soc_percent": options.get("cell_diag_high_soc_percent"),
+                "charge_current_a": options.get("cell_diag_charge_current_a"),
+                "discharge_current_a": options.get("cell_diag_discharge_current_a"),
+                "discharge_observe_mv": options.get("cell_diag_discharge_observe_deviation_mv", options.get("cell_diag_observe_deviation_mv")),
+                "discharge_warning_mv": options.get("cell_diag_discharge_warning_deviation_mv", options.get("cell_diag_warning_deviation_mv")),
+                "discharge_critical_mv": options.get("cell_diag_discharge_critical_deviation_mv", options.get("cell_diag_critical_deviation_mv")),
+                "low_observe_mv": options.get("cell_diag_low_observe_deviation_mv", options.get("cell_diag_observe_deviation_mv")),
+                "low_warning_mv": options.get("cell_diag_low_warning_deviation_mv", options.get("cell_diag_warning_deviation_mv")),
+                "low_critical_mv": options.get("cell_diag_low_critical_deviation_mv", options.get("cell_diag_critical_deviation_mv")),
+                "charge_observe_mv": options.get("cell_diag_charge_observe_deviation_mv", options.get("cell_diag_observe_deviation_mv")),
+                "charge_warning_mv": options.get("cell_diag_charge_warning_deviation_mv", options.get("cell_diag_warning_deviation_mv")),
+                "charge_critical_mv": options.get("cell_diag_charge_critical_deviation_mv", options.get("cell_diag_critical_deviation_mv")),
+                "high_observe_mv": options.get("cell_diag_high_observe_deviation_mv", options.get("cell_diag_observe_deviation_mv")),
+                "high_warning_mv": options.get("cell_diag_high_warning_deviation_mv", options.get("cell_diag_warning_deviation_mv")),
+                "high_critical_mv": options.get("cell_diag_high_critical_deviation_mv", options.get("cell_diag_critical_deviation_mv")),
+                "rest_statuswirksam": False,
+                "hinweis": "Aktive Guardian-Konfiguration; kein SOH-Wert.",
+            },
+        )
 
         payload_modules = []
         for module in modules:
@@ -772,10 +806,6 @@ class Mqtt:
                         "interpretation": "Referenzlinie für die relative Zellkonsistenz. Einzelne Zellspannungen werden relativ zu diesem Median betrachtet.",
                         "method": "Median(V1…V15)",
                         "soh_hinweis": "Kein SOH-Wert und keine eigenständige Zellgesundheitsbewertung.",
-                        "history_24h": median_histories.get(module.module, []),
-                        "history_24h_unit": "mV",
-                        "history_24h_resolution": "5 min buckets; median of module medians",
-                        "history_24h_source": "Guardian cell_diagnostics.json; reconstructed retrospectively",
                     },
                 )
             for cell in diag.get("cells", []):
@@ -942,18 +972,9 @@ def main() -> None:
                     except Exception as exc: LOG.warning("BMS stat: %s",exc)
                     last_stat_poll=now_wall
                 for module in modules: cell_results[module.module]=cell_store.analyse(module.module,options)
-                median_histories = {}
-                for module in modules:
-                    try:
-                        median_histories[module.module] = cell_store.median_history(
-                            module.module, hours=24, bucket_seconds=300
-                        )
-                    except Exception as exc:
-                        LOG.warning("Median-Historie Modul %s nicht verfügbar: %s", module.module, exc)
-                        median_histories[module.module] = []
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
-                    cell_results, bms_stat, median_histories
+                    cell_results, bms_stat
                 )
 
             except Exception as exc:

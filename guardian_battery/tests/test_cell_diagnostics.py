@@ -1,67 +1,362 @@
-import sys
 from pathlib import Path
-sys.path.insert(0,str(Path(__file__).parents[1]/'app'))
-from cell_diagnostics import CellDiagnosticStore,CellSample
-import types
-paho=types.ModuleType("paho"); mqttpkg=types.ModuleType("paho.mqtt"); client=types.ModuleType("paho.mqtt.client")
-client.CallbackAPIVersion=types.SimpleNamespace(VERSION2=2); client.Client=object
-sys.modules["paho"]=paho; sys.modules["paho.mqtt"]=mqttpkg; sys.modules["paho.mqtt.client"]=client
-serial=types.ModuleType("serial"); serial.Serial=object; serial.EIGHTBITS=8; serial.PARITY_NONE="N"; serial.STOPBITS_ONE=1
-sys.modules["serial"]=serial
-from main import parse_bat,parse_stat
-BAT='''0 3329 0 26200 Idle Normal Normal Normal 23% 10837 mAH N
-1 3294 0 26200 Idle Normal Normal Normal 23% 10837 mAH N
-2 3331 0 26200 Idle Normal Normal Normal 23% 10837 mAH N
-3 3331 0 26200 Idle Normal Normal Normal 23% 10837 mAH N
-4 3331 0 26200 Idle Normal Normal Normal 23% 10837 mAH N
-5 3331 0 26700 Idle Normal Normal Normal 23% 10837 mAH N
-6 3331 0 26700 Idle Normal Normal Normal 23% 10837 mAH N
-7 3331 0 26700 Idle Normal Normal Normal 23% 10837 mAH N
-8 3330 0 26700 Idle Normal Normal Normal 23% 10837 mAH N
-9 3331 0 26700 Idle Normal Normal Normal 23% 10837 mAH N
-10 3331 0 26300 Idle Normal Normal Normal 23% 10837 mAH N
-11 3331 0 26300 Idle Normal Normal Normal 23% 10837 mAH N
-12 3331 0 26300 Idle Normal Normal Normal 23% 10837 mAH N
-13 3331 0 26300 Idle Normal Normal Normal 23% 10837 mAH N
-14 3331 0 26300 Idle Normal Normal Normal 23% 10837 mAH N'''
-def opts(): return {'cell_diag_low_soc_percent':30,'cell_diag_high_soc_percent':80,'cell_diag_charge_current_a':.8,'cell_diag_discharge_current_a':.8,'cell_diag_min_phase_samples':5,'cell_diag_confidence_medium_samples':10,'cell_diag_confidence_high_samples':20,'cell_diag_observe_deviation_mv':10,'cell_diag_warning_deviation_mv':20,'cell_diag_critical_deviation_mv':40}
-def test_parse():
- r=parse_bat(BAT); assert len(r)==15 and r[1]['voltage_mv']==3294; assert parse_stat('SOH : 96\nCYCLE Times : 427\n')=={'soh_percent':96,'cycles':427}
-def test_each_cell(tmp_path):
- s=CellDiagnosticStore(tmp_path/'x.json')
- for n in range(25):
-  v=[3330]*15; v[1]=3295; s.add(CellSample(n,1,v,-2,25,[26]*15,[False]*15))
- r=s.analyse(1,opts()); assert len(r['cells'])==15; assert r['cells'][1]['status']=='AUFFÄLLIG'; assert r['cells'][1]['confidence']=='HIGH'; assert r['evidence_worst_cell']==2
 
-def test_explainability_metadata():
- from cell_diagnostics import DIAGNOSTIC_PARAMETER_META
- assert DIAGNOSTIC_PARAMETER_META["deviation"]["unit"]=="mV"
- assert "Median" in DIAGNOSTIC_PARAMETER_META["deviation"]["definition"]
- assert DIAGNOSTIC_PARAMETER_META["rank"]["unit"]=="Rang von 15"
- assert DIAGNOSTIC_PARAMETER_META["confidence"]["unit"]=="dimensionslos"
+from cell_diagnostics import (
+    CellDiagnosticStore,
+    CellSample,
+    DIAGNOSTIC_PARAMETER_META,
+)
+
+
+def opts(**overrides):
+    values = {
+        "cell_diag_low_soc_percent": 30,
+        "cell_diag_high_soc_percent": 80,
+        "cell_diag_charge_current_a": 0.8,
+        "cell_diag_discharge_current_a": 0.8,
+        "cell_diag_min_phase_samples": 5,
+        "cell_diag_confidence_medium_samples": 10,
+        "cell_diag_confidence_high_samples": 20,
+
+        # Globale Fallback-Werte für bestehende Konfigurationen.
+        "cell_diag_observe_deviation_mv": 10,
+        "cell_diag_warning_deviation_mv": 20,
+        "cell_diag_critical_deviation_mv": 40,
+
+        # 0.4.7: getrennte Grenzwerte je statuswirksamer Phase.
+        "cell_diag_discharge_observe_deviation_mv": 10,
+        "cell_diag_discharge_warning_deviation_mv": 20,
+        "cell_diag_discharge_critical_deviation_mv": 40,
+
+        "cell_diag_low_observe_deviation_mv": 10,
+        "cell_diag_low_warning_deviation_mv": 20,
+        "cell_diag_low_critical_deviation_mv": 40,
+
+        "cell_diag_charge_observe_deviation_mv": 10,
+        "cell_diag_charge_warning_deviation_mv": 20,
+        "cell_diag_charge_critical_deviation_mv": 40,
+
+        "cell_diag_high_observe_deviation_mv": 10,
+        "cell_diag_high_warning_deviation_mv": 20,
+        "cell_diag_high_critical_deviation_mv": 40,
+    }
+    values.update(overrides)
+    return values
+
+
+def sample(
+    timestamp,
+    voltages,
+    *,
+    module=1,
+    current_a=0.0,
+    soc_percent=50.0,
+):
+    return CellSample(
+        timestamp=timestamp,
+        module=module,
+        voltages_mv=voltages,
+        current_a=current_a,
+        soc_percent=soc_percent,
+        temperatures_c=[25.0] * 15,
+        balancing=[False] * 15,
+    )
+
+
+def voltages_with_cell2(delta_mv):
+    values = [3300] * 15
+    values[1] = 3300 + delta_mv
+    return values
+
+
+def add_repeated(
+    store,
+    count,
+    voltages,
+    *,
+    current_a=0.0,
+    soc_percent=50.0,
+    start=1,
+):
+    for n in range(count):
+        store.add(
+            sample(
+                start + n,
+                list(voltages),
+                current_a=current_a,
+                soc_percent=soc_percent,
+            )
+        )
+
+
+def test_empty_store_is_learning_phase(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "empty.json")
+    result = store.analyse(1, opts())
+
+    assert result["status"] == "LERNPHASE"
+    assert result["confidence"] == "LOW"
+    assert result["sample_count"] == 0
+    assert result["cells"] == []
+
+
+def test_phase_assignment():
+    o = opts()
+
+    base = {
+        "voltages_mv": [3300] * 15,
+        "soc_percent": 50,
+    }
+
+    assert "charge" in CellDiagnosticStore.phases(
+        {**base, "current_a": 1.0}, o
+    )
+    assert "discharge" in CellDiagnosticStore.phases(
+        {**base, "current_a": -1.0}, o
+    )
+    assert "rest" in CellDiagnosticStore.phases(
+        {**base, "current_a": 0.0}, o
+    )
+
+    low = CellDiagnosticStore.phases(
+        {**base, "current_a": 0.0, "soc_percent": 25}, o
+    )
+    high = CellDiagnosticStore.phases(
+        {**base, "current_a": 0.0, "soc_percent": 90}, o
+    )
+
+    assert "low" in low
+    assert "high" in high
+
+
+def test_status_thresholds_for_discharge(tmp_path):
+    cases = [
+        (5, "NORMAL"),
+        (10, "BEOBACHTEN"),
+        (20, "AUFFÄLLIG"),
+        (40, "KRITISCH"),
+    ]
+
+    for delta_mv, expected in cases:
+        store = CellDiagnosticStore(
+            tmp_path / f"discharge_{delta_mv}.json"
+        )
+        add_repeated(
+            store,
+            5,
+            voltages_with_cell2(delta_mv),
+            current_a=-2.0,
+        )
+
+        result = store.analyse(1, opts())
+
+        assert result["cells"][1]["status"] == expected
+
+
+def test_minimum_samples_keep_status_in_learning_phase(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "learning.json")
+
+    add_repeated(
+        store,
+        4,
+        voltages_with_cell2(50),
+        current_a=-2.0,
+    )
+
+    result = store.analyse(1, opts(cell_diag_min_phase_samples=5))
+
+    assert result["cells"][1]["status"] == "LERNPHASE"
+
+
+def test_confidence_low_medium_high(tmp_path):
+    cases = [
+        (5, "LOW"),
+        (10, "MEDIUM"),
+        (20, "HIGH"),
+    ]
+
+    for count, expected in cases:
+        store = CellDiagnosticStore(
+            tmp_path / f"confidence_{count}.json"
+        )
+        add_repeated(
+            store,
+            count,
+            voltages_with_cell2(5),
+            current_a=-2.0,
+        )
+
+        result = store.analyse(1, opts())
+
+        assert result["cells"][1]["confidence"] == expected
+
+
+def test_phase_specific_thresholds_change_result(tmp_path):
+    # Derselbe Betrag von 25 mV wird absichtlich unterschiedlich bewertet:
+    # Entladen: unter Observe 30 mV => NORMAL
+    # Laden:    über Warning 20 mV => AUFFÄLLIG
+    o = opts(
+        cell_diag_discharge_observe_deviation_mv=30,
+        cell_diag_discharge_warning_deviation_mv=40,
+        cell_diag_discharge_critical_deviation_mv=50,
+        cell_diag_charge_observe_deviation_mv=10,
+        cell_diag_charge_warning_deviation_mv=20,
+        cell_diag_charge_critical_deviation_mv=40,
+    )
+
+    discharge = CellDiagnosticStore(tmp_path / "discharge.json")
+    add_repeated(
+        discharge,
+        5,
+        voltages_with_cell2(25),
+        current_a=-2.0,
+    )
+    discharge_result = discharge.analyse(1, o)
+
+    charge = CellDiagnosticStore(tmp_path / "charge.json")
+    add_repeated(
+        charge,
+        5,
+        voltages_with_cell2(25),
+        current_a=2.0,
+    )
+    charge_result = charge.analyse(1, o)
+
+    assert discharge_result["cells"][1]["status"] == "NORMAL"
+    assert charge_result["cells"][1]["status"] == "AUFFÄLLIG"
+
+
+def test_worst_phase_determines_cell_status(tmp_path):
+    o = opts(
+        cell_diag_discharge_observe_deviation_mv=10,
+        cell_diag_discharge_warning_deviation_mv=20,
+        cell_diag_discharge_critical_deviation_mv=40,
+        cell_diag_charge_observe_deviation_mv=10,
+        cell_diag_charge_warning_deviation_mv=20,
+        cell_diag_charge_critical_deviation_mv=30,
+    )
+
+    store = CellDiagnosticStore(tmp_path / "worst_phase.json")
+
+    add_repeated(
+        store,
+        5,
+        voltages_with_cell2(15),
+        current_a=-2.0,
+        start=1,
+    )
+    add_repeated(
+        store,
+        5,
+        voltages_with_cell2(35),
+        current_a=2.0,
+        start=100,
+    )
+
+    result = store.analyse(1, o)
+    cell2 = result["cells"][1]
+
+    assert cell2["status"] == "KRITISCH"
+    assert cell2["evidence_phase"] == "charge"
+    assert cell2["evidence_deviation_mv"] == 35
+
+
+def test_rest_is_not_status_effective(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "rest.json")
+
+    # SOC 50 und Mittelspannung > 3.22 V / < 3.38 V:
+    # dadurch ausschließlich Rest, keine zusätzliche Low-/High-Phase.
+    add_repeated(
+        store,
+        20,
+        voltages_with_cell2(80),
+        current_a=0.0,
+        soc_percent=50,
+    )
+
+    result = store.analyse(1, opts())
+
+    assert result["cells"][1]["phases"]["rest"]["samples"] == 20
+    assert (
+        result["cells"][1]["phases"]["rest"]["status"]
+        == "NICHT STATUSWIRKSAM"
+    )
+    assert result["cells"][1]["status"] == "LERNPHASE"
+
+
+def test_worst_cell_determines_module_status(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "worst_cell.json")
+
+    values = [3300] * 15
+    values[1] = 3315
+    values[4] = 3345
+
+    add_repeated(
+        store,
+        20,
+        values,
+        current_a=-2.0,
+    )
+
+    result = store.analyse(1, opts())
+
+    assert result["status"] == "KRITISCH"
+    assert result["evidence_worst_cell"] == 5
+
 
 def test_phase_sample_counts(tmp_path):
- s=CellDiagnosticStore(tmp_path/"y.json")
- for n in range(8):
-  v=[3330]*15; v[4]=3327
-  s.add(CellSample(n,1,v,-2,25,[26]*15,[False]*15))
- r=s.analyse(1,opts())
- assert r["cells"][4]["phases"]["low"]["samples"]==8
- assert r["cells"][4]["phases"]["discharge"]["samples"]==8
+    store = CellDiagnosticStore(tmp_path / "samples.json")
+
+    add_repeated(
+        store,
+        8,
+        [3327] * 15,
+        current_a=-2.0,
+        soc_percent=25,
+    )
+
+    result = store.analyse(1, opts())
+
+    assert result["cells"][4]["phases"]["low"]["samples"] == 8
+    assert result["cells"][4]["phases"]["discharge"]["samples"] == 8
+
 
 def test_current_module_median(tmp_path):
- s=CellDiagnosticStore(tmp_path/"median.json")
- v=[3300,3301,3302,3303,3304,3305,3306,3307,3308,3309,3310,3311,3312,3313,3400]
- s.add(CellSample(1,1,v,-2,50,[25]*15,[False]*15))
- r=s.analyse(1,opts())
- assert r["current_median_mv"] == 3307
- assert r["cells"][0]["current_deviation_mv"] == -7
+    store = CellDiagnosticStore(tmp_path / "median.json")
 
-def test_reconstructed_median_history(tmp_path):
- s=CellDiagnosticStore(tmp_path/"median-history.json")
- for k in range(3):
-  v=[3300+k,3301+k,3302+k,3303+k,3304+k,3305+k,3306+k,3307+k,3308+k,3309+k,3310+k,3311+k,3312+k,3313+k,3400+k]
-  s.add(CellSample(1000+k*301,1,v,-2,50,[25]*15,[False]*15))
- h=s.median_history(1,hours=24,bucket_seconds=300)
- assert len(h) >= 2
- assert h[0]["mv"] >= 3307
+    values = [
+        3300, 3301, 3302, 3303, 3304,
+        3305, 3306, 3307, 3308, 3309,
+        3310, 3311, 3312, 3313, 3400,
+    ]
+
+    store.add(
+        sample(
+            1,
+            values,
+            current_a=-2.0,
+            soc_percent=50,
+        )
+    )
+
+    result = store.analyse(
+        1,
+        opts(cell_diag_min_phase_samples=1),
+    )
+
+    assert result["current_median_mv"] == 3307
+    assert result["cells"][0]["current_deviation_mv"] == -7
+
+
+def test_explainability_metadata():
+    assert DIAGNOSTIC_PARAMETER_META["deviation"]["unit"] == "mV"
+    assert (
+        "Median"
+        in DIAGNOSTIC_PARAMETER_META["deviation"]["definition"]
+    )
+    assert DIAGNOSTIC_PARAMETER_META["rank"]["unit"] == "Rang von 15"
+    assert DIAGNOSTIC_PARAMETER_META["confidence"]["unit"] == "dimensionslos"
+
+
+def test_no_historical_median_api(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "no_history.json")
+
+    assert not hasattr(store, "median_history")

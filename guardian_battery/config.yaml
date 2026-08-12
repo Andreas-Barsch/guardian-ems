@@ -1,17 +1,22 @@
 name: Guardian Battery
-version: "0.4.6"
+version: 0.4.7
 slug: guardian_battery
 description: Pylontech-US2000C-Monitoring mit Health Engine, MQTT und Dashboard-Unterstützung.
+
 arch:
   - aarch64
+
 startup: application
 boot: auto
 init: false
 uart: true
+
 services:
   - mqtt:need
+
 map:
   - share:rw
+
 options:
   serial_port: auto
   baudrate: 115200
@@ -21,60 +26,109 @@ options:
   command_timeout_seconds: 5
   mqtt_topic_prefix: guardian
   publish_discovery: true
+
   warning_cell_delta_mv: 30
   critical_cell_delta_mv: 80
   warning_soc_deviation_pct: 10
   critical_soc_deviation_pct: 30
   missing_module_is_critical: true
+
   raw_log: false
   detailed_log: true
+
   trend_window_minutes: 60
   trend_min_change_mv: 10
   incident_hold_minutes: 30
+
   cell_diagnostics_enabled: true
   cell_diagnostics_interval_seconds: 60
+
   cell_diag_low_soc_percent: 30
   cell_diag_high_soc_percent: 80
   cell_diag_charge_current_a: 0.8
   cell_diag_discharge_current_a: 0.8
+
   cell_diag_min_phase_samples: 30
   cell_diag_confidence_medium_samples: 120
   cell_diag_confidence_high_samples: 600
+
   cell_diag_observe_deviation_mv: 10
   cell_diag_warning_deviation_mv: 20
   cell_diag_critical_deviation_mv: 40
+
   cell_diag_history_max_samples: 8640
   bms_stat_interval_seconds: 3600
+
+  cell_diag_discharge_observe_deviation_mv: 10
+  cell_diag_discharge_warning_deviation_mv: 20
+  cell_diag_discharge_critical_deviation_mv: 40
+
+  cell_diag_low_observe_deviation_mv: 10
+  cell_diag_low_warning_deviation_mv: 20
+  cell_diag_low_critical_deviation_mv: 40
+
+  cell_diag_charge_observe_deviation_mv: 10
+  cell_diag_charge_warning_deviation_mv: 20
+  cell_diag_charge_critical_deviation_mv: 40
+
+  cell_diag_high_observe_deviation_mv: 10
+  cell_diag_high_warning_deviation_mv: 20
+  cell_diag_high_critical_deviation_mv: 40
+
 schema:
   serial_port: str
   baudrate: int
   poll_interval_seconds: int(5,3600)
-  module_count: int(1,16)
+  module_count: int(1,6)
   command: str
   command_timeout_seconds: int(1,30)
   mqtt_topic_prefix: str
   publish_discovery: bool
+
   warning_cell_delta_mv: int(1,1000)
   critical_cell_delta_mv: int(1,1000)
   warning_soc_deviation_pct: int(1,100)
   critical_soc_deviation_pct: int(1,100)
   missing_module_is_critical: bool
+
   raw_log: bool
   detailed_log: bool
+
   trend_window_minutes: int(10,1440)
   trend_min_change_mv: int(1,500)
   incident_hold_minutes: int(1,1440)
+
   cell_diagnostics_enabled: bool
   cell_diagnostics_interval_seconds: int(10,3600)
+
   cell_diag_low_soc_percent: float(0,50)
   cell_diag_high_soc_percent: float(50,100)
   cell_diag_charge_current_a: float(0.1,20)
   cell_diag_discharge_current_a: float(0.1,20)
+
   cell_diag_min_phase_samples: int(5,10000)
   cell_diag_confidence_medium_samples: int(10,100000)
   cell_diag_confidence_high_samples: int(10,100000)
+
   cell_diag_observe_deviation_mv: int(1,100)
   cell_diag_warning_deviation_mv: int(1,200)
   cell_diag_critical_deviation_mv: int(1,500)
+
   cell_diag_history_max_samples: int(100,100000)
   bms_stat_interval_seconds: int(60,86400)
+
+  cell_diag_discharge_observe_deviation_mv: int(1,100)
+  cell_diag_discharge_warning_deviation_mv: int(1,200)
+  cell_diag_discharge_critical_deviation_mv: int(1,500)
+
+  cell_diag_low_observe_deviation_mv: int(1,100)
+  cell_diag_low_warning_deviation_mv: int(1,200)
+  cell_diag_low_critical_deviation_mv: int(1,500)
+
+  cell_diag_charge_observe_deviation_mv: int(1,100)
+  cell_diag_charge_warning_deviation_mv: int(1,200)
+  cell_diag_charge_critical_deviation_mv: int(1,500)
+
+  cell_diag_high_observe_deviation_mv: int(1,100)
+  cell_diag_high_warning_deviation_mv: int(1,200)
+  cell_diag_high_critical_deviation_mv: int(1,500)
