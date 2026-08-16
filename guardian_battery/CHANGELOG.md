@@ -48,3 +48,9 @@
 - Fixes historical median publication: `CellDiagnosticStore` is now used at the main-loop call site instead of being incorrectly dereferenced from the MQTT publisher.
 - Historical median reconstruction is failure-isolated per module; a UI-history failure can no longer abort the battery polling cycle.
 - Keeps the 0.4.5 historical reconstruction method and MQTT attribute format unchanged.
+
+## 0.4.8 - History Foundation and physical cell groups
+- Added append-only daily JSONL cell history with schema versioning and failure isolation.
+- Added physical cell group metadata: G1 cells 1-5, G2 cells 6-10, G3 cells 11-15.
+- Added native Home Assistant section backgrounds for the three physical groups in each module cell overview.
+- Existing 0.4.7 phase-resolved diagnostic thresholds and evaluation remain unchanged.

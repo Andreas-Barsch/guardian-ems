@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
+from cell_history import CellHistoryWriter
 
 import paho.mqtt.client as mqtt
 import serial
@@ -32,6 +33,7 @@ EVENT_FILE = SHARE_DIR / "events.jsonl"
 HISTORY_FILE = SHARE_DIR / "trend_history.json"
 INCIDENT_FILE = SHARE_DIR / "incident_state.json"
 CELL_DIAG_FILE = SHARE_DIR / "cell_diagnostics.json"
+CELL_HISTORY_DIR = SHARE_DIR / "cell_history"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -544,7 +546,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.7",
+            "sw_version": "0.4.8",
         }
 
         sensors = [
@@ -714,7 +716,7 @@ class Mqtt:
         self.attributes(
             "cell_diag_config",
             {
-                "version": "0.4.7",
+                "version": "0.4.8",
                 "methode": "Phase-Resolved Cell Voltage Consistency",
                 "aktiv": bool(options.get("cell_diagnostics_enabled")),
                 "intervall_s": options.get("cell_diagnostics_interval_seconds"),
@@ -829,7 +831,10 @@ class Mqtt:
                     self.state(f"{cp}_{phase}_samples", phases.get(phase, {}).get("samples"))
 
                 # Explainability metadata appears in Home Assistant's entity "More info" dialog.
-                self.attributes(f"{cp}_status", self._diag_meta("status"))
+                status_meta = self._diag_meta("status")
+                status_meta["physical_group"] = ((int(cell["cell"]) - 1) // 5) + 1
+                status_meta["physical_group_cells"] = {1: "1-5", 2: "6-10", 3: "11-15"}[status_meta["physical_group"]]
+                self.attributes(f"{cp}_status", status_meta)
                 self.attributes(f"{cp}_confidence", self._diag_meta("confidence"))
                 self.attributes(f"{cp}_voltage", self._diag_meta("voltage"))
                 self.attributes(f"{cp}_deviation", self._diag_meta("deviation"))
@@ -926,6 +931,7 @@ def main() -> None:
     publisher = Mqtt(options)
     publisher.discovery(int(options["module_count"]))
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
+    cell_history = CellHistoryWriter(CELL_HISTORY_DIR)
     last_cell_poll = 0.0
     last_stat_poll = 0.0
     bms_stat = {}
@@ -962,7 +968,13 @@ def main() -> None:
                     for module in modules:
                         try:
                             rows=parse_bat(console.command(f"bat {module.module}"))
-                            if rows: cell_store.add(CellSample(time.time(),module.module,[r['voltage_mv'] for r in rows],module.current_a,module.soc_percent,[r['temperature_c'] for r in rows],[r['balancing'] for r in rows]))
+                            if rows:
+                                sample = CellSample(time.time(), module.module, [r['voltage_mv'] for r in rows], module.current_a, module.soc_percent, [r['temperature_c'] for r in rows], [r['balancing'] for r in rows])
+                                cell_store.add(sample)
+                                try:
+                                    cell_history.append(sample)
+                                except Exception as history_exc:
+                                    LOG.warning("Cell History Modul %s: %s", module.module, history_exc)
                         except Exception as exc: LOG.warning("Zelldiagnostik Modul %s: %s",module.module,exc)
                     last_cell_poll=now_wall; cell_store.save()
                 if modules and now_wall-last_stat_poll >= int(options["bms_stat_interval_seconds"]):
