@@ -54,3 +54,11 @@
 - Added physical cell group metadata: G1 cells 1-5, G2 cells 6-10, G3 cells 11-15.
 - Added native Home Assistant section backgrounds for the three physical groups in each module cell overview.
 - Existing 0.4.7 phase-resolved diagnostic thresholds and evaluation remain unchanged.
+
+## 0.4.9 - Configuration provenance foundation
+- Adds a central Guardian/diagnostic engine version source for runtime publication.
+- Adds append-only `config_history.jsonl` in `/share/guardian_battery`.
+- Records diagnostically relevant configuration only when the effective parameter set changes.
+- Adds deterministic Config IDs for reproducible future As-was/As-now analysis.
+- Keeps existing schema-1 cell history unchanged and backward compatible.
+- Adds regression tests for configuration provenance.

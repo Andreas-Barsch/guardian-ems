@@ -15,6 +15,8 @@ from typing import Optional
 
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
 from cell_history import CellHistoryWriter
+from config_history import ConfigHistory
+from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
 import serial
@@ -34,6 +36,7 @@ HISTORY_FILE = SHARE_DIR / "trend_history.json"
 INCIDENT_FILE = SHARE_DIR / "incident_state.json"
 CELL_DIAG_FILE = SHARE_DIR / "cell_diagnostics.json"
 CELL_HISTORY_DIR = SHARE_DIR / "cell_history"
+CONFIG_HISTORY_FILE = SHARE_DIR / "config_history.jsonl"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -546,7 +549,7 @@ class Mqtt:
             "name": "Guardian Battery",
             "manufacturer": "Guardian EMS",
             "model": "Pylontech US2000C Stack Monitor",
-            "sw_version": "0.4.8",
+            "sw_version": GUARDIAN_VERSION,
         }
 
         sensors = [
@@ -716,7 +719,8 @@ class Mqtt:
         self.attributes(
             "cell_diag_config",
             {
-                "version": "0.4.8",
+                "version": GUARDIAN_VERSION,
+                "diagnostic_engine_version": DIAGNOSTIC_ENGINE_VERSION,
                 "methode": "Phase-Resolved Cell Voltage Consistency",
                 "aktiv": bool(options.get("cell_diagnostics_enabled")),
                 "intervall_s": options.get("cell_diagnostics_interval_seconds"),
@@ -921,6 +925,13 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
 
     options = load_options()
+    config_history = ConfigHistory(CONFIG_HISTORY_FILE)
+    try:
+        config_record = config_history.record_if_changed(options)
+        if config_record:
+            LOG.info("Diagnostic configuration recorded: %s", config_record["config_id"])
+    except Exception as exc:
+        LOG.warning("Config History: %s", exc)
     persistent = load_persistent_state()
     port = find_port(options["serial_port"])
     console = PylontechConsole(
