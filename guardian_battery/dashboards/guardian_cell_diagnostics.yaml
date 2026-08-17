@@ -31,6 +31,19 @@ views:
     tap_action:
       action: navigate
       navigation_path: /guardian-cell-diagnostics/bewertungslogik
+  - type: button
+    name: Konfiguration
+    icon: mdi:tune-variant
+    show_state: false
+    tap_action:
+      action: navigate
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery
+  - type: markdown
+    title: Konfigurationshinweis
+    content: >-
+      Änderungen werden im Guardian-Konfigurationsmenü vor dem Speichern validiert.
+      Diagnostisch relevante Änderungen erzeugen einen neuen Config-History-Eintrag;
+      historische Rohdaten werden nicht rückwirkend verändert.
   - type: markdown
     title: Module
     content: Tippe auf ein vorhandenes Modul, um die **15-Zellen-Ansicht** zu öffnen.

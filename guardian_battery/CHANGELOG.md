@@ -62,3 +62,13 @@
 - Adds deterministic Config IDs for reproducible future As-was/As-now analysis.
 - Keeps existing schema-1 cell history unchanged and backward compatible.
 - Adds regression tests for configuration provenance.
+
+## 0.4.9 – Dashboard-Konfiguration (finaler Ausbau)
+- Vollständiges, strukturiertes Guardian-Konfigurationsmenü via Home-Assistant-Ingress.
+- Aktuelle 0.4.9-Produktivwerte als unveränderte Standardwerte.
+- Konsequenzhinweise, Wertebereiche, Reset ohne Sofort-Speicherung und explizites Validieren/Übernehmen.
+- Fachliche Cross-Validierung (Warnung/Kritisch, Confidence-Reihenfolge, Phasengrenzen).
+- Persistenz über die echten Supervisor-App-Optionen; keine parallele Konfigurationsquelle.
+- Neustart nach erfolgreicher Übernahme; Config-Provenienz zeichnet diagnostisch relevante Änderungen auf.
+- Modulanzahl 1–6 als Soll-Konfiguration; Auto-Discovery überschreibt den Sollwert nicht.
+- Erweiterte technische Parameter separat gekennzeichnet.

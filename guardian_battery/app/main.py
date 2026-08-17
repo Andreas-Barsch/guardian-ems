@@ -16,6 +16,7 @@ from typing import Optional
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
 from cell_history import CellHistoryWriter
 from config_history import ConfigHistory
+from config_ui import start_config_server
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -925,6 +926,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
 
     options = load_options()
+    config_server = start_config_server()
+    LOG.info("Guardian Konfigurationsmenü auf Port 8099 gestartet")
     config_history = ConfigHistory(CONFIG_HISTORY_FILE)
     try:
         config_record = config_history.record_if_changed(options)

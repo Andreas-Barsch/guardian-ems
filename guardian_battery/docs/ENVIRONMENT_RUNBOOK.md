@@ -258,3 +258,24 @@ Neue bestätigte Eigenheiten oder Fehlversuche werden mit:
 in dieses Dokument aufgenommen.
 
 Vermutungen werden nicht als bestätigte Umgebungsfakten dokumentiert.
+
+## 15. Nachtrag 2026-08-17 – Keine Annahmen zu Testwerkzeugen und Pfaden
+
+### Fehlversuch: Python/Pytest ungeprüft vorausgesetzt
+Es wurde `python3 -m pytest -q` vorgeschlagen, ohne zuvor zu verifizieren, dass dieser Testweg in der konkreten Terminal-&-SSH-Umgebung verfügbar und der vorgesehene Projekt-Testweg ist.
+
+**Regel:** Python-, Pytest-, Pip-, Venv- oder andere Entwicklungswerkzeuge niemals allein aufgrund einer üblichen Linux-/Python-Umgebung voraussetzen. Vor Verwendung muss ihre tatsächliche Verfügbarkeit bzw. der bereits bestätigte Projekt-Testweg geprüft werden.
+
+### Fehlversuch: Nicht vorhandenen Dateipfad vorausgesetzt
+Es wurde `guardian_battery/pyproject.toml` vorausgesetzt. Die Datei existiert im aktuellen Git-Arbeitsbaum nicht.
+
+Tatsächlich verifiziert sind im Projekt unter anderem:
+- `guardian_battery/requirements.txt`
+- `guardian_battery/run.sh`
+- `guardian_battery/tests/test_cell_diagnostics.py`
+- `guardian_battery/tests/test_config_history.py`
+
+**Regel:** Einen konkreten Projektpfad niemals aus einer früheren Paketstruktur, einem anderen Verzeichnis oder einer Annahme ableiten. Vor Verwendung muss seine Existenz im aktuellen Arbeitsbaum verifiziert sein.
+
+### Meta-Regel
+Wenn das Runbook gerade zur Vermeidung wiederholter Umgebungsfehler eingeführt wurde, ist es vor jedem vorgeschlagenen technischen Befehl verbindlich anzuwenden. Ein neuer Befehl darf keine dort dokumentierte Annahme erneut einführen.
