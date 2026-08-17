@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from version import GUARDIAN_VERSION, DIAGNOSTIC_ENGINE_VERSION
 
 OPTIONS_FILE = Path('/data/options.json')
 CONFIG_HISTORY_FILE = Path('/share/guardian_battery/config_history.jsonl')
@@ -149,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self.path.rstrip('/').endswith('/api/config'):
             rec=_last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
-            self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version','0.4.9'),'engine_version':rec.get('diagnostic_engine_version','0.4.9')}); return
+            self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
         self._send(200,_html(),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
