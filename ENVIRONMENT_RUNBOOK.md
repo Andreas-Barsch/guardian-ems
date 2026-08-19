@@ -337,3 +337,47 @@ Für technische Anweisungen in der aktuellen Home-Assistant-Umgebung gelten zus�
 - Befehle und Ausgaben bleiben kurz und screenshot-tauglich; rekursive oder umfangreiche Ausgaben werden vermieden.
 - Benötigt eine Guardian-Funktion Python, wird die dafür vorgesehene Add-on-/Container-Runtime verwendet. Eine Python-Laufzeit des Terminal-&-SSH-Add-ons ist keine Voraussetzung.
 - Änderungen an produktiven bzw. aktuell verwendeten Dateien erfolgen nicht direkt „am offenen Herzen“: Zuerst wird eine neue Datei bzw. ein separater neuer Stand erstellt und geprüft. Erst danach wird der geprüfte Stand kontrolliert an die vorgesehenen Zielorte übernommen.
+
+## 16. Entwicklungsstand 0.4.12 – BMS-/Modul-Info
+
+### 16.1 Verifizierter Entwicklungsstand
+- Ausgangsbasis: Guardian Battery `0.4.11`, Git-HEAD `8db6339`.
+- Git-Arbeitsbaum: `/homeassistant/guardian_ems_git`.
+- 0.4.12-Entwicklungsstand: `app/version.py` und `config.yaml` auf `0.4.12`.
+- Neue Funktion in `app/main.py`: serielles `info <module>` für erkannte Module.
+- Cycle Count / modulbezogener SOH bleibt offen.
+
+### 16.2 Verifizierte Tests
+- Isolierter `parse_info()`-Unit-Test: `5 passed`.
+- Gesamte Regression-Suite einschließlich Info-Test: `26 passed`.
+- Für die vorhandenen Tests auf dem Mac war `PYTHONPATH=app python3 -m pytest -q` erforderlich.
+- Vollständiger Import von `main.py` außerhalb HA zog unnötig Runtime-Abhängigkeiten (`pyserial`, `/share/guardian_battery`) in den Unit-Test; der Parser-Test wurde deshalb isoliert.
+- Softwaretests sollen künftig soweit möglich vor Übergabe in der Modell-Sandbox ausgeführt werden; reale Pylontech-, MQTT-, Supervisor- und HA-Runtime-Tests bleiben auf HA.
+
+### 16.3 Verifizierte `ha apps`-CLI
+`ha apps --help` bestätigt: `changelog`, `info`, `install`, `logs`, `rebuild`, `restart`, `start`, `stats`, `stop`, `uninstall`, `update`.
+
+`ha apps install --help` bestätigt `ha apps install [slug] [flags]`; ein beliebiger lokaler Verzeichnispfad ist keine Installationsquelle.
+
+### 16.4 Fehlversuch: lokaler `/addons`-Teststand
+Am 2026-08-19 wurde ein separater Teststand unter `/homeassistant/addons/guardian_battery_0412_test` mit eigenem Slug versucht.
+
+Verifiziertes Ergebnis:
+- erschien nach App-Store-Refresh nicht als eigene App;
+- keine passende Supervisor-Logmeldung;
+- `ha apps info guardian_battery` meldete, dass die App nicht existiert;
+- Kopieren von 0.4.12 nach `/homeassistant/addons/guardian_battery` plus `ha apps rebuild 3195b09a_guardian_battery` aktualisierte die installierte Repository-App nicht;
+- `ha apps info 3195b09a_guardian_battery` zeigte weiterhin `0.4.11`.
+
+**Regel:** Diesen lokalen `/addons`-Umweg nicht erneut als Test-/Deploymentweg verwenden.
+
+Nach bestandenem Test und Regressionstest gilt:
+`dokumentierter Commit/Release-Kandidat -> GitHub -> kontrollierte Übernahme/Veröffentlichung -> HA-Repository aktualisieren -> 0.4.12 installieren -> Hardware-/Runtime-Verifikation`.
+
+### 16.5 Nächster Schritt
+- Dokumentation mit 0.4.12 synchronisieren.
+- 0.4.12-Commit/Release-Kandidaten erstellen.
+- Branch zu GitHub pushen.
+- `main` kontrolliert mit Rollback-Punkt übernehmen.
+- App-Store über den historisch bestätigten manuellen Refresh aktualisieren.
+- Erst nach tatsächlich bestätigter Installation von 0.4.12 den Pylontech-/MQTT-/HA-Runtime-Test durchführen.

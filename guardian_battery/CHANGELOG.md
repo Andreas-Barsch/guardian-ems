@@ -84,3 +84,12 @@
 - Home-Assistant-Ingress-Panel für Guardian Battery aktiviert.
 - Verifizierter Commit: `8db6339` (`Guardian Battery 0.4.11 enable ingress panel`).
 - Weitere Detailänderungen dieses Commits sind in dieser Dokumentationsbereinigung nicht behauptet, solange sie nicht separat verifiziert wurden.
+
+## 0.4.12 - Pylontech module information
+- Versionsanhebung von Guardian Battery und Diagnostic Engine auf `0.4.12`.
+- Ergänzt `info <module>` über den bestehenden seriellen Guardian-Zugriff für erkannte Pylontech-Module.
+- Ergänzt Hersteller-/Identitäts- und BMS-Metadaten für die modulbezogene Home-Assistant-Info-Darstellung.
+- Cycle Count / modulbezogener SOH ist ausdrücklich nicht Bestandteil dieses Arbeitsschritts.
+- Isolierter `parse_info()`-Test: `5 passed`.
+- Gesamte Regression-Suite einschließlich Info-Test: `26 passed` mit `PYTHONPATH=app`.
+- Hardware-/Home-Assistant-Integrationstest von 0.4.12 steht nach tatsächlicher 0.4.12-Installation noch aus.

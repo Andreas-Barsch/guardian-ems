@@ -359,6 +359,50 @@ def parse_stat(text: str) -> dict:
                 except ValueError: pass
     return out
 
+
+INFO_FIELDS = {
+    "Device address": "device_address",
+    "Manufacturer": "manufacturer",
+    "Device name": "device_name",
+    "Board version": "board_version",
+    "Board": "board",
+    "Main Soft version": "main_soft_version",
+    "Soft version": "soft_version",
+    "Boot version": "boot_version",
+    "Comm version": "comm_version",
+    "Release Date": "release_date",
+    "Barcode": "barcode",
+    "Specification": "specification",
+    "Cell Number": "cell_number",
+    "Max Dischg Curr": "max_discharge_current_ma",
+    "Max Charge Curr": "max_charge_current_ma",
+    "EPPNPort rate": "eppn_port_rate",
+    "Console Port rate": "console_port_rate",
+}
+
+def parse_info(text: str) -> dict:
+    """Parse the key/value fields returned by Pylontech `info <module>`."""
+    out: dict = {}
+    for raw in text.splitlines():
+        if ":" not in raw:
+            continue
+        key, value = (part.strip() for part in raw.split(":", 1))
+        target = INFO_FIELDS.get(key)
+        if not target or not value:
+            continue
+        if target in {
+            "device_address", "cell_number", "max_discharge_current_ma",
+            "max_charge_current_ma", "eppn_port_rate", "console_port_rate",
+        }:
+            try:
+                out[target] = int(value)
+            except ValueError:
+                out[target] = value
+        else:
+            out[target] = value
+    return out
+
+
 def abnormal_states(module: Module) -> list[str]:
     result = []
     for label, value in (
@@ -571,6 +615,7 @@ class Mqtt:
 
         for module in range(1, module_count + 1):
             sensors.extend([
+                (f"module_{module}_info", f"Modul {module} BMS-Info", None, None, "mdi:information-outline"),
                 (f"module_{module}_health_score", f"Modul {module} Health Score", "%", None, "mdi:heart-pulse"),
                 (f"module_{module}_health", f"Modul {module} Gesundheit", None, None, "mdi:shield-check"),
                 (f"module_{module}_health_reason", f"Modul {module} Bewertung", None, None, "mdi:text-box-check"),
@@ -685,10 +730,12 @@ class Mqtt:
         incident: dict,
         cell_results: dict[int, dict] | None = None,
         bms_stat: dict | None = None,
+        module_infos: dict[int, dict] | None = None,
     ) -> None:
         median_soc = statistics.median([m.soc_percent for m in modules]) if modules else 0
         cell_results = cell_results or {}
         bms_stat = bms_stat or {}
+        module_infos = module_infos or {}
         assessments = {}
 
         for module in modules:
@@ -765,6 +812,7 @@ class Mqtt:
             "modules": payload_modules,
             "cell_diagnostics": cell_results,
             "bms_stat": bms_stat,
+            "module_info": module_infos,
         }
         self.client.publish(f"{self.prefix}/battery/state", json.dumps(payload, ensure_ascii=False), retain=True)
         self.client.publish(f"{self.prefix}/battery/alarms", json.dumps(alarms, ensure_ascii=False), retain=True)
@@ -772,6 +820,16 @@ class Mqtt:
         for module in modules:
             assessment = assessments[module.module]
             base = f"module_{module.module}"
+            module_info = module_infos.get(module.module, {})
+            if module_info:
+                info_state = module_info.get("device_name") or module_info.get("manufacturer") or "verfügbar"
+                self.state(f"{base}_info", info_state)
+                info_attributes = dict(module_info)
+                info_attributes["module"] = module.module
+                info_attributes["source"] = f"Pylontech info {module.module}"
+                info_attributes["guardian_version"] = GUARDIAN_VERSION
+                info_attributes["hinweis"] = "Hersteller-/Identitätsinformationen; kein Guardian-SOH und kein Cycle Count."
+                self.attributes(f"{base}_info", info_attributes)
             values = {
                 f"{base}_health_score": assessment["score"],
                 f"{base}_health": assessment["level"],
@@ -948,7 +1006,9 @@ def main() -> None:
     cell_history = CellHistoryWriter(CELL_HISTORY_DIR)
     last_cell_poll = 0.0
     last_stat_poll = 0.0
+    last_info_poll = 0.0
     bms_stat = {}
+    module_infos: dict[int, dict] = {}
 
     try:
         while RUNNING:
@@ -997,10 +1057,24 @@ def main() -> None:
                         if parsed: bms_stat=parsed
                     except Exception as exc: LOG.warning("BMS stat: %s",exc)
                     last_stat_poll=now_wall
+
+                # Hersteller-/Identitätsdaten ändern sich praktisch nicht. Deshalb
+                # werden sie mit dem bereits vorhandenen langsamen BMS-Stat-Intervall
+                # abgefragt und im Speicher zwischengespeichert.
+                if modules and now_wall-last_info_poll >= int(options["bms_stat_interval_seconds"]):
+                    for module in modules:
+                        try:
+                            parsed_info = parse_info(console.command(f"info {module.module}"))
+                            if parsed_info:
+                                module_infos[module.module] = parsed_info
+                        except Exception as exc:
+                            LOG.warning("BMS info Modul %s: %s", module.module, exc)
+                    last_info_poll = now_wall
+
                 for module in modules: cell_results[module.module]=cell_store.analyse(module.module,options)
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
-                    cell_results, bms_stat
+                    cell_results, bms_stat, module_infos
                 )
 
             except Exception as exc:
