@@ -1,0 +1,29 @@
+
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+homeassistant:
+  packages: !include_dir_named packages
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+lovelace:
+  dashboards:
+    guardian-cell-diagnostics:
+      mode: yaml
+      title: Zelldiagnostik
+      icon: mdi:battery-search
+      show_in_sidebar: true
+      filename: dashboards/guardian_cell_diagnostics.yaml
+    guardian-module-information:
+      mode: yaml
+      title: Modul-Informationen
+      icon: mdi:information-outline
+      show_in_sidebar: true
+      filename: dashboards/guardian_module_information.yaml
