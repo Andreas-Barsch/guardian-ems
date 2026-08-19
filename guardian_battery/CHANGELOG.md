@@ -1,5 +1,30 @@
 # Guardian Battery Changelog
 
+## 0.5.0 - Maintenance logbook, timeline and Home Assistant events
+
+- Ergänzt ein eigenständiges Maintenance-Logbuch mit append-only
+  JSONL-Persistenz unter `/share/guardian_battery/maintenance_events.jsonl`.
+- Verwendet stabile `maintenance_event_id`-Werte, lückenlose Revisionen und
+  Optimistic Concurrency; Änderungen erzeugen neue Revisionen.
+- Archiviert und restauriert Einträge ohne Löschen ihrer Historie.
+- Ergänzt Maintenance API und Ingress-UI einschließlich Detailansicht und
+  zentral wiederverwendbaren Maintenance-Deep-Links.
+- Trennt den fachlichen Ereigniszeitpunkt `occurred_at` vom Erfassungszeitpunkt
+  `created_at`; rückdatierte Ereignisse werden historisch korrekt positioniert.
+- Ergänzt eine zentrale Guardian-Timeline und read-only Maintenance-Marker in
+  SOC-, Strom-, Zellspannungs- und Zelltemperatur-History-Ansichten.
+- Ergänzt eine Home-Assistant-MQTT-Event-Entity über MQTT Discovery.
+- Publiziert nur neue manuell erfasste Live-Ereignisse mit höchstens
+  300 Sekunden Abstand zwischen `occurred_at` und `created_at`.
+- Maintenance-Events werden mit `retain=false` gesendet und nach einem
+  Neustart nicht erneut abgespielt.
+- Backfill, Bearbeitung, Archivierung und Wiederherstellung lösen keine
+  MQTT-Maintenance-Nachricht aus.
+- Verändert weder Home-Assistant-Recorder noch bestehende Messhistorien und
+  erzeugt keine künstlichen Sensorwerte.
+- Guardian- und Add-on-Version werden auf `0.5.0` angehoben. Die unveränderte
+  diagnostische Bewertungslogik behält Diagnostic Engine `0.4.12`.
+
 ## 0.4.0
 
 - Trendanalyse für Zellspreizung und SOC

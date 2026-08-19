@@ -5,11 +5,13 @@
 Implementiert sind Maintenance-Datenmodell, append-only JSONL-Persistenz,
 Repository und Service, HTTP-API, Ingress-UI, Deep-Links, Guardian-Timeline
 sowie read-only Maintenance-Overlays für Guardian-eigene Zeitverläufe.
-MQTT-/HA-Events, produktive Migration und Deployment sind weiterhin nicht
-Bestandteil dieses Stands.
+Home-Assistant-MQTT-Event-Discovery und das ausschließlich für neue, aktuelle
+Einträge verwendete Live-Signal sind ebenfalls implementiert. Produktives
+Deployment und reale Abnahme sind weiterhin nicht Bestandteil dieses Stands.
 
-Die Guardian- und Diagnostic-Engine-Version bleiben in diesem Schritt
-unverändert bei `0.4.12`.
+Für den Release wird Guardian auf `0.5.0` angehoben. Die diagnostische
+Bewertungslogik bleibt unverändert; ihre Diagnostic-Engine-Version bleibt
+deshalb `0.4.12`.
 
 ## Persistenzgrenze
 

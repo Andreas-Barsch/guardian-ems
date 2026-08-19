@@ -1,6 +1,6 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-08-17
+Stand: 2026-08-19
 
 ## Zweck
 
@@ -32,7 +32,13 @@ Dieses Dokument hält bestätigte Eigenschaften, Ausnahmen, Fehlversuche und Arb
 - App-Name: `Guardian Battery`
 - App-Slug: `guardian_battery`
 - Installierte App-ID: `3195b09a_guardian_battery`
-- Aktueller Release-/Entwicklungsstand in dieser Arbeitsphase: `0.4.9`
+- Aktueller Release-Vorbereitungsstand: Guardian/Add-on `0.5.0`, Diagnostic
+  Engine unverändert `0.4.12`.
+- Entwicklungscheckpoint vor der Release-Vorbereitung: `54ca42a`
+  (`Add Home Assistant maintenance event integration`).
+- Auf dem HA-System real verifizierte vorherige Produktions- und
+  Rollback-Basis: `f37b6df` (`Document Guardian 0.4.12 Codex development
+  baseline`).
 - 0.4.9-Foundation-Commit: `e0377a6`
 - 0.4.8-Rollback-/Ausgangspunkt: `86adccb`
 - GitHub-Repository: `Andreas-Barsch/guardian-ems`
@@ -42,10 +48,10 @@ Dieses Dokument hält bestätigte Eigenschaften, Ausnahmen, Fehlversuche und Arb
 ## 3. Relevante Pfade und ihre Rollen
 
 ### Git-Arbeitsbaum
-`/homeassistant/guardian_ems_048_git`
+`/homeassistant/guardian_ems_git`
 
 Guardian-Quellbaum darin:
-`/homeassistant/guardian_ems_048_git/guardian_battery`
+`/homeassistant/guardian_ems_git/guardian_battery`
 
 ### Installierter/lokaler Add-on-Quellpfad
 `/homeassistant/addons/guardian_battery`
@@ -63,6 +69,14 @@ Bestätigte Dateien/Verzeichnisse:
 - `incident_state.json`
 - `trend_history.json`
 - seit 0.4.9: `config_history.jsonl`
+
+Ab Guardian 0.5.0 zusätzlich, erstmals beim ersten Maintenance-Schreibvorgang:
+- `maintenance_events.jsonl` – append-only Maintenance-Revisionen
+- `maintenance_events.jsonl.lock` – separate Sperrdatei für atomare
+  Read-Check-Append-Operationen
+
+Beide Dateien dürfen vor dem Deployment nicht künstlich angelegt und bei
+Deployment oder Rollback weder gelöscht noch verändert werden.
 
 Diese Daten dürfen bei Source-/Deployment-Arbeiten nicht überschrieben oder gelöscht werden.
 
@@ -259,7 +273,96 @@ in dieses Dokument aufgenommen.
 
 Vermutungen werden nicht als bestätigte Umgebungsfakten dokumentiert.
 
-## 15. Nachtrag 2026-08-17 – Keine Annahmen zu Testwerkzeugen und Pfaden
+## 15. Release 0.5.0 – realer Maintenance-Preflight vom 2026-08-19
+
+### Produktions- und Rollback-Basis
+
+- Produktiver Git-Checkout: `/homeassistant/guardian_ems_git`
+- Remote: `https://github.com/Andreas-Barsch/guardian-ems.git`
+- Vorherige produktive Version: Guardian, Add-on und Diagnostic Engine
+  `0.4.12`
+- Verifizierter sauberer HEAD: `f37b6df`
+- Installierter Add-on-Pfad: `/homeassistant/addons/guardian_battery`
+- Entwicklungscheckpoint für Maintenance und HA-Events: `54ca42a`
+
+Der rekursive Vergleich von installiertem Add-on und produktivem Git-Checkout
+ergab keine Codeabweichung. In der installierten Kopie fehlte lediglich der
+neuere dokumentarische 0.4.12-Abschnitt aus `CHANGELOG.md`. Diese Abweichung
+ist kein Release-Blocker.
+
+### Persistenz, Rechte und Migration
+
+`/share/guardian_battery` wurde als `root:root`, Modus `755`, bestätigt.
+Reguläre Runtime-Dateien sind überwiegend `root:root`, Modus `644`; das
+Verzeichnis `cell_history` hat Modus `755`. Guardian 0.4.12 schreibt dort
+bereits erfolgreich. Der Prozess war aus dem Terminal-&-SSH-Container nicht
+per `ps` sichtbar; daraus wird keine Aussage über seinen Benutzer abgeleitet.
+Der reale Schreib- und Rechtestest für die neuen Maintenance-Dateien erfolgt
+erst in der Abnahme nach Installation von 0.5.0.
+
+Die read-only Legacy-Inventur in Runtime-, Git-, Add-on- und separatem
+Testbereich ergab für `maintenance`, `wartung`, `logbook`, `logbuch` und
+`service` keine Treffer. `events.jsonl`, `cell_history/`,
+`config_history.jsonl`, HA Recorder und Sensorhistorien sind keine
+Maintenance-Quellen. **Keine Maintenance-Migration erforderlich.**
+
+### Backup und Restore
+
+Vor jedem 0.5.0-Deployment sind zwei Sicherungen verbindlich:
+
+1. Ein HA-Backup mit der auf dem Zielsystem vorhandenen `ha backups new`-CLI.
+   Die verwendeten Optionen, das fertige Archiv und die tatsächliche Aufnahme
+   der erforderlichen Guardian-Daten müssen vor dem Update verifiziert werden;
+   `/share` darf nicht stillschweigend als enthalten vorausgesetzt werden.
+2. Ein explizites Guardian-Datenbackup außerhalb des Quellverzeichnisses:
+
+   `tar -czf /backup/guardian_battery-pre-0.5.0-YYYYMMDD-HHMMSS.tar.gz -C /share guardian_battery`
+
+   Anschließend sind Prüfsumme und Lesbarkeit zu prüfen:
+
+   `sha256sum /backup/guardian_battery-pre-0.5.0-YYYYMMDD-HHMMSS.tar.gz`
+
+   `tar -tzf /backup/guardian_battery-pre-0.5.0-YYYYMMDD-HHMMSS.tar.gz`
+
+`/backup`, `/bin/tar`, `/usr/bin/sha256sum` und gzip-Unterstützung durch
+`tar -z` wurden auf dem Zielsystem bestätigt. Beim Restore ist das gesamte
+Guardian-Datenverzeichnis konsistent wiederherzustellen. Ein Code-Rollback
+auf `f37b6df` darf eine inzwischen vorhandene Maintenance-JSONL oder deren
+Lock-Datei nicht löschen oder verändern.
+
+### MQTT Maintenance Event Entity
+
+- Topic-Präfix: `guardian`
+- Availability: `guardian/battery/availability` (`online`/`offline`, retained)
+- Event Topic: `guardian/battery/event/maintenance`
+- Discovery: Home-Assistant-MQTT-Event-Entity am Guardian-Gerät
+- Live-Regel: ausschließlich neue manuelle Revision-1-Einträge mit
+  `0 <= created_at - occurred_at <= 300 Sekunden`
+- Maintenance Event: `retain=false`
+- Kein Replay nach Guardian- oder Home-Assistant-Neustart
+- Kein Publish bei Backfill älter als 300 Sekunden, Bearbeitung,
+  Archivierung oder Wiederherstellung
+
+Die Event Entity, Gerätezuordnung und das reale Live-Verhalten sind erst nach
+Installation von 0.5.0 abzunehmen.
+
+### Tatsächlicher Deploymentweg
+
+1. Release-Branch erstellen, Änderungen prüfen und committen.
+2. Release-Branch nach ausdrücklicher Freigabe zu GitHub pushen.
+3. `main` kontrolliert per Fast-forward übernehmen und erst nach Prüfung
+   pushen; `f37b6df` bleibt dokumentierter 0.4.12-Rollback-Punkt.
+4. Im Home-Assistant-App-Store manuell **Nach Updates suchen/Neu laden**
+   ausführen.
+5. Prüfen, dass Store und App-Info tatsächlich `0.5.0` erkennen.
+6. Update über die vorhandene App-/Add-on-Installation ausführen.
+7. App neu starten und den Release-Abnahmeplan vollständig durchführen.
+
+`ha apps reload` und `ha supervisor reload` haben die neue Repository-Version
+historisch nicht zuverlässig erkannt und gelten für diese Installation nicht
+als bewiesener Ersatz für den manuellen Store-Refresh.
+
+## 16. Nachtrag 2026-08-17 – Keine Annahmen zu Testwerkzeugen und Pfaden
 
 ### Fehlversuch: Python/Pytest ungeprüft vorausgesetzt
 Es wurde `python3 -m pytest -q` vorgeschlagen, ohne zuvor zu verifizieren, dass dieser Testweg in der konkreten Terminal-&-SSH-Umgebung verfügbar und der vorgesehene Projekt-Testweg ist.
