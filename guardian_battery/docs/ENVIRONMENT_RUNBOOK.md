@@ -32,7 +32,7 @@ Dieses Dokument hält bestätigte Eigenschaften, Ausnahmen, Fehlversuche und Arb
 - App-Name: `Guardian Battery`
 - App-Slug: `guardian_battery`
 - Installierte App-ID: `3195b09a_guardian_battery`
-- Aktueller Release-Vorbereitungsstand: Guardian/Add-on `0.5.0`, Diagnostic
+- Aktueller Patch-Release-Vorbereitungsstand: Guardian/Add-on `0.5.1`, Diagnostic
   Engine unverändert `0.4.12`.
 - Entwicklungscheckpoint vor der Release-Vorbereitung: `54ca42a`
   (`Add Home Assistant maintenance event integration`).
@@ -274,6 +274,21 @@ in dieses Dokument aufgenommen.
 Vermutungen werden nicht als bestätigte Umgebungsfakten dokumentiert.
 
 ## 15. Release 0.5.0 – realer Maintenance-Preflight vom 2026-08-19
+
+### Patch-Release 0.5.1
+
+Guardian/Add-on 0.5.1 paketiert ausschließlich das unter `6144cfa`
+(`Refine maintenance identity and history UI`) funktional und visuell
+abgenommene Korrekturpaket. Produktive Ausgangsbasis ist 0.5.0; der
+Versionsbump stellt den regulären Home-Assistant-Updatepfad bereit, der bei
+unveränderter Add-on-Version 0.5.0 nicht angeboten wird. Diagnostic Engine
+bleibt `0.4.12`. Die isolierte Abnahme umfasste 149 Tests sowie Browserprüfungen
+bei 1280x800, 800x900 und 390x844.
+
+Offener, nicht blockierender UX-Punkt: Die 15 fachlich korrekten Zellkurven
+der Modulebene sind ohne individuelle Hervorhebung und Legende bei eng
+beieinanderliegenden Werten schwer zu unterscheiden. Dies wird nicht in 0.5.1
+gelöst und rechtfertigt weder Messwertaggregation noch Glättung.
 
 ### Produktions- und Rollback-Basis
 

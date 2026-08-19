@@ -1,5 +1,21 @@
 # Guardian Battery Changelog
 
+## 0.5.1 - Maintenance identity and history UI patch
+
+- Patch-Release des unter `6144cfa` abgenommenen Korrekturpakets für einen
+  regulären Home-Assistant-Updatepfad von Guardian/Add-on 0.5.0 auf 0.5.1.
+- Maintenance verwendet in der normalen UI Aktiv/Nicht aktiv statt
+  Archivieren/Wiederherstellen; die bestehende append-only Revisionshistorie
+  bleibt ohne Datenmigration erhalten.
+- Stackposition und optionale physische Modulidentität/Seriennummer bleiben
+  getrennt. Unbekannte historische Identität wird nicht rückwirkend geraten.
+- Zellmetriken unterstützen „Alle Zellen / Modulebene“.
+- Überarbeitet responsives Layout und gemeinsame History-Charts mit scharfem
+  SVG-Rendering, lokaler X-Zeitachse, verbesserter Y-Achse, Grid und Tooltip.
+- Maintenance-Marker bleiben eine getrennte Overlay-Schicht.
+- Diagnostic Engine bleibt unverändert `0.4.12`.
+- Phase Engine und Phase Overlay sind nicht Bestandteil von 0.5.1.
+
 ## 0.5.0 - Maintenance logbook, timeline and Home Assistant events
 
 - Ergänzt ein eigenständiges Maintenance-Logbuch mit append-only

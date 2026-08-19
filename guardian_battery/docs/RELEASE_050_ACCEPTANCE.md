@@ -1,9 +1,13 @@
-# Guardian Battery 0.5.0 – Deployment- und Abnahmeplan
+# Guardian Battery 0.5.1 – Patch-Deployment- und Abnahmeplan
 
 ## Geltungsbereich
 
-Dieser Plan gilt für den Release von Guardian/Add-on `0.5.0` bei unveränderter
-Diagnostic Engine `0.4.12`. Er autorisiert kein Deployment. Vor dem Update
+Dieser Plan gilt für den Patch-Release von Guardian/Add-on `0.5.1` auf Basis
+des funktional und visuell abgenommenen Commits `6144cfa` bei unveränderter
+Diagnostic Engine `0.4.12`. Produktive Ausgangsbasis ist Guardian/Add-on
+`0.5.0`. Der Patch-Bump ist erforderlich, weil Home Assistant für einen
+korrigierten Repository-Stand mit unveränderter Add-on-Version 0.5.0 keinen
+regulären Updatepfad anbietet. Dieser Plan autorisiert kein Deployment. Vor dem Update
 sind HA-Backup und separates Guardian-Datenbackup gemäß
 `ENVIRONMENT_RUNBOOK.md` zu erstellen und zu verifizieren.
 
@@ -14,7 +18,7 @@ sind HA-Backup und separates Guardian-Datenbackup gemäß
    übernehmen und den veröffentlichten Commit dokumentieren.
 3. Auf Home Assistant den App-Store manuell über **Nach Updates suchen/Neu
    laden** aktualisieren.
-4. Vor der Installation bestätigen, dass `0.5.0` als neue Version erkannt
+4. Vor der Installation bestätigen, dass `0.5.1` als neue Version erkannt
    wird. Die historisch erfolglosen CLI-Reloads sind kein Ersatz dafür.
 5. Update der bestehenden App `3195b09a_guardian_battery` installieren und
    anschließend neu starten.
@@ -24,7 +28,7 @@ sind HA-Backup und separates Guardian-Datenbackup gemäß
 ## A. Start und Regression
 
 - Add-on startet ohne Fehler.
-- Runtime meldet Guardian `0.5.0` und Diagnostic Engine `0.4.12`.
+- Runtime meldet Guardian `0.5.1` und Diagnostic Engine `0.4.12`.
 - Pylontech-Kommunikation, Polling und erkannte Module bleiben unverändert.
 - Bestehende MQTT-Entities, Availability und Gerätezuordnung bleiben intakt.
 - Vorhandene Runtime-Dateien und Messhistorien sind unverändert vorhanden.
@@ -121,3 +125,12 @@ historische Diagnosen. UI und eine spätere KI verwenden dieselbe Guardian
 Phase Engine und implementieren keine eigene Phasenklassifikation. Die
 Architekturfolge lautet: deterministische Guardian-Berechnung, Explainable UI,
 danach optionale KI-Interpretation und Hypothesenbildung.
+
+## Bereits erfolgte isolierte Korrekturabnahme
+
+Vor dem Versionsbump wurde `6144cfa` mit 149 Tests sowie real im isolierten
+Browser bei `1280x800`, `800x900` und `390x844` abgenommen. Der offene,
+nicht blockierende UX-Punkt bleibt: Alle 15 Zellkurven auf Modulebene sind
+fachlich korrekt, aber ohne individuelle Hervorhebung und Legende bei eng
+beieinanderliegenden Werten schwer auseinanderzuhalten. 0.5.1 führt daraus
+keine Aggregation oder Glättung ein.

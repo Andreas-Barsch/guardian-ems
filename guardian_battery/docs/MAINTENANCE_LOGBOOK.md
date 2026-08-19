@@ -9,7 +9,7 @@ Home-Assistant-MQTT-Event-Discovery und das ausschließlich für neue, aktuelle
 Einträge verwendete Live-Signal sind ebenfalls implementiert. Produktives
 Deployment und reale Abnahme sind weiterhin nicht Bestandteil dieses Stands.
 
-Für den Release wird Guardian auf `0.5.0` angehoben. Die diagnostische
+Für den Patch-Release wird Guardian auf `0.5.1` angehoben. Die diagnostische
 Bewertungslogik bleibt unverändert; ihre Diagnostic-Engine-Version bleibt
 deshalb `0.4.12`.
 
