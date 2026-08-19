@@ -67,3 +67,19 @@ def test_maintenance_api_is_lazy_and_path_is_injectable_for_tests(tmp_path, monk
 
     assert api.service.repository.log.path == target
     assert not target.exists()
+
+
+def test_runtime_live_publisher_is_injected_into_existing_and_future_api(tmp_path, monkeypatch):
+    target = tmp_path / 'maintenance_events.jsonl'
+    publisher = object()
+    monkeypatch.setattr(config_ui, 'DEFAULT_MAINTENANCE_EVENT_FILE', target)
+    monkeypatch.setattr(config_ui, '_MAINTENANCE_API', None)
+    monkeypatch.setattr(config_ui, '_MAINTENANCE_LIVE_PUBLISHER', None)
+
+    config_ui.configure_maintenance_live_publisher(publisher)
+    api = config_ui._get_maintenance_api()
+    assert api.live_publisher is publisher
+
+    replacement = object()
+    config_ui.configure_maintenance_live_publisher(replacement)
+    assert api.live_publisher is replacement

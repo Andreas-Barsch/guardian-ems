@@ -16,7 +16,8 @@ from typing import Optional
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
 from cell_history import CellHistoryWriter
 from config_history import ConfigHistory
-from config_ui import start_config_server
+from config_ui import configure_maintenance_live_publisher, start_config_server
+from maintenance_mqtt import MaintenanceMqttPublisher
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -579,6 +580,7 @@ class Mqtt:
         self.client.connect(host, port, keepalive=60)
         self.client.loop_start()
         self.client.publish(f"{self.prefix}/battery/availability", "online", retain=True)
+        self.maintenance_events = MaintenanceMqttPublisher(self.client, self.prefix)
 
     def close(self) -> None:
         self.client.publish(f"{self.prefix}/battery/availability", "offline", retain=True)
@@ -596,6 +598,8 @@ class Mqtt:
             "model": "Pylontech US2000C Stack Monitor",
             "sw_version": GUARDIAN_VERSION,
         }
+
+        self.maintenance_events.discovery(device)
 
         sensors = [
             ("stack_status", "Guardian Batteriestatus", None, None, "mdi:shield-battery"),
@@ -1002,6 +1006,7 @@ def main() -> None:
     )
     publisher = Mqtt(options)
     publisher.discovery(int(options["module_count"]))
+    configure_maintenance_live_publisher(publisher.maintenance_events)
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
     cell_history = CellHistoryWriter(CELL_HISTORY_DIR)
     last_cell_poll = 0.0

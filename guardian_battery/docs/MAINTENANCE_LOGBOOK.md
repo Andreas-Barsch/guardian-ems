@@ -526,3 +526,86 @@ zusätzliche Event-Kopie erforderlich.
 Freitexte werden über `textContent` dargestellt. Die Chart-UI verwendet kein
 `innerHTML`. Marker liefern ausschließlich zeitlichen Kontext; aus der Lage
 vor oder nach einer Messwertänderung wird keine Kausalität abgeleitet.
+
+## MQTT-/Home-Assistant-Live-Event
+
+Die Guardian-History, das Maintenance-Logbuch, die Timeline und die Overlays
+bleiben die vollständige historische Wahrheit. MQTT ergänzt ausschließlich
+eine vergängliche Live-Signalisierung für Home Assistant. Die Empfangszeit
+eines MQTT-Payloads ist nicht der fachliche Ereigniszeitpunkt; `occurred_at`
+und `created_at` werden deshalb getrennt als Eventattribute übertragen.
+
+### Konservative Live-Regel
+
+Ein Event wird nur dann live publiziert, wenn alle Bedingungen gelten:
+
+- erste Revision (`revision == 1`)
+- manuelle Quelle (`source.kind == manual`)
+- weder bearbeitet noch archiviert
+- `created_at` liegt zwischen 0 und einschließlich 300 Sekunden nach
+  `occurred_at`
+
+Die zentral definierte Toleranz beträgt damit fünf Minuten. Ein zukünftiger
+Zeitpunkt sowie ein um mehr als fünf Minuten rückdatierter Eintrag gelten
+nicht als Live-Event. Backfill, Legacy-Import, Reload vorhandener JSONL-Daten,
+Guardian-/HA-Neustart, PATCH, Archivierung und Restore publizieren ebenfalls
+nichts. Unabhängig davon bleiben alle diese Events historisch nach
+`occurred_at` sichtbar.
+
+### Home-Assistant MQTT Event Entity
+
+Guardian verwendet eine echte stateless MQTT Event Entity und keinen Fake-
+Sensor. Die retained Discovery-Konfiguration wird im bestehenden
+`Mqtt.discovery()`-Ablauf veröffentlicht:
+
+```text
+homeassistant/event/guardian_battery/maintenance/config
+```
+
+Sie definiert den einzigen stabilen `event_type` `maintenance`. Die
+Maintenance-Kategorie bleibt ein separates Payloadattribut, damit Kategorien
+nicht unkontrolliert die HA-Eventtyp-Taxonomie erweitern. Discovery selbst
+löst kein Event aus.
+
+Das Live-Topic lautet:
+
+```text
+<mqtt_topic_prefix>/battery/event/maintenance
+```
+
+Der kompakte JSON-Payload enthält:
+
+- `event_type: maintenance`
+- `maintenance_event_id`
+- `category`
+- `title`
+- `occurred_at`
+- `created_at`
+- `affected_system`
+- `revision`
+- optional `module_number` und `cell_number`
+- `guardian_version`
+- `deep_link`
+
+Der Deep-Link ist der vorhandene zentrale relative Guardian-Zielpfad
+`maintenance?event_id=...`. Ein absoluter HA-Ingress-Link wird nicht
+transportiert, weil dessen dynamischer Session-/Prefix-Anteil dem MQTT-
+Publisher nicht zuverlässig bekannt ist.
+
+### Retain und Ausfallverhalten
+
+Der Discovery-Payload folgt der bestehenden Guardian-Konvention und wird mit
+`retain=true` publiziert. Der eigentliche Maintenance-Event-Payload verwendet
+verbindlich `retain=false`; später verbundene Clients erhalten daher kein
+altes Ereignis als neu.
+
+Die Create-Reihenfolge ist strikt:
+
+1. Event samt stabiler ID und Revision erfolgreich append-only persistieren.
+2. Live-Regel prüfen.
+3. Gegebenenfalls genau einen MQTT-Publish versuchen.
+
+Eine Exception oder ein MQTT-Fehlercode wird geloggt, ändert aber die bereits
+erfolgreiche HTTP-201-Antwort nicht. Der Datensatz bleibt gespeichert. Es gibt
+keinen Retry und keine persistente Publish-Queue; ein späterer Neustart darf
+das Ereignis deshalb nicht fälschlich erneut als live ausgeben.

@@ -129,8 +129,9 @@ def error_json(code: str, message: str, details: Mapping[str, Any] | None = None
 
 
 class MaintenanceApi:
-    def __init__(self, service: MaintenanceService):
+    def __init__(self, service: MaintenanceService, live_publisher=None):
         self.service = service
+        self.live_publisher = live_publisher
 
     def handle(
         self,
@@ -289,6 +290,14 @@ class MaintenanceApi:
                 {"fields": sorted(missing)},
             )
         event = self.service.create(**payload, source={"kind": "manual"})
+        if self.live_publisher is not None:
+            try:
+                self.live_publisher.publish_if_live(event)
+            except Exception:
+                LOG.exception(
+                    "Maintenance event persisted but MQTT live publish failed: %s",
+                    event.maintenance_event_id,
+                )
         return ApiResponse(201, {"event": event_json(event)})
 
     def _update(

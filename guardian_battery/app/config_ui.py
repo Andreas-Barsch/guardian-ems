@@ -35,6 +35,15 @@ _MAINTENANCE_API = None
 _MAINTENANCE_API_LOCK = threading.Lock()
 _TIMELINE_API = None
 _HISTORY_API = None
+_MAINTENANCE_LIVE_PUBLISHER = None
+
+
+def configure_maintenance_live_publisher(publisher):
+    """Attach the runtime MQTT publisher without coupling API tests to MQTT."""
+    global _MAINTENANCE_LIVE_PUBLISHER
+    _MAINTENANCE_LIVE_PUBLISHER = publisher
+    if _MAINTENANCE_API is not None:
+        _MAINTENANCE_API.live_publisher = publisher
 
 
 def _get_maintenance_api():
@@ -45,7 +54,10 @@ def _get_maintenance_api():
             if _MAINTENANCE_API is None:
                 log = MaintenanceEventLog(DEFAULT_MAINTENANCE_EVENT_FILE)
                 repository = MaintenanceRepository(log)
-                _MAINTENANCE_API = MaintenanceApi(MaintenanceService(repository))
+                _MAINTENANCE_API = MaintenanceApi(
+                    MaintenanceService(repository),
+                    live_publisher=_MAINTENANCE_LIVE_PUBLISHER,
+                )
     return _MAINTENANCE_API
 
 
@@ -302,7 +314,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_maintenance_api(): self._maintenance_request('DELETE'); return
         self._send(404,{'error':'not found'})
 
-def start_config_server(port=8099):
+def start_config_server(port=8099, maintenance_live_publisher=None):
+    configure_maintenance_live_publisher(maintenance_live_publisher)
     server=ThreadingHTTPServer(('0.0.0.0',port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True,name='guardian-config-ui').start()
     return server
