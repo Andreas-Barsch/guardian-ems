@@ -6,14 +6,73 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
+from maintenance_api import (
+    API_ROUTE,
+    MAX_REQUEST_BODY_BYTES,
+    MaintenanceApi,
+    error_json,
+)
+from maintenance_service import MaintenanceRepository, MaintenanceService
+from maintenance_ui import render_maintenance_html
+from timeline import DEFAULT_TECHNICAL_EVENT_FILE, TechnicalEventSource, TimelineService
+from timeline_api import TIMELINE_API_ROUTE, TimelineApi
+from timeline_ui import render_timeline_html
+from event_overlay import EventOverlayAdapter
+from history_api import HISTORY_API_ROUTE, HistoryApi
+from history_series import DEFAULT_CELL_HISTORY_DIR, CellHistorySeries
+from history_ui import render_history_html
 from version import GUARDIAN_VERSION, DIAGNOSTIC_ENGINE_VERSION
 
 OPTIONS_FILE = Path('/data/options.json')
 CONFIG_HISTORY_FILE = Path('/share/guardian_battery/config_history.jsonl')
 SUPERVISOR = 'http://supervisor'
 TOKEN = os.environ.get('SUPERVISOR_TOKEN', '')
+_MAINTENANCE_API = None
+_MAINTENANCE_API_LOCK = threading.Lock()
+_TIMELINE_API = None
+_HISTORY_API = None
+
+
+def _get_maintenance_api():
+    """Create the production service lazily inside the existing ingress app."""
+    global _MAINTENANCE_API
+    if _MAINTENANCE_API is None:
+        with _MAINTENANCE_API_LOCK:
+            if _MAINTENANCE_API is None:
+                log = MaintenanceEventLog(DEFAULT_MAINTENANCE_EVENT_FILE)
+                repository = MaintenanceRepository(log)
+                _MAINTENANCE_API = MaintenanceApi(MaintenanceService(repository))
+    return _MAINTENANCE_API
+
+
+def _get_timeline_api():
+    """Reuse the maintenance service and project the existing technical log."""
+    global _TIMELINE_API
+    maintenance = _get_maintenance_api().service
+    if _TIMELINE_API is None:
+        with _MAINTENANCE_API_LOCK:
+            if _TIMELINE_API is None:
+                _TIMELINE_API = TimelineApi(
+                    TimelineService(maintenance, TechnicalEventSource(DEFAULT_TECHNICAL_EVENT_FILE))
+                )
+    return _TIMELINE_API
+
+
+def _get_history_api():
+    global _HISTORY_API
+    timeline = _get_timeline_api().service
+    if _HISTORY_API is None:
+        with _MAINTENANCE_API_LOCK:
+            if _HISTORY_API is None:
+                _HISTORY_API = HistoryApi(
+                    CellHistorySeries(DEFAULT_CELL_HISTORY_DIR),
+                    EventOverlayAdapter(timeline),
+                )
+    return _HISTORY_API
 
 DEFAULTS = {
  'serial_port':'auto','baudrate':115200,'poll_interval_seconds':10,'module_count':6,'command':'pwr','command_timeout_seconds':5,
@@ -124,10 +183,10 @@ def validate(cfg):
         if not (cfg.get(o,0)<cfg.get(w,0)<cfg.get(c,0)): errors.append(f'{name}: Beobachten < Warnung < Kritisch ist erforderlich.')
     return errors
 
-def _html():
-    return r'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Konfiguration</title>
-<style>:root{color-scheme:light dark;--b:#1976d2;--warn:#ef6c00}body{font:14px system-ui;margin:0;background:var(--primary-background-color,#fafafa);color:var(--primary-text-color,#222)}header{padding:18px 22px;background:#0d47a1;color:white}main{max-width:1100px;margin:auto;padding:16px}.intro,.group{background:var(--card-background-color,#fff);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px #0002}.group h2{margin-top:0}.row{display:grid;grid-template-columns:minmax(240px,1fr) minmax(160px,260px);gap:12px;padding:12px 0;border-top:1px solid #8883}.label{font-weight:650}.meta{font-size:12px;opacity:.72;margin-top:3px}.impact{font-size:12px;margin-top:6px;padding:7px 9px;border-left:3px solid var(--warn);background:#ff980012}input,select{width:100%;box-sizing:border-box;padding:9px;border:1px solid #8888;border-radius:7px;background:transparent;color:inherit}.advanced{border-left:4px solid #777}.actions{position:sticky;bottom:0;background:var(--card-background-color,#fff);padding:12px 16px;border-radius:12px;box-shadow:0 -2px 8px #0002;display:flex;gap:10px;align-items:center}button{padding:10px 16px;border:0;border-radius:8px;cursor:pointer}button.primary{background:var(--b);color:white}.status{margin-left:auto;font-weight:600}.changed{outline:2px solid #ff980088}.sys{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.sys div{padding:8px;background:#8881;border-radius:7px}@media(max-width:650px){.row{grid-template-columns:1fr}.actions{flex-wrap:wrap}.status{width:100%;margin:0}}</style></head>
-<body><header><h1>Guardian Battery · Konfiguration</h1><div>Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern</div></header><main>
+def _html(maintenance_path='maintenance', timeline_path='timeline', history_path='history'):
+    page = r'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Konfiguration</title>
+<style>:root{color-scheme:light dark;--b:#1976d2;--warn:#ef6c00}body{font:14px system-ui;margin:0;background:var(--primary-background-color,#fafafa);color:var(--primary-text-color,#222)}header{padding:18px 22px;background:#0d47a1;color:white}header nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}header nav a{color:white;text-decoration:none;padding:8px 12px;border:1px solid #ffffff66;border-radius:8px}header nav a.active{background:white;color:#0d47a1}main{max-width:1100px;margin:auto;padding:16px}.intro,.group{background:var(--card-background-color,#fff);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px #0002}.group h2{margin-top:0}.row{display:grid;grid-template-columns:minmax(240px,1fr) minmax(160px,260px);gap:12px;padding:12px 0;border-top:1px solid #8883}.label{font-weight:650}.meta{font-size:12px;opacity:.72;margin-top:3px}.impact{font-size:12px;margin-top:6px;padding:7px 9px;border-left:3px solid var(--warn);background:#ff980012}input,select{width:100%;box-sizing:border-box;padding:9px;border:1px solid #8888;border-radius:7px;background:transparent;color:inherit}.advanced{border-left:4px solid #777}.actions{position:sticky;bottom:0;background:var(--card-background-color,#fff);padding:12px 16px;border-radius:12px;box-shadow:0 -2px 8px #0002;display:flex;gap:10px;align-items:center}button{padding:10px 16px;border:0;border-radius:8px;cursor:pointer}button.primary{background:var(--b);color:white}.status{margin-left:auto;font-weight:600}.changed{outline:2px solid #ff980088}.sys{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.sys div{padding:8px;background:#8881;border-radius:7px}@media(max-width:650px){.row{grid-template-columns:1fr}.actions{flex-wrap:wrap}.status{width:100%;margin:0}}</style></head>
+<body><header><h1>Guardian Battery</h1><div>Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern</div><nav><a class="active" href="./">Konfiguration</a><a href="__MAINTENANCE_PATH__">Maintenance-Logbuch</a><a href="__TIMELINE_PATH__">Verlauf</a><a href="__HISTORY_PATH__">Zeitverläufe</a></nav></header><main>
 <div class="intro"><b>Wirkung von Änderungen</b><p>Änderungen verändern die zukünftige Erfassung und/oder Bewertung. Historische Rohdaten werden nicht umgeschrieben. Nach erfolgreichem Übernehmen wird Guardian neu gestartet; diagnostisch relevante Änderungen erzeugen einen neuen Provenienz-Eintrag.</p><div class="sys" id="sys"></div></div>
 <form id="form"></form><div class="actions"><button type="button" onclick="resetDefaults()">Auf Standard zurücksetzen</button><button type="button" onclick="reloadCfg()">Änderungen verwerfen</button><button class="primary" type="button" onclick="save()">Validieren & Übernehmen</button><span class="status" id="status"></span></div></main>
 <script>let model,current={};const esc=s=>String(s).replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -138,22 +197,73 @@ function resetDefaults(){current=structuredClone(model.defaults);render();docume
 function reloadCfg(){current=structuredClone(model.current);render();}
 async function save(){const s=document.getElementById('status');s.textContent='Validierung…';let r=await fetch('api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(current)}),j=await r.json();if(!r.ok){s.textContent='Nicht übernommen: '+(j.errors||[j.error]).join(' | ');return} s.textContent=j.changed?'Übernommen. Guardian startet neu…':'Keine Änderung – nichts gespeichert.';if(j.changed)setTimeout(()=>location.reload(),7000);}
 load().catch(e=>document.getElementById('status').textContent='Fehler: '+e);</script></body></html>'''
+    escaped_maintenance=maintenance_path.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
+    escaped_timeline=timeline_path.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
+    escaped_history=history_path.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
+    return page.replace('__MAINTENANCE_PATH__',escaped_maintenance).replace('__TIMELINE_PATH__',escaped_timeline).replace('__HISTORY_PATH__',escaped_history)
 
 class Handler(BaseHTTPRequestHandler):
     def _ingress_allowed(self):
         return self.client_address[0] == '172.30.32.2'
     def log_message(self,*_): pass
-    def _send(self,code,body,ctype='application/json'):
+    def _send(self,code,body,ctype='application/json',headers=None):
         raw=body.encode() if isinstance(body,str) else json.dumps(body,ensure_ascii=False).encode()
-        self.send_response(code); self.send_header('Content-Type',ctype+'; charset=utf-8'); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        self.send_response(code); self.send_header('Content-Type',ctype+'; charset=utf-8'); self.send_header('Content-Length',str(len(raw)))
+        for key,value in (headers or {}).items(): self.send_header(key,value)
+        self.end_headers(); self.wfile.write(raw)
+    def _is_maintenance_api(self):
+        return API_ROUTE in self.path.split('?',1)[0]
+    def _is_timeline_api(self):
+        return TIMELINE_API_ROUTE in self.path.split('?',1)[0]
+    def _is_history_api(self):
+        return HISTORY_API_ROUTE in self.path.split('?',1)[0]
+    def _ingress_base(self):
+        header=self.headers.get('X-Ingress-Path','').rstrip('/')
+        if header: return header
+        path=urlsplit(self.path).path.rstrip('/')
+        for suffix in ('/maintenance','/timeline','/history'):
+            if path.endswith(suffix): return path[:-len(suffix)]
+        return path
+    def _is_maintenance_ui(self):
+        return urlsplit(self.path).path.rstrip('/').endswith('/maintenance')
+    def _is_timeline_ui(self):
+        return urlsplit(self.path).path.rstrip('/').endswith('/timeline')
+    def _is_history_ui(self):
+        return urlsplit(self.path).path.rstrip('/').endswith('/history')
+    def _maintenance_request(self,method):
+        try: length=int(self.headers.get('Content-Length','0'))
+        except ValueError:
+            self._send(400,error_json('invalid_request','Content-Length must be an integer')); return
+        if length<0:
+            self._send(400,error_json('invalid_request','Content-Length must not be negative')); return
+        if length>MAX_REQUEST_BODY_BYTES:
+            self.close_connection=True
+            self._send(413,error_json('request_too_large',f'Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes')); return
+        body=self.rfile.read(length) if length else b''
+        response=_get_maintenance_api().handle(method,self.path,dict(self.headers.items()),body)
+        self._send(response.status,response.body,headers=response.headers)
     def do_GET(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_history_api():
+            response=_get_history_api().handle('GET',self.path)
+            self._send(response.status,response.body,headers=response.headers); return
+        if self._is_timeline_api():
+            response=_get_timeline_api().handle('GET',self.path)
+            self._send(response.status,response.body,headers=response.headers); return
+        if self._is_maintenance_api(): self._maintenance_request('GET'); return
+        if self._is_timeline_ui():
+            base=self._ingress_base(); self._send(200,render_timeline_html(configuration_path=(base+'/') or '/',maintenance_path=(base+'/maintenance') or '/maintenance',history_path=(base+'/history') or '/history'),'text/html'); return
+        if self._is_history_ui():
+            base=self._ingress_base(); self._send(200,render_history_html(configuration_path=(base+'/') or '/',maintenance_path=(base+'/maintenance') or '/maintenance',timeline_path=(base+'/timeline') or '/timeline'),'text/html'); return
+        if self._is_maintenance_ui():
+            base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/') or '/',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history'),'text/html'); return
         if self.path.rstrip('/').endswith('/api/config'):
             rec=_last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
             self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
-        self._send(200,_html(),'text/html')
+        base=self._ingress_base(); self._send(200,_html((base+'/maintenance') or '/maintenance',(base+'/timeline') or '/timeline',(base+'/history') or '/history'),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_maintenance_api(): self._maintenance_request('POST'); return
         if not self.path.rstrip('/').endswith('/api/config'): self._send(404,{'error':'not found'}); return
         try:
             n=int(self.headers.get('Content-Length','0')); proposed=json.loads(self.rfile.read(n) or b'{}')
@@ -179,6 +289,18 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception: pass
             threading.Thread(target=restart,daemon=True).start()
         except Exception as exc: self._send(500,{'error':str(exc)})
+    def do_PATCH(self):
+        if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_maintenance_api(): self._maintenance_request('PATCH'); return
+        self._send(404,{'error':'not found'})
+    def do_PUT(self):
+        if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_maintenance_api(): self._maintenance_request('PUT'); return
+        self._send(404,{'error':'not found'})
+    def do_DELETE(self):
+        if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_maintenance_api(): self._maintenance_request('DELETE'); return
+        self._send(404,{'error':'not found'})
 
 def start_config_server(port=8099):
     server=ThreadingHTTPServer(('0.0.0.0',port),Handler)
