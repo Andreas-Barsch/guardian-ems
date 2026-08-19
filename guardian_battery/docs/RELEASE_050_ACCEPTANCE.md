@@ -44,8 +44,9 @@ sind HA-Backup und separates Guardian-Datenbackup gemäß
 - Event mit korrekter `expected_revision` bearbeiten und Revision 2 prüfen.
 - Veraltete Revision absichtlich verwenden und Konflikt ohne Schreibvorgang
   bestätigen.
-- Archivieren und Wiederherstellen; jede Operation muss dieselbe ID und die
-  jeweils nächste Revision verwenden.
+- Aktiv auf Nicht aktiv und zurück schalten; jede Operation muss dieselbe ID
+  und die jeweils nächste Revision verwenden. Nicht aktive Einträge sind nur
+  über den entsprechenden Filter sichtbar und fehlen in Standardprojektionen.
 - Vollständige append-only Revisionshistorie prüfen; kein DELETE.
 
 ## D. Rückdatierung und Timeline
@@ -78,8 +79,7 @@ Es darf keine neue MQTT-Maintenance-Nachricht entstehen bei:
 
 - Rückdatierung um mehr als 300 Sekunden,
 - Bearbeitung,
-- Archivierung,
-- Wiederherstellung,
+- Aktiv-/Inaktiv-Umschaltung,
 - Guardian-Neustart.
 
 ## H. Guardian-Neustart

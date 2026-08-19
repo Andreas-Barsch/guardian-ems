@@ -24,8 +24,6 @@ class CellHistorySeries:
               module_number: int, cell_number: int | None = None) -> list[dict[str, Any]]:
         if metric not in SERIES_METRICS:
             raise ValueError("unsupported series metric")
-        if metric.startswith("cell_") and cell_number is None:
-            raise ValueError("cell_number is required for cell metrics")
         start = datetime.fromisoformat(timestamp_from)
         end = datetime.fromisoformat(timestamp_to)
         start_day = start.astimezone(timezone.utc).date().isoformat()
@@ -53,9 +51,10 @@ class CellHistorySeries:
                     raise SeriesHistoryError(
                         f"cell history {path.name} line {line_number} is invalid"
                     ) from exc
-                if point and timestamp_from <= point["timestamp"] <= timestamp_to:
-                    points.append(point)
-        return sorted(points, key=lambda point: point["timestamp"])
+                candidates = point if isinstance(point, list) else [point]
+                points.extend(candidate for candidate in candidates if candidate and
+                              timestamp_from <= candidate["timestamp"] <= timestamp_to)
+        return sorted(points, key=lambda point: (point["timestamp"], point.get("cell_number", 0)))
 
     @staticmethod
     def _point(record: Any, metric: str, module_number: int,
@@ -72,6 +71,10 @@ class CellHistorySeries:
             value = float(record["soc_percent"])
         elif metric == "current":
             value = float(record["current_a"])
+        elif metric in {"cell_voltage", "cell_temperature"} and cell_number is None:
+            values = record["voltages_mv" if metric == "cell_voltage" else "temperatures_c"]
+            return [{"timestamp": timestamp, "value": float(value), "cell_number": index}
+                    for index, value in enumerate(values, 1)]
         elif metric == "cell_voltage":
             value = float(record["voltages_mv"][cell_number - 1])
         else:

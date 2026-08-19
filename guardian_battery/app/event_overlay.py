@@ -15,6 +15,7 @@ class OverlayContext:
     cell_number: int | None = None
     event_types: tuple[str, ...] = ("maintenance",)
     include_archived: bool = False
+    active: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class EventMarker:
     deep_link: str | None
     maintenance_event_id: str | None
     module_number: int | None
+    module_serial: str | None
     cell_number: int | None
     status: str | None
     metadata: dict
@@ -72,6 +74,9 @@ class EventOverlayAdapter:
         )
         result = []
         for event in events:
+            if context.active is not None and event.event_type == "maintenance":
+                if (event.status == "active") != context.active:
+                    continue
             if not matches_chart(event, module_number=context.module_number, cell_number=context.cell_number):
                 continue
             elapsed = (datetime.fromisoformat(event.timestamp) - start).total_seconds()
@@ -80,7 +85,8 @@ class EventOverlayAdapter:
                 event_type=event.event_type, timestamp=event.timestamp, position=position,
                 title=event.title, summary=event.summary, deep_link=event.deep_link,
                 maintenance_event_id=event.maintenance_event_id,
-                module_number=event.module_number, cell_number=event.cell_number,
+                module_number=event.module_number, module_serial=event.module_serial,
+                cell_number=event.cell_number,
                 status=event.status, metadata=dict(event.metadata),
             ))
         return result

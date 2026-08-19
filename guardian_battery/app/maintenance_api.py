@@ -53,6 +53,7 @@ REQUIRED_CREATE_FIELDS = frozenset(
 )
 LIST_FILTERS = frozenset(
     {
+        "active",
         "include_archived",
         "newest_first",
         "occurred_from",
@@ -115,7 +116,9 @@ class ApiProblem(Exception):
 def event_json(event: MaintenanceEvent) -> dict[str, Any]:
     """Return the explicit canonical public representation."""
 
-    return {name: getattr(event, name) for name in EVENT_FIELDS}
+    result = {name: getattr(event, name) for name in EVENT_FIELDS}
+    result["active"] = event.archived_at is None
+    return result
 
 
 def error_json(code: str, message: str, details: Mapping[str, Any] | None = None):
@@ -213,6 +216,12 @@ class MaintenanceApi:
             if method != "POST":
                 return self._method_not_allowed("POST")
             return self._restore(event_id, headers, body)
+        if len(parts) == 2 and parts[1] in {"activate", "deactivate"}:
+            if method != "POST":
+                return self._method_not_allowed("POST")
+            return self._set_active(
+                event_id, parts[1] == "activate", headers, body
+            )
         if len(parts) == 2 and parts[1] == "history":
             if method != "GET":
                 return self._method_not_allowed("GET")
@@ -347,6 +356,22 @@ class MaintenanceApi:
         )
         return ApiResponse(200, {"event": event_json(event)})
 
+    def _set_active(
+        self,
+        event_id: str,
+        active: bool,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> ApiResponse:
+        payload = self._json_body(headers, body)
+        self._reject_unknown(payload, frozenset({"expected_revision"}))
+        event = self.service.set_active(
+            event_id,
+            expected_revision=self._expected_revision(payload),
+            active=active,
+        )
+        return ApiResponse(200, {"event": event_json(event)})
+
     def _list(self, query: str) -> ApiResponse:
         raw = parse_qs(query, keep_blank_values=True)
         unknown = set(raw) - LIST_FILTERS
@@ -361,7 +386,12 @@ class MaintenanceApi:
             if len(values) != 1:
                 raise ApiProblem(400, "invalid_request", f"{key} must occur once")
         values = {key: items[0] for key, items in raw.items()}
+        active_filter = values.get("active")
+        if active_filter not in (None, "true", "false", "all"):
+            raise ApiProblem(400, "invalid_request", "active must be true, false or all")
         include_archived = self._boolean(values.get("include_archived", "false"), "include_archived")
+        if active_filter in {"false", "all"}:
+            include_archived = True
         newest_first = self._boolean(values.get("newest_first", "true"), "newest_first")
         occurred_from = self._timestamp(values.get("occurred_from"), "occurred_from")
         occurred_to = self._timestamp(values.get("occurred_to"), "occurred_to")
@@ -389,6 +419,8 @@ class MaintenanceApi:
             and (category is None or item.category == category)
             and (module_number is None or item.module_number == module_number)
             and (cell_number is None or item.cell_number == cell_number)
+            and (active_filter in (None, "all") or
+                 (item.archived_at is None) == (active_filter == "true"))
         ]
         page = filtered[offset : offset + limit]
         return ApiResponse(

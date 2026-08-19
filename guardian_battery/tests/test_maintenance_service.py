@@ -226,6 +226,24 @@ def test_restore_appends_revision_and_reactivates_event(tmp_path):
         api.restore(first.maintenance_event_id, expected_revision=3)
 
 
+def test_active_inactive_is_append_only_and_optimistically_concurrent(tmp_path):
+    api, _, log = service(tmp_path)
+    first = create(api)
+    original = log.path.read_bytes()
+
+    inactive = api.set_active(first.maintenance_event_id, expected_revision=1, active=False)
+    assert inactive.revision == 2 and inactive.archived_at is not None
+    assert api.list() == []
+    assert api.list(include_archived=True) == [inactive]
+    with pytest.raises(MaintenanceConflictError):
+        api.set_active(first.maintenance_event_id, expected_revision=1, active=True)
+
+    active = api.set_active(first.maintenance_event_id, expected_revision=2, active=True)
+    assert active.revision == 3 and active.archived_at is None
+    assert active.maintenance_event_id == first.maintenance_event_id
+    assert log.path.read_bytes().startswith(original)
+
+
 def test_archived_event_cannot_be_edited_or_archived_twice(tmp_path):
     api, _, _ = service(tmp_path)
     first = create(api)

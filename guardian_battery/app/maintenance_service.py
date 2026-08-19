@@ -301,3 +301,20 @@ class MaintenanceService:
             restored,
             expected_revision=expected_revision,
         )
+
+    def set_active(
+        self, event_id: str, *, expected_revision: int, active: bool
+    ) -> MaintenanceEvent:
+        """Change fachliche activity without changing schema-1 persistence.
+
+        ``archived_at`` remains the on-disk compatibility representation for
+        data written by 0.5.0.  The public/domain meaning is active/inactive.
+        """
+
+        if not isinstance(active, bool):
+            raise MaintenanceValidationError("active must be boolean")
+        return (
+            self.restore(event_id, expected_revision=expected_revision)
+            if active
+            else self.archive(event_id, expected_revision=expected_revision)
+        )

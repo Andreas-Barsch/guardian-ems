@@ -24,6 +24,12 @@
   erzeugt keine künstlichen Sensorwerte.
 - Guardian- und Add-on-Version werden auf `0.5.0` angehoben. Die unveränderte
   diagnostische Bewertungslogik behält Diagnostic Engine `0.4.12`.
+- Nach produktiver Erstabnahme wird die Bediensemantik rückwärtskompatibel von
+  Archivierung auf Aktiv/Nicht aktiv präzisiert; die append-only Daten bleiben
+  unverändert lesbar.
+- Trennt Stackposition und optionale physische Modulseriennummer ausdrücklich,
+  ergänzt die Modulebene für Zellmetriken und verbessert die gemeinsame
+  History-Komponente um skalierbares SVG, Zeit-/Wertachsen, Grid und Tooltip.
 
 ## 0.4.0
 

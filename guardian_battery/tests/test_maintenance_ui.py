@@ -19,7 +19,7 @@ def test_deep_link_uses_only_stable_encoded_event_identity():
     assert maintenance_deep_link("MEV-value with spaces") == "maintenance?event_id=MEV-value%20with%20spaces"
 
 
-def test_ui_has_list_filters_crud_archive_restore_history_and_pagination():
+def test_ui_has_active_filters_crud_status_toggle_history_and_pagination():
     html = render_maintenance_html(configuration_path="/")
 
     required_ids = (
@@ -28,13 +28,12 @@ def test_ui_has_list_filters_crud_archive_restore_history_and_pagination():
         "filter-category",
         "filter-module",
         "filter-cell",
-        "filter-archived",
+        "filter-active",
         "filter-sort",
         "new-button",
         "event-form",
         "edit-button",
-        "archive-button",
-        "restore-button",
+        "active-toggle",
         "history-list",
         "page-prev",
         "page-next",
@@ -42,7 +41,10 @@ def test_ui_has_list_filters_crud_archive_restore_history_and_pagination():
     for element_id in required_ids:
         assert f'id="{element_id}"' in html
     assert "expected_revision:state.current.revision" in html
-    assert "window.confirm('Diesen Maintenance-Eintrag archivieren?" in html
+    assert "Auf Nicht aktiv setzen" in html
+    assert "'/'+action" in html
+    assert "Archivieren" not in html
+    assert "Wiederherstellen" not in html
 
 
 def test_time_ui_distinguishes_event_capture_and_update_semantics():

@@ -25,6 +25,64 @@ die spätere Runtime-Integration erzeugt bzw. öffnet sie kontrolliert.
 `config_history.jsonl` bleibt Konfigurationsprovenienz. Beide werden weder
 migriert noch als Maintenance-Daten interpretiert.
 
+## Aktivität und Rückwärtskompatibilität
+
+Die fachliche Benutzersemantik lautet **Aktiv/Nicht aktiv**. Aktive Einträge
+sind gültige Datensätze für Logbuch, Timeline, Overlays und spätere
+Interpretation. Nicht aktive Einträge bleiben mit stabiler ID und allen
+Revisionen auffindbar, werden aber standardmäßig nicht projiziert.
+
+Schema 1 verwendet intern weiterhin `archived_at` als rückwärtskompatible
+Persistenzrepräsentation: `null` bedeutet aktiv, ein UTC-Zeitpunkt bedeutet
+nicht aktiv. Ein neues Feld würde alte und neue JSONL-Zeilen unnötig in zwei
+Statuswahrheiten teilen. Deshalb liefert die API zusätzlich das abgeleitete
+Feld `active`, während die bestehende JSONL niemals umgeschrieben wird.
+Aktivieren und Deaktivieren hängen jeweils eine Revision mit Optimistic
+Concurrency an. Die alten Archive-/Restore-Routen bleiben nur für bestehende
+0.5.0-Aufrufer kompatibel; die normale UI verwendet ausschließlich
+`activate`/`deactivate`. Ein Statuswechsel publiziert kein MQTT-Live-Event.
+
+## Stackposition und physische Modulidentität
+
+`module_number` ist ausschließlich die Stackposition zum Ereigniszeitpunkt.
+`module_serial` ist die optionale Identität eines konkreten physischen Moduls.
+Eine Position ist niemals eine dauerhafte Modulidentität; gleiche Positionen
+zu verschiedenen Zeiten dürfen nicht automatisch korreliert werden. Fehlt die
+Seriennummer, bleibt die physische Identität unbekannt.
+
+Die Bestandsuntersuchung ergab keine belastbare historische Zuordnung mit
+Gültigkeitsintervallen. `info <module>` liefert aktuell unter anderem einen
+Pylontech-`Barcode`; `module_infos` wird in MQTT-State und Info-Attributen
+veröffentlicht, aber nicht historisch positionsbezogen persistiert.
+`cell_history`, `config_history`, technische Events und Diagnosedateien
+enthalten keine solche Mapping-Historie. Eine manuell im Event gespeicherte
+Seriennummer gilt nur für diesen Eintrag. Deshalb rät Guardian keine Zuordnung
+und wendet die heutige Position nicht rückwirkend an. Die UI bietet ohne
+belastbaren Nachweis nur „Nur Position / keine eindeutige Zuordnung“ sowie die
+bereits im geöffneten Event gespeicherte Identität an.
+
+## Zellmetriken und Modulebene
+
+Für Zellspannung und Zelltemperatur bedeutet eine gewählte Modulposition ohne
+`cell_number`: **Alle Zellen / Modulebene**. Es wird keine künstliche Zelle 0
+gespeichert. Die API liefert die unveränderten Rohwerte aller Zellen mit ihrer
+jeweiligen Zellnummer. Das zentrale Overlay-Matching verwendet weiterhin:
+
+- Systemchart: systemweite Events,
+- Modulchart: systemweite und Events derselben Position,
+- Zellchart: zusätzlich modulweite und exakt passende Zell-Events;
+  fremde Positionen und explizit fremde Zellen werden ausgeschlossen.
+
+## Gemeinsame History-Chart-Semantik
+
+Alle vier Messgrößen verwenden dieselbe skalierbare SVG-Komponente. Sie besitzt
+lokale Zeit-Ticks, mehrere gerundete Y-Ticks mit Einheit, dezentes Grid,
+exakten lokalen Tooltip und responsives Resize-Verhalten. SVG bleibt auch auf
+HiDPI-Displays scharf. Die Messpunkte werden weder geglättet noch verändert.
+Die Layerreihenfolge ist für ein späteres Arbeitspaket vorbereitet:
+Phasenhintergrund, Messkurve, Maintenance-Marker, Interaktion/Tooltip. Es ist
+keine Phase Engine und kein Phase Overlay enthalten.
+
 ## Schema 1
 
 Jede JSONL-Zeile ist eine unveränderliche Revision eines Maintenance Events:
@@ -120,12 +178,12 @@ Die Projektion akzeptiert pro Event ausschließlich die lückenlose Folge
 
 Bei einer Inkonsistenz wird keine vermeintlich aktuelle Revision ausgewählt.
 
-## Archivierung und Sortierung
+## Aktivität und Sortierung
 
-Archivierung ist kein Löschen, sondern eine neue Revision mit `archived_at`.
-Die Standardliste blendet archivierte Events aus. Mit
-`include_archived=True` bleiben sie sichtbar; `get(event_id)` und
-`history(event_id)` bleiben ebenfalls verfügbar. `restore()` erzeugt eine
+Deaktivierung ist kein Löschen, sondern eine neue Revision mit internem
+`archived_at`. Die Standardliste blendet nicht aktive Events aus. Mit dem
+Aktivitätsfilter `all` oder `false` bleiben sie sichtbar; `get(event_id)` und
+`history(event_id)` bleiben ebenfalls verfügbar. Aktivierung erzeugt eine
 weitere Revision mit leerem `archived_at`.
 
 Die Logbuch-Standardsortierung ist absteigend nach `occurred_at`, sekundär
@@ -153,8 +211,10 @@ wird in Tests ausschließlich mit temporären Dateien betrieben.
 | `POST` | `/api/maintenance/events` | neues Event anlegen |
 | `GET` | `/api/maintenance/events/<event_id>` | aktuelle Revision laden |
 | `PATCH` | `/api/maintenance/events/<event_id>` | Event bearbeiten |
-| `POST` | `/api/maintenance/events/<event_id>/archive` | archivieren |
-| `POST` | `/api/maintenance/events/<event_id>/restore` | wiederherstellen |
+| `POST` | `/api/maintenance/events/<event_id>/deactivate` | nicht aktiv setzen |
+| `POST` | `/api/maintenance/events/<event_id>/activate` | aktiv setzen |
+| `POST` | `/api/maintenance/events/<event_id>/archive` | Kompatibilität: nicht aktiv setzen |
+| `POST` | `/api/maintenance/events/<event_id>/restore` | Kompatibilität: aktiv setzen |
 | `GET` | `/api/maintenance/events/<event_id>/history` | vollständige Revisionsfolge |
 
 Ein HTTP `DELETE` ist nicht vorgesehen. Ein vom HA-Ingress vorangestellter

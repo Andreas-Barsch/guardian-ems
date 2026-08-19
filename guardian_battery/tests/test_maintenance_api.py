@@ -400,6 +400,28 @@ def test_archive_and_restore_revision_conflicts_and_states(api_env):
     assert active_restore.status == 409
 
 
+def test_active_api_and_three_way_list_filter_are_backward_compatible(api_env):
+    api, _, _ = api_env
+    first = create(api, title="Position 5", module_number=5, module_serial=None)
+    event_id = first["maintenance_event_id"]
+    inactive = request(api, "POST", f"/api/maintenance/events/{event_id}/deactivate",
+                       {"expected_revision": 1})
+    stale = request(api, "POST", f"/api/maintenance/events/{event_id}/activate",
+                    {"expected_revision": 1})
+    assert inactive.status == 200
+    assert inactive.body["event"]["active"] is False
+    assert inactive.body["event"]["module_number"] == 5
+    assert inactive.body["event"]["module_serial"] is None
+    assert stale.status == 409
+    assert request(api, "GET", "/api/maintenance/events?active=true").body["events"] == []
+    assert len(request(api, "GET", "/api/maintenance/events?active=false").body["events"]) == 1
+    assert len(request(api, "GET", "/api/maintenance/events?active=all").body["events"]) == 1
+    active = request(api, "POST", f"/api/maintenance/events/{event_id}/activate",
+                     {"expected_revision": 2})
+    assert active.body["event"]["active"] is True
+    assert active.body["event"]["revision"] == 3
+
+
 def test_history_returns_full_sequence_and_unknown_is_404(api_env):
     api, _, _ = api_env
     event = create(api)

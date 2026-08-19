@@ -59,11 +59,28 @@ def test_cell_history_marker_matching_time_and_deep_link(tmp_path):
     assert response.body["overlays"][0]["deep_link"].endswith(exact.maintenance_event_id)
 
 
+def test_cell_metric_module_level_returns_all_raw_cells_and_module_markers(tmp_path):
+    maintenance, directory, api = api_env(tmp_path)
+    write_sample(directory, datetime(2026, 8, 15, 8, tzinfo=timezone.utc).timestamp())
+    system = add(maintenance, occurred_at="2026-08-15T08:00:00Z",
+                 module_number=None, cell_number=None)
+    module = add(maintenance, occurred_at="2026-08-15T08:01:00Z",
+                 module_number=3, cell_number=None)
+    add(maintenance, occurred_at="2026-08-15T08:02:00Z", module_number=4, cell_number=None)
+    response = api.handle("GET", "/api/history/series?metric=cell_voltage&from=2026-08-15T00:00:00Z&to=2026-08-16T00:00:00Z&module_number=3")
+    assert response.status == 200
+    assert len(response.body["series"]["points"]) == 15
+    assert [point["cell_number"] for point in response.body["series"]["points"]] == list(range(1, 16))
+    assert [point["value"] for point in response.body["series"]["points"]] == [3300.0 + n for n in range(15)]
+    assert {item["maintenance_event_id"] for item in response.body["overlays"]} == {
+        system.maintenance_event_id, module.maintenance_event_id}
+
+
 def test_api_rejects_invalid_requests_and_corrupt_series(tmp_path):
     _, directory, api = api_env(tmp_path)
     for query in ("", "?metric=bad&from=x&to=x&module_number=3",
                   "?metric=soc&from=2026-08-02T00:00:00Z&to=2026-08-01T00:00:00Z&module_number=3",
-                  "?metric=cell_voltage&from=2026-08-01T00:00:00Z&to=2026-08-02T00:00:00Z&module_number=3"):
+                  "?metric=cell_voltage&from=2026-08-01T00:00:00Z&to=2026-08-02T00:00:00Z&module_number=0"):
         assert api.handle("GET", "/api/history/series" + query).status == 400
     directory.mkdir(); (directory / "2026-08-01.jsonl").write_text("broken\n", encoding="utf-8")
     response = api.handle("GET", "/api/history/series?metric=soc&from=2026-08-01T00:00:00Z&to=2026-08-02T00:00:00Z&module_number=3")

@@ -50,6 +50,23 @@ def test_maintenance_uses_occurred_at_not_created_or_updated_and_only_once(tmp_p
     assert events[0].metadata["updated_at"] == updated.updated_at
 
 
+def test_position_and_physical_identity_remain_independent(tmp_path):
+    maintenance, _, timeline = build(tmp_path)
+    first = add(maintenance, module_number=5, module_serial="SERIAL-A", cell_number=None)
+    second = add(maintenance, module_number=5, module_serial="SERIAL-B", cell_number=None,
+                 occurred_at="2025-04-05T09:00:00Z")
+    third = add(maintenance, module_number=4, module_serial="SERIAL-A", cell_number=None,
+                occurred_at="2026-04-05T09:00:00Z")
+    unknown = add(maintenance, module_number=5, module_serial=None, cell_number=None,
+                  occurred_at="2023-04-05T09:00:00Z")
+    projected = {event.maintenance_event_id: event for event in timeline.query()}
+    assert projected[first.maintenance_event_id].module_serial == "SERIAL-A"
+    assert projected[second.maintenance_event_id].module_serial == "SERIAL-B"
+    assert projected[third.maintenance_event_id].module_number == 4
+    assert projected[third.maintenance_event_id].module_serial == "SERIAL-A"
+    assert projected[unknown.maintenance_event_id].module_serial is None
+
+
 def test_archived_default_filter_include_and_stable_deep_link(tmp_path):
     maintenance, _, timeline = build(tmp_path)
     event = add(maintenance)
@@ -59,7 +76,7 @@ def test_archived_default_filter_include_and_stable_deep_link(tmp_path):
     projected = timeline.query(include_archived=True)[0]
     assert projected.maintenance_event_id == event.maintenance_event_id
     assert projected.deep_link == f"maintenance?event_id={event.maintenance_event_id}"
-    assert projected.status == "archived"
+    assert projected.status == "inactive"
 
 
 def test_real_technical_schema_is_typed_and_not_maintenance(tmp_path):

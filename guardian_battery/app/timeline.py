@@ -36,6 +36,7 @@ class TimelineEvent:
     deep_link: str | None = None
     maintenance_event_id: str | None = None
     module_number: int | None = None
+    module_serial: str | None = None
     cell_number: int | None = None
     severity: str | None = None
     status: str | None = None
@@ -163,8 +164,9 @@ class TimelineService:
                     source="maintenance_events", projection_key=f"maintenance:{item.maintenance_event_id}",
                     deep_link=maintenance_deep_link(item.maintenance_event_id),
                     maintenance_event_id=item.maintenance_event_id,
-                    module_number=item.module_number, cell_number=item.cell_number,
-                    status="archived" if item.archived_at else "active",
+                    module_number=item.module_number, module_serial=item.module_serial,
+                    cell_number=item.cell_number,
+                    status="inactive" if item.archived_at else "active",
                     metadata={"category": item.category, "created_at": item.created_at,
                               "updated_at": item.updated_at, "archived_at": item.archived_at,
                               "revision": item.revision},

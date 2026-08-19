@@ -16,7 +16,7 @@ from timeline import TechnicalHistoryError
 LOG = logging.getLogger(__name__)
 HISTORY_API_ROUTE = "/api/history/series"
 HISTORY_FILTERS = frozenset(
-    {"metric", "from", "to", "module_number", "cell_number", "include_archived"}
+    {"metric", "from", "to", "module_number", "cell_number", "include_archived", "active"}
 )
 
 
@@ -73,9 +73,10 @@ class HistoryApi:
             raise HistoryApiProblem("from must not exceed to")
         module_number = self._integer(values["module_number"], "module_number", 1, 6)
         cell_number = self._integer(values.get("cell_number"), "cell_number", 1, 15)
-        if metric.startswith("cell_") and cell_number is None:
-            raise HistoryApiProblem("cell_number is required for cell metrics")
+        active = self._active(values.get("active", "true"))
         include_archived = self._boolean(values.get("include_archived", "false"))
+        if active in (False, None):
+            include_archived = True
         points = self.series.query(metric=metric, timestamp_from=timestamp_from,
                                    timestamp_to=timestamp_to, module_number=module_number,
                                    cell_number=cell_number)
@@ -83,6 +84,7 @@ class HistoryApi:
             timestamp_from=timestamp_from, timestamp_to=timestamp_to,
             module_number=module_number, cell_number=cell_number,
             event_types=("maintenance",), include_archived=include_archived,
+            active=active,
         ))
         return ApiResponse(200, {
             "series": {"metric": metric, "module_number": module_number,
@@ -116,3 +118,10 @@ class HistoryApi:
         if value == "true": return True
         if value == "false": return False
         raise HistoryApiProblem("include_archived must be true or false")
+
+    @staticmethod
+    def _active(value: str) -> bool | None:
+        if value == "true": return True
+        if value == "false": return False
+        if value == "all": return None
+        raise HistoryApiProblem("active must be true, false or all")

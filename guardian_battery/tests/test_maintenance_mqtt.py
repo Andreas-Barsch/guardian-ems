@@ -140,6 +140,18 @@ def test_backfill_update_archive_restore_never_publish(tmp_path):
     assert len(client.calls) == 1
 
 
+def test_active_inactive_toggle_never_publishes(tmp_path):
+    api, _, client = api_env(tmp_path)
+    live = request(api, "POST", "/api/maintenance/events", create_payload())
+    event_id = live.body["event"]["maintenance_event_id"]
+    inactive = request(api, "POST", f"/api/maintenance/events/{event_id}/deactivate",
+                       {"expected_revision": 1})
+    active = request(api, "POST", f"/api/maintenance/events/{event_id}/activate",
+                     {"expected_revision": 2})
+    assert inactive.status == active.status == 200
+    assert len(client.calls) == 1
+
+
 def test_reload_restart_and_import_do_not_publish(tmp_path):
     api, service, client = api_env(tmp_path)
     live = request(api, "POST", "/api/maintenance/events", create_payload())
