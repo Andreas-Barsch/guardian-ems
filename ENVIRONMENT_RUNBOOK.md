@@ -325,3 +325,15 @@ Versionsnummern werden erst nach dieser Prüfung als Ausgangsbasis für eine neu
 - Eine erkannte falsche oder nicht belegte technische Aussage wird ausdrücklich verworfen und nicht als Grundlage weiterverwendet.
 - Dokumentation wird nur mit belegten Informationen ergänzt.
 - Unbekannte historische Details werden nicht nachträglich erfunden.
+
+### 15.8 Home-Assistant Terminal-&-SSH-Randbedingungen
+
+Für technische Anweisungen in der aktuellen Home-Assistant-Umgebung gelten zusätzlich:
+
+- Terminal-&-SSH-Kommandos müssen mit den dort verfügbaren BusyBox-Werkzeugen kompatibel sein.
+- GNU-spezifische Optionen werden nicht vorausgesetzt. Insbesondere ist `find -printf` in dieser Umgebung nicht verfügbar.
+- Eine Python-Installation im Terminal-&-SSH-Add-on wird nicht vorausgesetzt.
+- Vor der Ausgabe eines Terminalbefehls wird geprüft, ob er unter den bekannten HA-/BusyBox-Bedingungen geeignet ist.
+- Befehle und Ausgaben bleiben kurz und screenshot-tauglich; rekursive oder umfangreiche Ausgaben werden vermieden.
+- Benötigt eine Guardian-Funktion Python, wird die dafür vorgesehene Add-on-/Container-Runtime verwendet. Eine Python-Laufzeit des Terminal-&-SSH-Add-ons ist keine Voraussetzung.
+- Änderungen an produktiven bzw. aktuell verwendeten Dateien erfolgen nicht direkt „am offenen Herzen“: Zuerst wird eine neue Datei bzw. ein separater neuer Stand erstellt und geprüft. Erst danach wird der geprüfte Stand kontrolliert an die vorgesehenen Zielorte übernommen.
