@@ -72,3 +72,15 @@
 - Neustart nach erfolgreicher Übernahme; Config-Provenienz zeichnet diagnostisch relevante Änderungen auf.
 - Modulanzahl 1–6 als Soll-Konfiguration; Auto-Discovery überschreibt den Sollwert nicht.
 - Erweiterte technische Parameter separat gekennzeichnet.
+
+## 0.4.10 - Config UI release
+- Versionsanhebung von Guardian und Diagnostic Engine auf `0.4.10`.
+- Add-on-Version in `config.yaml` auf `0.4.10` angehoben.
+- Config UI verwendet für Guardian- und Diagnostic-Engine-Version die zentralen Konstanten aus `version.py` statt fest codierter `0.4.9`-Fallbackwerte.
+- Verifizierter Commit: `fbf9dac` (`Guardian Battery 0.4.10 config UI release`).
+
+## 0.4.11 - Ingress panel
+- Versionsanhebung auf Guardian Battery `0.4.11`.
+- Home-Assistant-Ingress-Panel für Guardian Battery aktiviert.
+- Verifizierter Commit: `8db6339` (`Guardian Battery 0.4.11 enable ingress panel`).
+- Weitere Detailänderungen dieses Commits sind in dieser Dokumentationsbereinigung nicht behauptet, solange sie nicht separat verifiziert wurden.
