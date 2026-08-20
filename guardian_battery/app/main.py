@@ -18,6 +18,7 @@ from cell_history import CellHistoryWriter
 from config_history import ConfigHistory
 from config_ui import configure_maintenance_live_publisher, start_config_server
 from maintenance_mqtt import MaintenanceMqttPublisher
+from position_history import update_observed_stack
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -1075,6 +1076,8 @@ def main() -> None:
                         except Exception as exc:
                             LOG.warning("BMS info Modul %s: %s", module.module, exc)
                     last_info_poll = now_wall
+
+                update_observed_stack(module_infos)
 
                 for module in modules: cell_results[module.module]=cell_store.analyse(module.module,options)
                 publisher.publish(

@@ -56,6 +56,30 @@ class CellHistorySeries:
                               timestamp_from <= candidate["timestamp"] <= timestamp_to)
         return sorted(points, key=lambda point: (point["timestamp"], point.get("cell_number", 0)))
 
+    def samples(self, *, timestamp_from: str, timestamp_to: str, module_number: int) -> list[dict[str, Any]]:
+        """Read only the raw fields required by the canonical phase rule."""
+        start = datetime.fromisoformat(timestamp_from); end = datetime.fromisoformat(timestamp_to)
+        if not self.directory.exists(): return []
+        start_day = start.astimezone(timezone.utc).date().isoformat()
+        end_day = end.astimezone(timezone.utc).date().isoformat()
+        result = []
+        try:
+            paths = sorted(path for path in self.directory.glob("*.jsonl") if start_day <= path.stem <= end_day)
+            for path in paths:
+                for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                    if not line.strip(): continue
+                    record = json.loads(line)
+                    if record.get("schema_version") != 1: raise ValueError("schema")
+                    if int(record["module"]) != module_number: continue
+                    timestamp = datetime.fromtimestamp(float(record["timestamp"]), timezone.utc).isoformat()
+                    if timestamp_from <= timestamp <= timestamp_to:
+                        result.append({"timestamp": timestamp, "current_a": float(record["current_a"]),
+                                       "soc_percent": float(record["soc_percent"]),
+                                       "voltages_mv": [float(value) for value in record["voltages_mv"]]})
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise SeriesHistoryError("cell history is unavailable") from exc
+        return sorted(result, key=lambda item: item["timestamp"])
+
     @staticmethod
     def _point(record: Any, metric: str, module_number: int,
                cell_number: int | None) -> dict[str, Any] | None:

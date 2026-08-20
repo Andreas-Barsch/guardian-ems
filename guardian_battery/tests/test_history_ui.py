@@ -41,3 +41,16 @@ def test_svg_chart_has_real_axes_units_layers_resize_and_local_tooltip():
     assert "@media(max-width:980px)" in html
     assert "@media(max-width:620px)" in html
     assert ".innerHTML" not in html
+
+
+def test_empty_phase_wrench_and_cell_identification_are_explicit():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert "Keine Messdaten in diesem Zeitfenster" in html
+    assert "Es werden keine Ersatzwerte erzeugt" in html
+    assert "🔧" in html
+    assert "phase_analysis?.intervals" in html
+    assert "Zelle '+key" in html
+    assert "COLORS=[" in html
+    assert "emptyMarkerTop" in html
+    assert "pointer-events:none" in html
+    assert "if(!points.length){byId('tooltip').hidden=true;return}" not in html

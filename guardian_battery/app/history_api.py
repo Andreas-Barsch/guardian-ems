@@ -11,12 +11,15 @@ from maintenance import MaintenanceValidationError, normalize_utc_timestamp
 from maintenance_api import ApiResponse, error_json
 from maintenance_service import MaintenanceHistoryError
 from timeline import TechnicalHistoryError
+from phase_engine import PhaseEngineError, PHASE_PARAMETER_KEYS
 
 
 LOG = logging.getLogger(__name__)
 HISTORY_API_ROUTE = "/api/history/series"
 HISTORY_FILTERS = frozenset(
-    {"metric", "from", "to", "module_number", "cell_number", "include_archived", "active"}
+    {"metric", "from", "to", "module_number", "cell_number", "include_archived", "active",
+     "analysis_mode", "what_if_low_soc_percent", "what_if_high_soc_percent",
+     "what_if_charge_current_a", "what_if_discharge_current_a"}
 )
 
 
@@ -25,9 +28,10 @@ class HistoryApiProblem(ValueError):
 
 
 class HistoryApi:
-    def __init__(self, series: CellHistorySeries, overlays: EventOverlayAdapter):
+    def __init__(self, series: CellHistorySeries, overlays: EventOverlayAdapter, phase_engine=None):
         self.series = series
         self.overlays = overlays
+        self.phase_engine = phase_engine
 
     def handle(self, method: str, target: str) -> ApiResponse:
         try:
@@ -38,7 +42,7 @@ class HistoryApi:
             if marker < 0 or split.path[marker + len(HISTORY_API_ROUTE):].strip("/"):
                 return ApiResponse(404, error_json("not_found", "History API route not found"))
             return self._query(split.query)
-        except HistoryApiProblem as exc:
+        except (HistoryApiProblem, PhaseEngineError) as exc:
             return ApiResponse(400, error_json("invalid_request", str(exc)))
         except SeriesHistoryError as exc:
             LOG.error("Guardian series unavailable: %s", exc)
@@ -86,12 +90,31 @@ class HistoryApi:
             event_types=("maintenance",), include_archived=include_archived,
             active=active,
         ))
+        mode = values.get("analysis_mode", "historical")
+        phases = []
+        if self.phase_engine is not None:
+            what_if = None
+            if mode == "what_if":
+                names = {
+                    "cell_diag_low_soc_percent": "what_if_low_soc_percent",
+                    "cell_diag_high_soc_percent": "what_if_high_soc_percent",
+                    "cell_diag_charge_current_a": "what_if_charge_current_a",
+                    "cell_diag_discharge_current_a": "what_if_discharge_current_a",
+                }
+                try: what_if = {key: float(values[source]) for key, source in names.items()}
+                except (KeyError, ValueError) as exc: raise HistoryApiProblem("what-if mode requires four numeric phase parameters") from exc
+            samples = self.series.samples(timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                                          module_number=module_number)
+            phases = self.phase_engine.intervals(samples, mode=mode, what_if=what_if,
+                                                  window_to=timestamp_to)
         return ApiResponse(200, {
             "series": {"metric": metric, "module_number": module_number,
                        "cell_number": cell_number, "points": points},
             "overlays": [marker.to_dict() for marker in markers],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
             "semantics": {"overlay_timestamp": "occurred_at", "correlation_only": True},
+            "phase_analysis": {"mode": mode, "intervals": phases,
+                               "raw_measurements_unchanged": True},
         })
 
     @staticmethod

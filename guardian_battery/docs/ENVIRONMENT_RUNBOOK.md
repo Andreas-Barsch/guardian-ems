@@ -32,8 +32,8 @@ Dieses Dokument hält bestätigte Eigenschaften, Ausnahmen, Fehlversuche und Arb
 - App-Name: `Guardian Battery`
 - App-Slug: `guardian_battery`
 - Installierte App-ID: `3195b09a_guardian_battery`
-- Aktueller Patch-Release-Vorbereitungsstand: Guardian/Add-on `0.5.1`, Diagnostic
-  Engine unverändert `0.4.12`.
+- Aktueller Feature-Release-Vorbereitungsstand: Guardian/Add-on `0.6.0`,
+  Diagnostic Engine unverändert `0.4.12`.
 - Entwicklungscheckpoint vor der Release-Vorbereitung: `54ca42a`
   (`Add Home Assistant maintenance event integration`).
 - Auf dem HA-System real verifizierte vorherige Produktions- und
@@ -77,6 +77,16 @@ Ab Guardian 0.5.0 zusätzlich, erstmals beim ersten Maintenance-Schreibvorgang:
 
 Beide Dateien dürfen vor dem Deployment nicht künstlich angelegt und bei
 Deployment oder Rollback weder gelöscht noch verändert werden.
+
+Ab Guardian 0.6.0 zusätzlich, erstmals bei dokumentierter Stackbelegung:
+- `position_history.jsonl` – append-only Vollsnapshots der Positionen 1–6
+- `position_history.jsonl.lock` – Sperrdatei für atomare
+  Read-Check-Append-Operationen und Optimistic Concurrency
+
+Ein Neustart rekonstruiert die dokumentierte Stackbelegung aus der JSONL-Datei.
+Ein Code-Rollback darf diese Dateien nicht löschen, umschreiben oder durch eine
+aktuelle BMS-Beobachtung ersetzen. Aktuelle Beobachtung und dokumentierte
+historische Wahrheit bleiben getrennt.
 
 Diese Daten dürfen bei Source-/Deployment-Arbeiten nicht überschrieben oder gelöscht werden.
 

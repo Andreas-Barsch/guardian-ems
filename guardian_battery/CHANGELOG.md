@@ -140,3 +140,32 @@
 - Isolierter `parse_info()`-Test: `5 passed`.
 - Gesamte Regression-Suite einschließlich Info-Test: `26 passed` mit `PYTHONPATH=app`.
 - Hardware-/Home-Assistant-Integrationstest von 0.4.12 steht nach tatsächlicher 0.4.12-Installation noch aus.
+## 0.6.0 - Positionshistorie und deterministische Phasenprojektion
+
+- Ergänzt eine persistente, append-only Positionshistorie unter
+  `/share/guardian_battery/position_history.jsonl` mit vollständigen
+  Stack-Snapshots für Position 1 bis 6.
+- Behandelt Stackposition und physische Seriennummer als getrennte Identitäten;
+  historische Identitäten werden nur aus belegten Snapshots aufgelöst und nie
+  rückwirkend erfunden.
+- Verknüpft jede dokumentierte Stackänderung mit einem Maintenance Event und
+  bildet Austausch sowie Umpositionierung zeitabhängig ab.
+- Wählt in Maintenance die zum Ereigniszeitpunkt dokumentierte Seriennummer
+  automatisch vor und kennzeichnet frühere beziehungsweise spätere belegte
+  Seriennummern eindeutig. Gespeicherte Event-Identitäten bleiben beim
+  Bearbeiten erhalten.
+- Ergänzt unter Modulinformationen die Positionshistorie sowie den getrennten
+  Vergleich von dokumentierter und aktuell beobachteter Stackbelegung.
+  BMS-Beobachtungen verändern die historische Wahrheit nicht automatisch.
+- Zentralisiert die vorhandenen deterministischen Phasenregeln und ergänzt die
+  Bewertungsmodi `historical`, `current` und flüchtiges `what_if`.
+- Ergänzt das Phase Overlay in Guardian History hinter Messkurven und
+  Maintenance-Markern.
+- Zeigt bei fehlenden Messdaten einen Empty State ohne künstliche Y-Skala;
+  zeitbezogene Maintenance-Schraubenschlüssel bleiben sichtbar und interaktiv.
+- Verbessert die Darstellung aller 15 Zellkurven durch eindeutige Farben,
+  Legende und Hover-Highlighting, ohne Aggregation oder Glättung.
+- Verändert keine bestehenden Messwerte oder JSONL-Messhistorien und schreibt
+  nicht in den Home-Assistant Recorder.
+- Enthält keine KI oder lernende Klassifikation. Diagnostic Engine bleibt
+  unverändert `0.4.12`.

@@ -91,6 +91,30 @@ class ConfigHistory:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def records(self) -> list[dict[str, Any]]:
+        """Read all immutable provenance records, failing closed on corruption."""
+        if not self.path.exists():
+            return []
+        result = []
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, 1):
+                    if not line.strip():
+                        continue
+                    value = json.loads(line)
+                    if (not isinstance(value, dict) or value.get("schema_version") != CONFIG_HISTORY_SCHEMA_VERSION
+                            or not isinstance(value.get("parameters"), dict)):
+                        raise ValueError(f"invalid config history line {line_number}")
+                    timestamp = datetime.fromisoformat(str(value["timestamp"]).replace("Z", "+00:00"))
+                    if timestamp.tzinfo is None:
+                        raise ValueError(f"invalid config history timestamp at line {line_number}")
+                    value = dict(value)
+                    value["timestamp"] = timestamp.astimezone(timezone.utc).isoformat()
+                    result.append(value)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("configuration history is unavailable") from exc
+        return sorted(result, key=lambda item: (item["timestamp"], item["config_id"]))
+
     def record_if_changed(self, options: dict[str, Any]) -> dict[str, Any] | None:
         parameters = diagnostic_parameters(options)
         current_id = config_id(parameters)

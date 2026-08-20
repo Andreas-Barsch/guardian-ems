@@ -7,6 +7,25 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+def classify_phases(sample, options):
+    """Canonical deterministic phase rule shared by live and history analysis."""
+    result = []
+    current = float(sample["current_a"])
+    soc = float(sample["soc_percent"])
+    mean_voltage = statistics.fmean(sample["voltages_mv"]) / 1000
+    if current >= options["cell_diag_charge_current_a"]:
+        result.append("charge")
+    elif current <= -options["cell_diag_discharge_current_a"]:
+        result.append("discharge")
+    else:
+        result.append("rest")
+    if soc <= options["cell_diag_low_soc_percent"] or mean_voltage <= 3.22:
+        result.append("low")
+    if soc >= options["cell_diag_high_soc_percent"] or mean_voltage >= 3.38:
+        result.append("high")
+    return result
+
+
 @dataclass
 class CellSample:
     timestamp: float
@@ -187,47 +206,7 @@ class CellDiagnosticStore:
 
     @staticmethod
     def phases(sample, options):
-        result = []
-
-        current = float(sample["current_a"])
-        soc = float(sample["soc_percent"])
-
-        mean_voltage = (
-            statistics.fmean(
-                sample["voltages_mv"]
-            ) / 1000
-        )
-
-        if current >= options[
-            "cell_diag_charge_current_a"
-        ]:
-            result.append("charge")
-
-        elif current <= -options[
-            "cell_diag_discharge_current_a"
-        ]:
-            result.append("discharge")
-
-        else:
-            result.append("rest")
-
-        if (
-            soc <= options[
-                "cell_diag_low_soc_percent"
-            ]
-            or mean_voltage <= 3.22
-        ):
-            result.append("low")
-
-        if (
-            soc >= options[
-                "cell_diag_high_soc_percent"
-            ]
-            or mean_voltage >= 3.38
-        ):
-            result.append("high")
-
-        return result
+        return classify_phases(sample, options)
 
     @staticmethod
     def phase_thresholds(
