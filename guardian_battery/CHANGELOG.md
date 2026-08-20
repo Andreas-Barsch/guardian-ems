@@ -1,5 +1,12 @@
 # Guardian Battery Changelog
 
+## 0.6.6 - Restore the cell diagnostics overview
+
+- Stellt die geordnete Zelldiagnostik-Hauptübersicht wieder her.
+- Entfernt unbeabsichtigt eingebaute Navigations- und Ingress-Karten.
+- Erhält die Zell-Gesamtbewertung und phasenbezogene Evidenz aus 0.6.5
+  vollständig; Diagnostic Engine unverändert `0.4.12`.
+
 ## 0.6.5 - Cell diagnostic explainability
 
 - Vereinfacht die Bereichserklärung im Zeitverlauf und trennt sie von der
