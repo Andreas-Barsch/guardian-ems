@@ -904,13 +904,20 @@ class Mqtt:
                 status_meta = self._diag_meta("status")
                 status_meta["physical_group"] = ((int(cell["cell"]) - 1) // 5) + 1
                 status_meta["physical_group_cells"] = {1: "1-5", 2: "6-10", 3: "11-15"}[status_meta["physical_group"]]
+                status_meta["evidence_phase"] = cell.get("evidence_phase")
+                status_meta["evidence_deviation_mv"] = cell.get("evidence_deviation_mv")
                 self.attributes(f"{cp}_status", status_meta)
                 self.attributes(f"{cp}_confidence", self._diag_meta("confidence"))
                 self.attributes(f"{cp}_voltage", self._diag_meta("voltage"))
                 self.attributes(f"{cp}_deviation", self._diag_meta("deviation"))
                 self.attributes(f"{cp}_evidence", self._diag_meta("evidence"))
                 for phase in ("low", "discharge", "charge", "high"):
-                    self.attributes(f"{cp}_{phase}_deviation", self._diag_meta("deviation", phase))
+                    deviation_meta = self._diag_meta("deviation", phase)
+                    phase_result = phases.get(phase, {})
+                    deviation_meta["status"] = phase_result.get("status", "LERNPHASE")
+                    deviation_meta["thresholds_mv"] = phase_result.get("thresholds_mv", {})
+                    deviation_meta["samples"] = phase_result.get("samples", 0)
+                    self.attributes(f"{cp}_{phase}_deviation", deviation_meta)
                     self.attributes(f"{cp}_{phase}_rank", self._diag_meta("rank", phase))
                     self.attributes(f"{cp}_{phase}_samples", self._diag_meta("samples", phase))
                 self.attributes(f"{cp}_low_lowest", self._diag_meta("lowest", "low"))

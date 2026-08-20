@@ -58,7 +58,7 @@ def test_empty_phase_wrench_and_cell_identification_are_explicit():
     assert "if(!points.length){byId('tooltip').hidden=true;return}" not in html
 
 
-def test_visual_phase_is_permanent_german_and_help_is_dynamic():
+def test_visual_areas_are_permanent_german_and_help_is_dynamic_and_focused():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
     assert 'id="show-phases" type="hidden" value="on"' in html
     assert "Phasen anzeigen" not in html and ">EIN<" not in html and ">AUS<" not in html
@@ -66,9 +66,29 @@ def test_visual_phase_is_permanent_german_and_help_is_dynamic():
     assert html.index('id="phase-layer"') < html.index('id="series-layer"') < html.index('id="marker-layer"')
     assert "byId('show-phases').onchange" not in html
     assert 'id="help-open"' in html and "fetch('api/config')" in html
+    assert ">Bereiche erklären</button>" in html
+    assert "Farbige Bereiche im Zeitverlauf" in html
     labels = ["1. Entladung", "2. Tiefbereich", "3. Ladung", "4. Hochbereich"]
     assert [html.index(label) for label in labels] == sorted(html.index(label) for label in labels)
-    assert "Diagnostic Phase:" in html and "Visual Phase Projection:" in html
+    for key in (
+        "cell_diag_discharge_current_a",
+        "cell_diag_low_soc_percent",
+        "cell_diag_charge_current_a",
+        "cell_diag_high_soc_percent",
+    ):
+        assert key in html
+    assert "Entladung + Hochbereich" in html
+    assert "Ruhe und Unbekannt" in html
+    for unrelated in (
+        "Diagnostic Phase:",
+        "Visual Phase Projection:",
+        "Bewertungsstufen",
+        "Evidenz und Confidence",
+        "Hersteller-SOH",
+        "Cycle Count",
+        "confidence-help",
+    ):
+        assert unrelated not in html
 
 
 def test_multicell_controls_are_wired_to_dom_and_query():

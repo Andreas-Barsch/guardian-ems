@@ -1,5 +1,20 @@
 # Guardian Battery Changelog
 
+## 0.6.5 - Cell diagnostic explainability
+
+- Vereinfacht die Bereichserklärung im Zeitverlauf und trennt sie von der
+  diagnostischen Bewertungsmethodik.
+- Kennzeichnet die Zell-Gesamtbewertung und ihren maßgeblichen Diagnosebereich
+  eindeutig.
+- Bewertet die vier Evidenzbereiche unmittelbar in der Reihenfolge Entladung,
+  Tiefbereich, Ladung und Hochbereich und zeigt ihre phasenspezifischen
+  Grenzwerte.
+- Zeigt bei unzureichender Evidenz klar die LERNPHASE; Confidence bleibt
+  ausschließlich eine Eigenschaft der Zell-Gesamtbewertung.
+- Trennt Bereichsfarben von Statusfarben und stellt die Bewertungs-Hilfe direkt
+  in der Zelldiagnostik bereit.
+- Guardian/Add-on `0.6.5`; Diagnostic Engine unverändert `0.4.12`.
+
 ## 0.6.4 - Direct navigation and operational analysis controls
 
 - Entfernt das zusätzliche Funktionsportal: Der stabile Add-on-Ingress öffnet

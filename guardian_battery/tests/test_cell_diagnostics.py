@@ -259,6 +259,40 @@ def test_worst_phase_determines_cell_status(tmp_path):
     assert cell2["evidence_deviation_mv"] == 35
 
 
+def test_phase_status_uses_absolute_median_deviation(tmp_path):
+    for delta_mv in (-43, 43):
+        store = CellDiagnosticStore(tmp_path / f"absolute_{delta_mv}.json")
+        add_repeated(
+            store,
+            5,
+            voltages_with_cell2(delta_mv),
+            current_a=-2.0,
+        )
+
+        phase = store.analyse(1, opts())["cells"][1]["phases"]["discharge"]
+
+        assert phase["median_deviation_mv"] == delta_mv
+        assert phase["status"] == "KRITISCH"
+        assert phase["thresholds_mv"] == {
+            "observe": 10,
+            "warning": 20,
+            "critical": 40,
+        }
+
+
+def test_equal_worst_status_selects_larger_absolute_phase_deviation(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "phase_tie.json")
+    add_repeated(store, 5, voltages_with_cell2(25), current_a=-2.0, start=1)
+    add_repeated(store, 5, voltages_with_cell2(-35), current_a=2.0, start=100)
+
+    cell2 = store.analyse(1, opts())["cells"][1]
+
+    assert cell2["phases"]["discharge"]["status"] == "AUFFÄLLIG"
+    assert cell2["phases"]["charge"]["status"] == "AUFFÄLLIG"
+    assert cell2["evidence_phase"] == "charge"
+    assert cell2["evidence_deviation_mv"] == 35
+
+
 def test_rest_is_not_status_effective(tmp_path):
     store = CellDiagnosticStore(tmp_path / "rest.json")
 
