@@ -32,7 +32,7 @@ Dieses Dokument hält bestätigte Eigenschaften, Ausnahmen, Fehlversuche und Arb
 - App-Name: `Guardian Battery`
 - App-Slug: `guardian_battery`
 - Installierte App-ID: `3195b09a_guardian_battery`
-- Aktueller Feature-Release-Vorbereitungsstand: Guardian/Add-on `0.6.1`,
+- Aktueller Feature-Release-Vorbereitungsstand: Guardian/Add-on `0.6.2`,
   Diagnostic Engine unverändert `0.4.12`.
 - Entwicklungscheckpoint vor der Release-Vorbereitung: `54ca42a`
   (`Add Home Assistant maintenance event integration`).

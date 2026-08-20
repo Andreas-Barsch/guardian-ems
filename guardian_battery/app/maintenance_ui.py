@@ -89,8 +89,8 @@ def render_maintenance_html(*, configuration_path: str, timeline_path: str = "ti
   </section>
 </main>
 <script>
-const CATEGORIES=['maintenance','inspection','repair','module_replacement','battery_cell_test','firmware_change','configuration_change','wiring_connection','troubleshooting','other_technical'];
-const CATEGORY_LABELS={{maintenance:'Wartung',inspection:'Inspektion',repair:'Reparatur',module_replacement:'Modultausch',battery_cell_test:'Batterie-/Zellprüfung',firmware_change:'Firmwareänderung',configuration_change:'Konfigurationsänderung',wiring_connection:'Verkabelung / Anschluss',troubleshooting:'Fehlerbehebung',other_technical:'Sonstiges technisches Ereignis'}};
+const CATEGORIES=['maintenance','inspection','repair','module_identification','module_position_change','module_replacement','module_added','module_removed','battery_cell_test','firmware_change','configuration_change','wiring_connection','troubleshooting','other_technical'];
+const CATEGORY_LABELS={{maintenance:'Wartung',inspection:'Inspektion',repair:'Reparatur',module_identification:'Erstidentifikation / Initialzuordnung',module_position_change:'Positionsänderung',module_replacement:'Modultausch',module_added:'Modul hinzugefügt',module_removed:'Modul entfernt',battery_cell_test:'Batterie-/Zellprüfung',firmware_change:'Firmwareänderung',configuration_change:'Konfigurationsänderung',wiring_connection:'Verkabelung / Anschluss',troubleshooting:'Fehlerbehebung',other_technical:'Sonstiges technisches Ereignis'}};
 const state={{current:null,editing:false,offset:0,limit:25,total:0}};
 const byId=id=>document.getElementById(id);
 function apiTarget(suffix=''){{return 'api/maintenance/events'+suffix;}}

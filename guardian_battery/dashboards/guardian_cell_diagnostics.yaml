@@ -38,6 +38,13 @@ views:
     tap_action:
       action: navigate
       navigation_path: /hassio/ingress/3195b09a_guardian_battery
+  - type: button
+    name: Zeitverläufe & Analyse
+    icon: mdi:chart-timeline-variant-shimmer
+    show_state: false
+    tap_action:
+      action: navigate
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/history
   - type: markdown
     title: Konfigurationshinweis
     content: >-

@@ -1,13 +1,15 @@
 from module_information_ui import render_module_information_html
 
 
-def test_module_information_exposes_physical_identity_and_position_intervals():
+def test_module_information_exposes_stack_centred_change_matrix():
     html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
-    assert "Physische Module" in html
-    assert "Seriennummer ist die dauerhafte Identität" in html
-    assert 'id="physical-history"' in html
-    assert "serial_histories" in html
-    assert "valid_from" in html and "valid_to" in html
+    assert "Stack-Positionshistorie" in html
+    assert 'id="matrix-head"' in html and 'id="matrix-body"' in html
+    assert "Position ${position}" in html and "aktuell" in html
+    assert "slice(-matrixLimit)" in html and "matrixLimit+=20" in html
+    assert "matrixSnapshots=allSnapshots.filter" in html
+    assert "shortDate" in html and "title=" in html
+    assert "item.positions" in html and "'leer'" in html
     assert "maintenance?event_id=" in html
 
 

@@ -6,7 +6,8 @@ from maintenance import MaintenanceEventLog
 from maintenance_service import MaintenanceRepository, MaintenanceService
 from position_history import (PositionHistoryConflictError, PositionHistoryLog,
                               PositionHistoryService, PositionHistoryValidationError,
-                              documented_identity_at, observed_stack, update_observed_stack)
+                              classify_stack_change, documented_identity_at,
+                              observed_stack, update_observed_stack)
 from position_history_api import PositionHistoryApi
 
 
@@ -125,3 +126,15 @@ def test_physical_serial_history_tracks_swaps_removal_and_reinsertion(tmp_path):
     x=next(item for item in service.serial_histories() if item["serial"]=="SN-X")
     assert [interval["position"] for interval in x["intervals"]] == [5,6,None,2]
     assert x["intervals"][0]["valid_to"] == "2026-08-20T10:00:00+00:00"
+
+
+def test_stack_change_semantics_do_not_call_first_identification_a_replacement():
+    empty=state(); initial=state(**{"1":"A","2":"B"})
+    assert classify_stack_change(empty,initial)["kind"]=="initial_identification"
+    assert classify_stack_change(initial,state(**{"1":"B","2":"A"}))["kind"]=="position_change"
+    assert classify_stack_change(initial,state(**{"1":"A","2":"C"}))["kind"]=="module_replacement"
+    later_identification=state(**{"1":"A","2":"B","3":"C"})
+    assert classify_stack_change(initial,later_identification)["kind"]=="initial_identification"
+    assert classify_stack_change(initial,later_identification,
+                                 confirmed_empty_positions={"3"})["kind"]=="module_added"
+    assert classify_stack_change(initial,state(**{"1":"A"}))["kind"]=="module_removed"

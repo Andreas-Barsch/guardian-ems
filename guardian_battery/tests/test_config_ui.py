@@ -101,4 +101,7 @@ def test_confirmed_bms_identity_creates_append_only_system_event_and_snapshot(tm
     event=config_ui._get_maintenance_api().service.get(snapshot.maintenance_event_id)
     assert snapshot.positions['2']=='SN-A'
     assert event.source['kind']=='guardian_bms_identity'
+    assert event.source['change_kind']=='initial_identification'
+    assert event.category=='module_identification'
+    assert event.title=='Erstidentifikation der Stackbelegung'
     assert len(position_path.read_text().splitlines())==1

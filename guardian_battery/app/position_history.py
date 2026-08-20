@@ -303,6 +303,39 @@ def stable_observed_changes(documented: Mapping[str, str | None] | None) -> dict
             if serial and expected.get(str(position)) != serial}
 
 
+def classify_stack_change(before: Mapping[str, str | None] | None,
+                          after: Mapping[str, str | None], *,
+                          confirmed_empty_positions: set[str] | None = None) -> dict[str, str]:
+    """Describe a confirmed full-stack transition without guessing its cause."""
+    previous = dict(before or {str(position): None for position in STACK_POSITIONS})
+    current = dict(after)
+    changed = [key for key in previous if previous[key] != current[key]]
+    known_before = {serial for serial in previous.values() if serial}
+    known_after = {serial for serial in current.values() if serial}
+    added = known_after - known_before
+    removed = known_before - known_after
+    identified = [key for key in changed if previous[key] is None and current[key] is not None]
+
+    proven_empty = confirmed_empty_positions or set()
+    if identified and not removed and not all(key in proven_empty for key in identified):
+        return {"kind": "initial_identification", "category": "module_identification",
+                "title": "Erstidentifikation der Stackbelegung"}
+    if known_before == known_after and changed:
+        return {"kind": "position_change", "category": "module_position_change",
+                "title": "Bestätigte Positionsänderung"}
+    if added and removed:
+        return {"kind": "module_replacement", "category": "module_replacement",
+                "title": "Bestätigter Modulaustausch"}
+    if added and identified and all(key in proven_empty for key in identified):
+        return {"kind": "module_added", "category": "module_added",
+                "title": "Modul hinzugefügt"}
+    if removed:
+        return {"kind": "module_removed", "category": "module_removed",
+                "title": "Modul entfernt"}
+    return {"kind": "stack_assignment_change", "category": "module_position_change",
+            "title": "Bestätigte Änderung der Stackbelegung"}
+
+
 def documented_identity_at(path: Path | str, position: int, timestamp: datetime | str) -> tuple[str | None, str | None]:
     """Resolve only documentary identity; legacy/unknown history stays unknown."""
     target = normalize_utc_timestamp(timestamp, "timestamp")

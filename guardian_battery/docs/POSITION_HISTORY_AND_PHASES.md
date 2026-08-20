@@ -26,6 +26,21 @@ Seriennummer→Position zu einem Zeitpunkt sowie bekannte Seriennummern je
 Position. Neue Snapshots verlangen die ID eines aktiven Maintenance Events und
 `expected_latest_snapshot_id` als optimistische Nebenläufigkeitskontrolle.
 
+Die Modulinformationen projizieren diese Vollsnapshots stackzentriert: Zeilen
+sind Positionen 6 bis 1, Spalten sind ausschließlich bestätigte
+Änderungszeitpunkte, und jede Zelle zeigt die damalige Seriennummer oder
+„leer“. Die jüngste Belegung erscheint zusätzlich als markierte Spalte
+„aktuell“. Zunächst werden 20 Change-Dates dargestellt; ältere werden ohne
+Änderung oder Begrenzung der Persistenz nachgeladen. Das Datum bleibt kompakt,
+die vollständige lokale Zeit ist als Tooltip beziehungsweise in den
+Änderungsdetails zugänglich.
+
+Automatische Maintenance-Ereignisse unterscheiden semantisch zwischen
+Erstidentifikation, Positionsänderung, Modulaustausch sowie hinzugefügten oder
+entfernten Modulen. Insbesondere ist eine erstmalig belegte Zuordnung
+`unbekannt → Seriennummer` eine Erstidentifikation und kein nachgewiesener
+Modultausch.
+
 ### Persistenz, Restart und Rollback
 
 `position_history.jsonl` enthält schema-versionierte JSON-Objekte, einen

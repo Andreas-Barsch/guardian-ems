@@ -27,7 +27,8 @@ from history_api import HISTORY_API_ROUTE, HistoryApi
 from history_series import DEFAULT_CELL_HISTORY_DIR, CellHistorySeries
 from history_ui import render_history_html
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog,
-                              PositionHistoryService, stable_observed_changes)
+                              PositionHistoryService, classify_stack_change,
+                              stable_observed_changes)
 from position_history_api import POSITION_HISTORY_API_ROUTE, PositionHistoryApi
 from module_information_ui import render_module_information_html
 from config_history import ConfigHistory
@@ -127,15 +128,17 @@ def record_stable_observed_positions() -> bool:
                 if value == serial:
                     positions[key] = None
             positions[str(position)] = serial
+        semantics = classify_stack_change(current.positions if current else None, positions)
         now = datetime.now(timezone.utc)
         event = _get_maintenance_api().service.create(
-            occurred_at=now, category="module_replacement",
-            title="Automatisch erkannte Modulzuordnung",
+            occurred_at=now, category=semantics["category"],
+            title=semantics["title"],
             affected_system="Pylontech Stack",
             description="Guardian hat eine wiederholt stabile Seriennummernzuordnung erkannt.",
             previous_state=previous,
             result=", ".join(f"P{position}: {serial}" for position, serial in sorted(changes.items())),
-            source={"kind": "guardian_bms_identity", "confirmation_reads": 3},
+            source={"kind": "guardian_bms_identity", "change_kind": semantics["kind"],
+                    "confirmation_reads": 3},
         )
         position_service.record(
             effective_at=now.isoformat(), maintenance_event_id=event.maintenance_event_id,

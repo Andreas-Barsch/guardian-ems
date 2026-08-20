@@ -1,5 +1,22 @@
 # Guardian Battery Changelog
 
+## 0.6.2 - Analysis navigation and stack-centred position history
+
+- Ergänzt auf dem Guardian-Dashboard die eigenständige Kachel
+  „Zeitverläufe & Analyse“ als direkten Einstieg in die vorhandene
+  Guardian-History mit Visual Phase Projection.
+- Belässt Home-Assistant-Standard-`history-graph`-Karten ausdrücklich
+  unverändert und verwendet keine fragile zweite Sidebar-Registrierung.
+- Stellt bestätigte Positionsänderungen als stackzentrierte Matrix dar:
+  Positionen in Zeilen, vollständige Change-Date-Snapshots in Spalten und ein
+  klar markierter aktueller Stackzustand.
+- Zeigt zunächst 20 Change-Dates und lädt ältere in weiteren 20er-Schritten,
+  ohne die append-only Historie zu begrenzen oder umzuschreiben.
+- Unterscheidet Erstidentifikation, Positionsänderung, Modulaustausch,
+  hinzugefügtes und entferntes Modul semantisch. Unbekannt → Seriennummer wird
+  nicht länger als Modultausch bezeichnet.
+- Guardian/Add-on `0.6.2`; Diagnostic Engine unverändert `0.4.12`.
+
 ## 0.6.1 - Visual phases, scalable history and physical identity
 
 - Trennt diagnostische Phasen strikt von einer zeitstabilisierten Visual Phase
