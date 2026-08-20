@@ -8,13 +8,14 @@ def test_defaults_valid():
     assert validate(dict(DEFAULTS)) == []
 
 
-def test_central_portal_has_direct_function_navigation():
-    html = config_ui._portal_html()
-    for label in ("Modulinformationen", "Stack &amp; Module", "Zeitverläufe &amp; Analyse",
-                  "Maintenance &amp; Verlauf", "Konfiguration"):
-        assert label in html
-    assert 'module-information#module-information' in html
-    assert 'module-information#stack-and-modules' in html
+def test_configuration_navigation_has_no_extra_portal_level():
+    html = config_ui._config_html()
+    assert "Zentrales Funktionsportal" not in html
+    assert "Module &amp; Stack" in html
+    assert 'href="configuration"' in html
+    assert 'href="timeline"' in html
+    assert 'href="history"' in html
+    assert not hasattr(config_ui, "_portal_html")
 
 def test_module_count_range():
     cfg=dict(DEFAULTS); cfg['module_count']=7

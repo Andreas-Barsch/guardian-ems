@@ -37,7 +37,7 @@ views:
     show_state: false
     tap_action:
       action: navigate
-      navigation_path: /hassio/ingress/3195b09a_guardian_battery
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/configuration
   - type: button
     name: Zeitverläufe & Analyse
     icon: mdi:chart-timeline-variant-shimmer
@@ -46,19 +46,19 @@ views:
       action: navigate
       navigation_path: /hassio/ingress/3195b09a_guardian_battery/history
   - type: button
-    name: Stack & Module
+    name: Module & Stack
     icon: mdi:battery-sync
     show_state: false
     tap_action:
       action: navigate
-      navigation_path: /hassio/ingress/3195b09a_guardian_battery/module-information#stack-and-modules
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/module-information
   - type: button
-    name: Modulinformationen
-    icon: mdi:information-outline
+    name: Maintenance & Verlauf
+    icon: mdi:wrench-clock
     show_state: false
     tap_action:
       action: navigate
-      navigation_path: /hassio/ingress/3195b09a_guardian_battery/module-information#module-information
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/timeline
   - type: markdown
     title: Konfigurationshinweis
     content: >-

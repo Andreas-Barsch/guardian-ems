@@ -41,7 +41,7 @@ def render_maintenance_html(*, configuration_path: str, timeline_path: str = "ti
   </style>
 </head>
 <body>
-<header><h1>Guardian Battery</h1><nav><a href="./">Portal</a><a href="{config_href}">Konfiguration</a><a class="active" href="maintenance">Maintenance-Logbuch</a><a href="{timeline_href}">Verlauf</a><a href="{history_href}">Zeitverläufe</a></nav></header>
+<header><h1>Guardian Battery</h1><nav><a href="./">Module &amp; Stack</a><a href="{config_href}">Konfiguration</a><a class="active" href="maintenance">Maintenance-Logbuch</a><a href="{timeline_href}">Verlauf</a><a href="{history_href}">Zeitverläufe</a></nav></header>
 <main>
   <div id="message" role="status" aria-live="polite"></div>
   <section id="list-view" class="panel">

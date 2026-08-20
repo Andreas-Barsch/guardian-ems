@@ -7,7 +7,6 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from html import escape
 from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -259,22 +258,10 @@ def validate(cfg):
         if not (cfg.get(o,0)<cfg.get(w,0)<cfg.get(c,0)): errors.append(f'{name}: Beobachten < Warnung < Kritisch ist erforderlich.')
     return errors
 
-def _portal_html(*, module_path='module-information', maintenance_path='maintenance',
-                 timeline_path='timeline', history_path='history', configuration_path='configuration'):
-    links = [("Modulinformationen", module_path + "#module-information", "Seriennummern und technische Modulidentität"),
-             ("Stack & Module", module_path + "#stack-and-modules", "Aktuelle Belegung und Positionshistorie"),
-             ("Zeitverläufe & Analyse", history_path, "Messreihen und Visual Phase Projection"),
-             ("Maintenance & Verlauf", timeline_path, "Maintenance und technische Ereignisse"),
-             ("Konfiguration", configuration_path, "Soll-Topologie und Guardian-Einstellungen")]
-    cards=''.join(f'<a class="card" href="{escape(href, quote=True)}"><strong>{escape(title)}</strong><span>{escape(text)}</span></a>' for title,href,text in links)
-    return f'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Battery</title><style>
-:root{{color-scheme:light dark;--blue:#0d47a1}}*{{box-sizing:border-box}}body{{margin:0;font:15px/1.45 system-ui;background:var(--primary-background-color,#f5f6f8);color:var(--primary-text-color,#222)}}header{{padding:24px;background:var(--blue);color:#fff}}main{{max-width:1050px;margin:auto;padding:20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}}.card{{display:flex;flex-direction:column;gap:8px;padding:20px;border-radius:12px;background:var(--card-background-color,#fff);color:inherit;text-decoration:none;box-shadow:0 1px 5px #0002;border:1px solid #8883}}.card:hover{{border-color:#1976d2}}.card strong{{font-size:18px}}.card span{{opacity:.75}}</style></head><body><header><h1>Guardian Battery</h1><p>Zentrales Funktionsportal</p></header><main><h2>Information · Analyse · Maintenance · Konfiguration</h2><div class="grid">{cards}</div></main></body></html>'''
-
-
 def _config_html(maintenance_path='maintenance', timeline_path='timeline', history_path='history'):
     page = r'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Konfiguration</title>
 <style>:root{color-scheme:light dark;--b:#1976d2;--warn:#ef6c00}body{font:14px system-ui;margin:0;background:var(--primary-background-color,#fafafa);color:var(--primary-text-color,#222)}header{padding:18px 22px;background:#0d47a1;color:white}header nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}header nav a{color:white;text-decoration:none;padding:8px 12px;border:1px solid #ffffff66;border-radius:8px}header nav a.active{background:white;color:#0d47a1}main{max-width:1100px;margin:auto;padding:16px}.intro,.group{background:var(--card-background-color,#fff);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px #0002}.group h2{margin-top:0}.row{display:grid;grid-template-columns:minmax(240px,1fr) minmax(160px,260px);gap:12px;padding:12px 0;border-top:1px solid #8883}.label{font-weight:650}.meta{font-size:12px;opacity:.72;margin-top:3px}.impact{font-size:12px;margin-top:6px;padding:7px 9px;border-left:3px solid var(--warn);background:#ff980012}input,select{width:100%;box-sizing:border-box;padding:9px;border:1px solid #8888;border-radius:7px;background:transparent;color:inherit}.advanced{border-left:4px solid #777}.actions{position:sticky;bottom:0;background:var(--card-background-color,#fff);padding:12px 16px;border-radius:12px;box-shadow:0 -2px 8px #0002;display:flex;gap:10px;align-items:center}button{padding:10px 16px;border:0;border-radius:8px;cursor:pointer}button.primary{background:var(--b);color:white}.status{margin-left:auto;font-weight:600}.changed{outline:2px solid #ff980088}.sys{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.sys div{padding:8px;background:#8881;border-radius:7px}@media(max-width:650px){.row{grid-template-columns:1fr}.actions{flex-wrap:wrap}.status{width:100%;margin:0}}</style></head>
-<body><header><h1>Guardian Battery</h1><div>Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern</div><nav><a href="./">Portal</a><a class="active" href="configuration">Konfiguration</a><a href="module-information">Modulinformationen</a><a href="__MAINTENANCE_PATH__">Maintenance-Logbuch</a><a href="__TIMELINE_PATH__">Verlauf</a><a href="__HISTORY_PATH__">Zeitverläufe</a></nav></header><main>
+<body><header><h1>Guardian Battery</h1><div>Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern</div><nav><a href="./">Module &amp; Stack</a><a class="active" href="configuration">Konfiguration</a><a href="__MAINTENANCE_PATH__">Maintenance-Logbuch</a><a href="__TIMELINE_PATH__">Verlauf</a><a href="__HISTORY_PATH__">Zeitverläufe</a></nav></header><main>
 <div class="intro"><b>Wirkung von Änderungen</b><p>Änderungen verändern die zukünftige Erfassung und/oder Bewertung. Historische Rohdaten werden nicht umgeschrieben. Nach erfolgreichem Übernehmen wird Guardian neu gestartet; diagnostisch relevante Änderungen erzeugen einen neuen Provenienz-Eintrag.</p><div class="sys" id="sys"></div></div>
 <form id="form"></form><div class="actions"><button type="button" onclick="resetDefaults()">Auf Standard zurücksetzen</button><button type="button" onclick="reloadCfg()">Änderungen verwerfen</button><button class="primary" type="button" onclick="save()">Validieren & Übernehmen</button><span class="status" id="status"></span></div></main>
 <script>let model,current={};const esc=s=>String(s).replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -361,7 +348,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip('/').endswith('/api/config'):
             rec=_last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
             self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
-        base=self._ingress_base(); self._send(200,_portal_html(module_path=(base+'/module-information') or '/module-information',maintenance_path=(base+'/maintenance') or '/maintenance',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history',configuration_path=(base+'/configuration') or '/configuration'),'text/html')
+        base=self._ingress_base(); self._send(200,render_module_information_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance'),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self._is_position_history_api():

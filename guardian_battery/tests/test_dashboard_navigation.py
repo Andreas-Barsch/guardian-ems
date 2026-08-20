@@ -15,9 +15,21 @@ def test_dashboard_has_prominent_guardian_analysis_navigation():
     }
 
 
-def test_dashboard_has_direct_stack_and_module_information_navigation():
+def test_dashboard_has_all_direct_guardian_navigation_without_portal():
     path = Path(__file__).resolve().parents[1] / "dashboards" / "guardian_cell_diagnostics.yaml"
     cards = yaml.safe_load(path.read_text(encoding="utf-8"))["views"][0]["cards"]
     targets = {item.get("name"): item.get("tap_action", {}).get("navigation_path") for item in cards}
-    assert targets["Stack & Module"].endswith("/module-information#stack-and-modules")
-    assert targets["Modulinformationen"].endswith("/module-information#module-information")
+    assert targets["Module & Stack"].endswith("/module-information")
+    assert targets["Maintenance & Verlauf"].endswith("/timeline")
+    assert targets["Konfiguration"].endswith("/configuration")
+    assert targets["Zeitverläufe & Analyse"].endswith("/history")
+
+
+def test_home_assistant_deployment_dashboard_has_same_direct_targets():
+    path = Path(__file__).resolve().parents[2] / "homeassistant" / "dashboards" / "guardian_cell_diagnostics.yaml"
+    cards = yaml.safe_load(path.read_text(encoding="utf-8"))["views"][0]["cards"]
+    targets = {item.get("name"): item.get("tap_action", {}).get("navigation_path") for item in cards}
+    assert targets["Module & Stack"].endswith("/module-information")
+    assert targets["Zeitverläufe & Analyse"].endswith("/history")
+    assert targets["Maintenance & Verlauf"].endswith("/timeline")
+    assert targets["Konfiguration"].endswith("/configuration")

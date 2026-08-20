@@ -38,7 +38,7 @@ def test_svg_chart_has_real_axes_units_layers_resize_and_local_tooltip():
     assert 'id="cells-all"' in html and 'id="cells-none"' in html
     assert "cell_numbers" in html and "selectedCells" in html
     assert "grid-template-columns:minmax(135px" in html
-    assert "byId('cell-picker').disabled" in html
+    assert "picker.hidden=!cell" in html and "picker.disabled=!cell" in html
     assert 'id="cell-label" hidden' not in html
     assert "@media(max-width:980px)" in html
     assert "@media(max-width:620px)" in html
@@ -58,8 +58,25 @@ def test_empty_phase_wrench_and_cell_identification_are_explicit():
     assert "if(!points.length){byId('tooltip').hidden=true;return}" not in html
 
 
-def test_visual_phase_toggle_is_central_and_layers_are_ordered():
+def test_visual_phase_is_permanent_german_and_help_is_dynamic():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
-    assert 'id="show-phases"' in html and ">EIN<" in html and ">AUS<" in html
+    assert 'id="show-phases" type="hidden" value="on"' in html
+    assert "Phasen anzeigen" not in html and ">EIN<" not in html and ">AUS<" not in html
+    assert "data.phase_analysis?.intervals||[]" in html
     assert html.index('id="phase-layer"') < html.index('id="series-layer"') < html.index('id="marker-layer"')
-    assert "byId('show-phases').onchange" in html
+    assert "byId('show-phases').onchange" not in html
+    assert 'id="help-open"' in html and "fetch('api/config')" in html
+    labels = ["1. Entladung", "2. Tiefbereich", "3. Ladung", "4. Hochbereich"]
+    assert [html.index(label) for label in labels] == sorted(html.index(label) for label in labels)
+    assert "Diagnostic Phase:" in html and "Visual Phase Projection:" in html
+
+
+def test_multicell_controls_are_wired_to_dom_and_query():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert '<fieldset id="cell-picker" hidden>' in html
+    assert "input.onchange=updateCellState" in html
+    assert "byId('cells-all').onclick=()=>setCells(true)" in html
+    assert "byId('cells-none').onclick=()=>setCells(false)" in html
+    assert "q.set('cell_numbers',cells.join(','))" in html
+    assert "selectedCells().length" in html
+    assert "Aktivitätsfilter" not in html

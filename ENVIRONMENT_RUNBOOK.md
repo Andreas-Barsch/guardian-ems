@@ -565,3 +565,18 @@ Vor jeder weiteren Entwicklung mit Codex gilt:
 -   Neue Diagnoseverfahren oder fachliche Kennzahlen müssen weiterhin
     wissenschaftlich/fachlich getrennt von Herstellerdaten
     gekennzeichnet und validiert werden.
+
+## 17. Guardian-Navigation ab 0.6.4
+
+-   `config.yaml` stellt genau ein Supervisor-Ingress-Panel für die App bereit.
+    Dessen Wurzelroute öffnet direkt „Module & Stack“; ein zusätzliches
+    Guardian-Funktionsportal wird nicht verwendet.
+-   Stabile Unterseiten (`/module-information`, `/history`, `/timeline`,
+    `/configuration`) sind über direkte Lovelace-Navigationsziele unter
+    `/hassio/ingress/3195b09a_guardian_battery/...` erreichbar.
+-   Mehrere native Ziele lassen sich nicht aus einer einzelnen
+    Add-on-`ingress_panel`-Deklaration erzeugen. Zusätzliche HA-Sidebar-Einträge
+    sind nur als eigenständige Lovelace-Dashboards konfigurierbar, nicht als
+    weitere deklarative Unterrouten desselben Add-on-Ingress-Panels.
+-   Guardian Home Andreas verwendet deshalb direkte Funktionskacheln ohne
+    Portal-Zwischenstufe.

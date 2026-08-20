@@ -29,6 +29,34 @@ views:
     tap_action:
       action: navigate
       navigation_path: /guardian-cell-diagnostics/bewertungslogik
+  - type: button
+    name: Module & Stack
+    icon: mdi:battery-sync
+    show_state: false
+    tap_action:
+      action: navigate
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/module-information
+  - type: button
+    name: Zeitverläufe & Analyse
+    icon: mdi:chart-timeline-variant-shimmer
+    show_state: false
+    tap_action:
+      action: navigate
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/history
+  - type: button
+    name: Maintenance & Verlauf
+    icon: mdi:wrench-clock
+    show_state: false
+    tap_action:
+      action: navigate
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/timeline
+  - type: button
+    name: Konfiguration
+    icon: mdi:tune-variant
+    show_state: false
+    tap_action:
+      action: navigate
+      navigation_path: /hassio/ingress/3195b09a_guardian_battery/configuration
   - type: markdown
     title: Module
     content: Tippe auf ein vorhandenes Modul, um die **15-Zellen-Ansicht** zu öffnen.

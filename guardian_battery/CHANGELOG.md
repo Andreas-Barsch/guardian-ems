@@ -1,5 +1,18 @@
 # Guardian Battery Changelog
 
+## 0.6.4 - Direct navigation and operational analysis controls
+
+- Entfernt das zusätzliche Funktionsportal: Der stabile Add-on-Ingress öffnet
+  direkt „Module & Stack“, während Guardian Home Andreas unmittelbar zu
+  Modulen, Analyse, Maintenance-Verlauf und Konfiguration verlinkt.
+- Zeigt die Zell-Mehrfachauswahl nur für Zellspannung und Zelltemperatur und
+  verbindet Einzel-, Alle- und Keine-Auswahl sichtbar mit dem API-Query-State.
+- Entfernt Aktivitäts- und Phasenschalter aus der Analyse; die getrennte Visual
+  Phase Projection bleibt permanent aktiv und beschriftet Phasen deutsch.
+- Stellt eine direkt erreichbare Hilfe für Diagnostic Phase, visuelle Glättung,
+  Confidence und dynamisch geladene phasenspezifische Grenzwerte bereit.
+- Guardian/Add-on `0.6.4`; Diagnostic Engine unverändert `0.4.12`.
+
 ## 0.6.3 - Guardian portal and history usability
 
 - Zentraler Ingress-Einstieg als Funktionsportal für Information, Analyse,

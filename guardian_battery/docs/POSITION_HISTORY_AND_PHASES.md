@@ -78,8 +78,9 @@ Die drei Analysemodi sind strikt getrennt:
   mitsenden. Diese Auswertung ist flüchtig und schreibt weder Konfiguration noch
   Messhistorie.
 
-Das zentrale Guardian-Portal trennt Information, Analyse, Maintenance und
-Konfiguration und verlinkt diese Bereiche direkt. Verlauf und Analyse übergeben
+Der einzelne stabile Add-on-Ingress öffnet direkt „Module & Stack“. Das
+Home-Assistant-Dashboard verlinkt ohne Zwischenportal unmittelbar zu Modulen,
+Analyse, Maintenance-Verlauf und Konfiguration. Verlauf und Analyse übergeben
 ihren Filterzustand als Rücksprungziel an Maintenance-Details.
 
 Die Maintenance-History startet ohne Von-/Bis-Filter mit Maintenance als
@@ -91,6 +92,10 @@ In der Zeitverlaufsanalyse können Zellmetriken per Checkbox für eine, mehrere
 oder alle Zellen gewählt werden. Alle gewählten Reihen entstehen in einem
 History-Scan und verwenden weiterhin Cache und extrema-erhaltendes Downsampling.
 Maintenance-Aktionen bleiben bewusst auf höchstens eine konkrete Zelle bezogen.
+Die Zellwahl ist bei SOC und Modulstrom ausgeblendet. Die Visual Phase
+Projection ist in der Guardian-Analyse permanent sichtbar; ihre Hilfe lädt
+Phasen-, Confidence- und Abweichungsgrenzen dynamisch aus der aktiven
+Guardian-Konfiguration.
 
 `api/history/series` liefert Phaseintervalle getrennt von Messreihe und
 Maintenance-Markern. Die UI zeichnet in dieser Reihenfolge: Phasenhintergrund,
