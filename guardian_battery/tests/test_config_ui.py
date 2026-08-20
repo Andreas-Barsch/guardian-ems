@@ -7,6 +7,15 @@ from config_ui import DEFAULTS, Handler, validate
 def test_defaults_valid():
     assert validate(dict(DEFAULTS)) == []
 
+
+def test_central_portal_has_direct_function_navigation():
+    html = config_ui._portal_html()
+    for label in ("Modulinformationen", "Stack &amp; Module", "Zeitverläufe &amp; Analyse",
+                  "Maintenance &amp; Verlauf", "Konfiguration"):
+        assert label in html
+    assert 'module-information#module-information' in html
+    assert 'module-information#stack-and-modules' in html
+
 def test_module_count_range():
     cfg=dict(DEFAULTS); cfg['module_count']=7
     assert any('Installierte Batteriemodule' in x for x in validate(cfg))

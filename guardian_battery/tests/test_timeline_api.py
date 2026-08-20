@@ -11,7 +11,7 @@ def test_api_response_window_sorting_and_multiple_types(tmp_path):
     assert response.status == 200
     assert len(response.body["events"]) == 1
     assert response.body["window"]["inclusive"] is True
-    assert response.body["sorting"]["direction"] == "oldest_first"
+    assert response.body["sorting"]["direction"] == "newest_first"
 
 
 def test_api_rejects_invalid_parameters_and_method(tmp_path):

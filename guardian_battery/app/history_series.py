@@ -79,7 +79,7 @@ class CellHistorySeries:
         return sorted(path for path in self.directory.glob("*.jsonl") if first <= path.stem <= last)
 
     def query_bundle(self, *, metric, timestamp_from, timestamp_to, module_number,
-                     cell_number=None, max_points=DEFAULT_MAX_DISPLAY_POINTS):
+                     cell_number=None, cell_numbers=None, max_points=DEFAULT_MAX_DISPLAY_POINTS):
         if metric not in SERIES_METRICS:
             raise ValueError("unsupported series metric")
         paths = self._paths(timestamp_from, timestamp_to)
@@ -87,7 +87,9 @@ class CellHistorySeries:
             signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths)
         except OSError as exc:
             raise SeriesHistoryError("cell history is unavailable") from exc
-        key = (signature, metric, timestamp_from, timestamp_to, module_number, cell_number, max_points)
+        selected_cells = tuple(sorted(cell_numbers)) if cell_numbers else None
+        key = (signature, metric, timestamp_from, timestamp_to, module_number, cell_number,
+               selected_cells, max_points)
         if key in self._cache:
             self._cache.move_to_end(key)
             return {**self._cache[key], "cache_hit": True}
@@ -95,7 +97,7 @@ class CellHistorySeries:
         started = time.perf_counter()
         start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
         end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
-        group_count = 15 if metric in {"cell_voltage", "cell_temperature"} and cell_number is None else 1
+        group_count = len(selected_cells) if selected_cells else (15 if metric in {"cell_voltage", "cell_temperature"} and cell_number is None else 1)
         per_group = max(4, max_points // group_count)
         collectors: dict[int, _ExtremaCollector] = {}
         samples, raw_records, raw_points = [], 0, 0
@@ -119,7 +121,8 @@ class CellHistorySeries:
                                         "soc_percent": float(record["soc_percent"]),
                                         "voltages_mv": [float(value) for value in record["voltages_mv"]],
                                         "module_serial": record.get("module_serial")})
-                        for point in self._points(record, metric, cell_number, timestamp, epoch):
+                        for point in self._points(record, metric, cell_number, timestamp, epoch,
+                                                  selected_cells):
                             group = point.get("cell_number", 0)
                             collectors.setdefault(group, _ExtremaCollector(per_group, start_epoch, end_epoch)).add(point)
                             raw_points += 1
@@ -148,7 +151,7 @@ class CellHistorySeries:
                                  timestamp_to=timestamp_to, module_number=module_number)["samples"]
 
     @staticmethod
-    def _points(record, metric, cell, timestamp, epoch):
+    def _points(record, metric, cell, timestamp, epoch, selected_cells=None):
         provenance = {key: record[key] for key in
                       ("module_serial", "position_history_id", "identity_source")
                       if record.get(key) is not None}
@@ -161,4 +164,5 @@ class CellHistorySeries:
         if cell is not None:
             return [{**common, "value": float(values[cell - 1])}]
         return [{**common, "value": float(value), "cell_number": index}
-                for index, value in enumerate(values, 1)]
+                for index, value in enumerate(values, 1)
+                if selected_cells is None or index in selected_cells]

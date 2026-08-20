@@ -34,9 +34,11 @@ def test_svg_chart_has_real_axes_units_layers_resize_and_local_tooltip():
     assert "ResizeObserver" in html
     assert "Intl.DateTimeFormat('de-DE'" in html
     assert "niceStep" in html and "tickCount" in html
-    assert "Alle Zellen / Modulebene" in html
+    assert 'id="cell-picker"' in html
+    assert 'id="cells-all"' in html and 'id="cells-none"' in html
+    assert "cell_numbers" in html and "selectedCells" in html
     assert "grid-template-columns:minmax(135px" in html
-    assert "byId('cell').disabled=!cell" in html
+    assert "byId('cell-picker').disabled" in html
     assert 'id="cell-label" hidden' not in html
     assert "@media(max-width:980px)" in html
     assert "@media(max-width:620px)" in html

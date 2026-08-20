@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.6.3 - Guardian portal and history usability
+
+- Zentraler Ingress-Einstieg als Funktionsportal für Information, Analyse,
+  Maintenance und Konfiguration; direkte Dashboard-Kacheln für Analyse und Module.
+- Maintenance-Verlauf startet unbegrenzt mit Maintenance-Ereignissen, sortiert neueste
+  zuerst und zeigt historisch belegte Seriennummern zum Ereigniszeitpunkt.
+- Zeitverlaufsanalyse unterstützt eine effiziente Mehrfachauswahl von Zellen mit
+  gemeinsamer Legende, bestehendem Single-Pass-Scan, Cache und Downsampling.
+- Rücklinks transportieren den Zustand der aufrufenden Verlauf-/Analyseansicht.
+- Guardian/Add-on `0.6.3`; Diagnostic Engine unverändert `0.4.12`.
+
 ## 0.6.2 - Analysis navigation and stack-centred position history
 
 - Ergänzt auf dem Guardian-Dashboard die eigenständige Kachel

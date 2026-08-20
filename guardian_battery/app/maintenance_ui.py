@@ -41,7 +41,7 @@ def render_maintenance_html(*, configuration_path: str, timeline_path: str = "ti
   </style>
 </head>
 <body>
-<header><h1>Guardian Battery</h1><nav><a href="{config_href}">Konfiguration</a><a class="active" href="maintenance">Maintenance-Logbuch</a><a href="{timeline_href}">Verlauf</a><a href="{history_href}">Zeitverläufe</a></nav></header>
+<header><h1>Guardian Battery</h1><nav><a href="./">Portal</a><a href="{config_href}">Konfiguration</a><a class="active" href="maintenance">Maintenance-Logbuch</a><a href="{timeline_href}">Verlauf</a><a href="{history_href}">Zeitverläufe</a></nav></header>
 <main>
   <div id="message" role="status" aria-live="polite"></div>
   <section id="list-view" class="panel">
@@ -121,6 +121,7 @@ async function saveForm(event){{event.preventDefault();setMessage('');try{{const
 function updateUtcPreview(){{try{{const utc=localInputToUtc(byId('occurred-at').value);byId('utc-preview').textContent='Speicherwert: '+utc;}}catch{{byId('utc-preview').textContent='';}}}}
 async function toggleActive(){{const active=!state.current.active,action=active?'activate':'deactivate';try{{const payload=await apiFetch(apiTarget('/'+encodeURIComponent(state.current.maintenance_event_id)+'/'+action),{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{expected_revision:state.current.revision}})}});renderDetail(payload.event);historyData(payload.event.maintenance_event_id);}}catch(error){{setMessage(friendlyError(error),'error');}}}}
 function initialize(){{byId('timezone-name').textContent=localZone();for(const key of CATEGORIES){{const option=document.createElement('option');option.value=key;option.textContent=categoryLabel(key);byId('category').append(option);}}addOptions(byId('module-number'),1,6);addOptions(byId('filter-module'),1,6);addOptions(byId('cell-number'),1,15);addOptions(byId('filter-cell'),1,15);byId('new-button').onclick=()=>openForm();byId('detail-back').onclick=()=>{{window.history.replaceState(null,'','maintenance');state.offset=0;loadList();}};byId('edit-button').onclick=()=>openForm(state.current);byId('form-cancel').onclick=()=>state.current?loadEvent(state.current.maintenance_event_id):loadList();byId('event-form').onsubmit=saveForm;byId('occurred-at').onchange=()=>{{updateUtcPreview();setSerialOptions(state.current);}};byId('module-number').onchange=()=>setSerialOptions(state.current);byId('active-toggle').onclick=toggleActive;byId('conflict-reload').onclick=()=>loadEvent(state.current.maintenance_event_id);byId('filter-form').onsubmit=event=>{{event.preventDefault();state.offset=0;loadList();}};byId('filter-reset').onclick=()=>{{byId('filter-form').reset();state.offset=0;loadList();}};byId('page-prev').onclick=()=>{{state.offset=Math.max(0,state.offset-state.limit);loadList();}};byId('page-next').onclick=()=>{{state.offset+=state.limit;loadList();}};const eventId=new URLSearchParams(window.location.search).get('event_id');if(eventId)loadEvent(eventId);else loadList();}}
+const initializeWithReturn=initialize;initialize=function(){{initializeWithReturn();const target=new URLSearchParams(window.location.search).get('return');if(target)byId('detail-back').onclick=()=>{{window.location.href=target;}};}};
 document.addEventListener('DOMContentLoaded',initialize);
 </script>
 </body></html>'''

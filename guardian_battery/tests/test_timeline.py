@@ -67,6 +67,21 @@ def test_position_and_physical_identity_remain_independent(tmp_path):
     assert projected[unknown.maintenance_event_id].module_serial is None
 
 
+def test_missing_serial_is_resolved_at_event_time_without_overwriting_stored_identity(tmp_path):
+    maintenance, path, _ = build(tmp_path)
+    old = add(maintenance, module_number=5, module_serial=None, cell_number=None,
+              occurred_at="2024-01-01T00:00:00Z")
+    explicit = add(maintenance, module_number=5, module_serial="STORED", cell_number=None,
+                   occurred_at="2025-01-01T00:00:00Z")
+    class Positions:
+        def position_at(self, position, timestamp):
+            return "HISTORICAL" if timestamp.startswith("2024") else "CURRENT"
+    timeline = TimelineService(maintenance, TechnicalEventSource(path), Positions())
+    projected = {event.maintenance_event_id: event for event in timeline.query()}
+    assert projected[old.maintenance_event_id].module_serial == "HISTORICAL"
+    assert projected[explicit.maintenance_event_id].module_serial == "STORED"
+
+
 def test_archived_default_filter_include_and_stable_deep_link(tmp_path):
     maintenance, _, timeline = build(tmp_path)
     event = add(maintenance)
@@ -92,10 +107,11 @@ def test_real_technical_schema_is_typed_and_not_maintenance(tmp_path):
     events = timeline.query()
 
     assert [event.event_type for event in events] == [
-        "alarm_started", "alarm_cleared", "status_changed"
+        "status_changed", "alarm_cleared", "alarm_started"
     ]
     assert all(event.maintenance_event_id is None for event in events)
-    assert events[0].module_number == 2 and events[0].severity == "warning"
+    alarm = next(event for event in events if event.event_type == "alarm_started")
+    assert alarm.module_number == 2 and alarm.severity == "warning"
 
 
 def test_chronological_sort_tie_breaker_and_combined_filters(tmp_path):
@@ -111,7 +127,7 @@ def test_chronological_sort_tie_breaker_and_combined_filters(tmp_path):
     assert [event.event_type for event in events] == ["maintenance"]
     all_events = timeline.query(timestamp_from="1970-01-01T00:16:40+00:00",
                                 timestamp_to="1970-01-01T00:16:40+00:00")
-    assert [event.event_type for event in all_events] == ["maintenance", "status_changed"]
+    assert [event.event_type for event in all_events] == ["status_changed", "maintenance"]
 
 
 @pytest.mark.parametrize("content", ["{broken\n", '{"timestamp": 1, "type": "unknown"}\n',

@@ -78,6 +78,20 @@ Die drei Analysemodi sind strikt getrennt:
   mitsenden. Diese Auswertung ist flüchtig und schreibt weder Konfiguration noch
   Messhistorie.
 
+Das zentrale Guardian-Portal trennt Information, Analyse, Maintenance und
+Konfiguration und verlinkt diese Bereiche direkt. Verlauf und Analyse übergeben
+ihren Filterzustand als Rücksprungziel an Maintenance-Details.
+
+Die Maintenance-History startet ohne Von-/Bis-Filter mit Maintenance als
+Ereignisart und dem jüngsten Ereignis zuerst. Fehlende gespeicherte
+Seriennummern werden ausschließlich aus der am Ereigniszeitpunkt belegten
+Positionshistorie projiziert; ohne Beleg bleibt die Identität unbekannt.
+
+In der Zeitverlaufsanalyse können Zellmetriken per Checkbox für eine, mehrere
+oder alle Zellen gewählt werden. Alle gewählten Reihen entstehen in einem
+History-Scan und verwenden weiterhin Cache und extrema-erhaltendes Downsampling.
+Maintenance-Aktionen bleiben bewusst auf höchstens eine konkrete Zelle bezogen.
+
 `api/history/series` liefert Phaseintervalle getrennt von Messreihe und
 Maintenance-Markern. Die UI zeichnet in dieser Reihenfolge: Phasenhintergrund,
 Grid/Achsen, Messkurven, Maintenance-Werkzeugmarker, Interaktion. Rohmessungen,

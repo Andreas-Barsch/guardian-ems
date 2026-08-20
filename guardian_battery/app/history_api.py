@@ -19,7 +19,7 @@ from phase_engine import PhaseEngineError, PHASE_PARAMETER_KEYS
 LOG = logging.getLogger(__name__)
 HISTORY_API_ROUTE = "/api/history/series"
 HISTORY_FILTERS = frozenset(
-    {"metric", "from", "to", "module_number", "cell_number", "include_archived", "active",
+    {"metric", "from", "to", "module_number", "cell_number", "cell_numbers", "include_archived", "active",
      "analysis_mode", "what_if_low_soc_percent", "what_if_high_soc_percent",
      "what_if_charge_current_a", "what_if_discharge_current_a"}
 )
@@ -79,6 +79,11 @@ class HistoryApi:
             raise HistoryApiProblem("from must not exceed to")
         module_number = self._integer(values["module_number"], "module_number", 1, 6)
         cell_number = self._integer(values.get("cell_number"), "cell_number", 1, 15)
+        cell_numbers = self._integers(values.get("cell_numbers"), "cell_numbers", 1, 15)
+        if cell_number is not None and cell_numbers is not None:
+            raise HistoryApiProblem("cell_number and cell_numbers are mutually exclusive")
+        if cell_numbers is not None and metric not in {"cell_voltage", "cell_temperature"}:
+            raise HistoryApiProblem("cell_numbers requires a cell metric")
         active = self._active(values.get("active", "true"))
         include_archived = self._boolean(values.get("include_archived", "false"))
         if active in (False, None):
@@ -86,14 +91,19 @@ class HistoryApi:
         backend_started = time.perf_counter()
         bundle = self.series.query_bundle(metric=metric, timestamp_from=timestamp_from,
                                           timestamp_to=timestamp_to, module_number=module_number,
-                                          cell_number=cell_number)
+                                          cell_number=cell_number, cell_numbers=cell_numbers)
         points = bundle["points"]
-        markers = self.overlays.markers(OverlayContext(
-            timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-            module_number=module_number, cell_number=cell_number,
-            event_types=("maintenance",), include_archived=include_archived,
-            active=active,
-        ))
+        marker_cells = cell_numbers or (cell_number,)
+        projected = [marker for selected_cell in marker_cells
+                     for marker in self.overlays.markers(OverlayContext(
+                         timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                         module_number=module_number, cell_number=selected_cell,
+                         event_types=("maintenance",), include_archived=include_archived,
+                         active=active))]
+        markers = list({(marker.event_type, marker.maintenance_event_id, marker.timestamp,
+                         marker.title): marker for marker in projected}.values())
+        markers.sort(key=lambda marker: (marker.timestamp, marker.event_type,
+                                         marker.maintenance_event_id or marker.title))
         mode = values.get("analysis_mode", "historical")
         phases = []
         diagnostic_phases = []
@@ -119,7 +129,8 @@ class HistoryApi:
             visual_parameters = analysis["visual_parameters"]
         response = {
             "series": {"metric": metric, "module_number": module_number,
-                       "cell_number": cell_number, "points": points},
+                       "cell_number": cell_number, "cell_numbers": list(cell_numbers or ()),
+                       "points": points},
             "overlays": [marker.to_dict() for marker in markers],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
             "semantics": {"overlay_timestamp": "occurred_at", "correlation_only": True},
@@ -157,6 +168,18 @@ class HistoryApi:
         if not minimum <= parsed <= maximum:
             raise HistoryApiProblem(f"{field} must be between {minimum} and {maximum}")
         return parsed
+
+    @classmethod
+    def _integers(cls, value: str | None, field: str, minimum: int,
+                  maximum: int) -> tuple[int, ...] | None:
+        if value is None:
+            return None
+        parts = value.split(",")
+        if not parts or any(not part.strip() for part in parts):
+            raise HistoryApiProblem(f"{field} must contain comma-separated integers")
+        values = tuple(sorted({cls._integer(part.strip(), field, minimum, maximum)
+                               for part in parts}))
+        return values
 
     @staticmethod
     def _boolean(value: str) -> bool:

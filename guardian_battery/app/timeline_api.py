@@ -82,7 +82,7 @@ class TimelineApi:
         return ApiResponse(200, {
             "events": [event.to_dict() for event in events],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
-            "sorting": {"direction": "oldest_first", "field": "timestamp",
+            "sorting": {"direction": "newest_first", "field": "timestamp",
                         "tie_breaker": ["event_type", "projection_key"]},
             "filters": {"event_type": sorted(event_types) if event_types else None,
                         "category": category, "module_number": module_number,

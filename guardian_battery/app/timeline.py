@@ -142,9 +142,11 @@ class TechnicalEventSource:
 
 
 class TimelineService:
-    def __init__(self, maintenance: MaintenanceService, technical: TechnicalEventSource):
+    def __init__(self, maintenance: MaintenanceService, technical: TechnicalEventSource,
+                 position_history=None):
         self.maintenance = maintenance
         self.technical = technical
+        self.position_history = position_history
 
     def query(
         self, *, timestamp_from: str | None = None, timestamp_to: str | None = None,
@@ -158,13 +160,16 @@ class TimelineService:
             for item in self.maintenance.list(
                 include_archived=include_archived, newest_first=False
             ):
+                serial = item.module_serial
+                if serial is None and item.module_number is not None and self.position_history is not None:
+                    serial = self.position_history.position_at(item.module_number, item.occurred_at)
                 events.append(TimelineEvent(
                     event_type="maintenance", timestamp=item.occurred_at,
                     title=item.title, summary=item.description or item.action_taken or "",
                     source="maintenance_events", projection_key=f"maintenance:{item.maintenance_event_id}",
                     deep_link=maintenance_deep_link(item.maintenance_event_id),
                     maintenance_event_id=item.maintenance_event_id,
-                    module_number=item.module_number, module_serial=item.module_serial,
+                    module_number=item.module_number, module_serial=serial,
                     cell_number=item.cell_number,
                     status="inactive" if item.archived_at else "active",
                     metadata={"category": item.category, "created_at": item.created_at,
@@ -180,4 +185,5 @@ class TimelineService:
                     (cell_number is None or event.cell_number == cell_number) and
                     (category is None or (event.event_type == "maintenance" and
                      event.metadata.get("category") == category))]
-        return sorted(filtered, key=lambda event: (event.timestamp, event.event_type, event.projection_key))
+        return sorted(filtered, key=lambda event: (event.timestamp, event.event_type, event.projection_key),
+                      reverse=True)

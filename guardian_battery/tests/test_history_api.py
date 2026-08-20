@@ -79,6 +79,20 @@ def test_cell_metric_module_level_returns_all_raw_cells_and_module_markers(tmp_p
         system.maintenance_event_id, module.maintenance_event_id}
 
 
+def test_cell_multi_select_uses_one_history_scan_and_returns_selected_series(tmp_path):
+    _, directory, api = api_env(tmp_path)
+    write_sample(directory, datetime(2026, 8, 15, 8, tzinfo=timezone.utc).timestamp())
+    target = ("/api/history/series?metric=cell_voltage&from=2026-08-15T00:00:00Z"
+              "&to=2026-08-16T00:00:00Z&module_number=3&cell_numbers=2,6,12")
+    first = api.handle("GET", target)
+    second = api.handle("GET", target)
+    assert first.status == 200
+    assert first.body["series"]["cell_numbers"] == [2, 6, 12]
+    assert {point["cell_number"] for point in first.body["series"]["points"]} == {2, 6, 12}
+    assert first.body["performance"]["raw_records"] == 1
+    assert second.body["performance"]["cache_hit"] is True
+
+
 def test_api_rejects_invalid_requests_and_corrupt_series(tmp_path):
     _, directory, api = api_env(tmp_path)
     for query in ("", "?metric=bad&from=x&to=x&module_number=3",
