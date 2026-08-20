@@ -43,7 +43,8 @@ class PositionHistoryApi:
         if len(values) != len(raw):
             raise PositionHistoryValidationError("query parameters must occur once")
         if not suffix:
-            return ApiResponse(200, {"snapshots": [item.to_dict() for item in self.service.list()]})
+            return ApiResponse(200, {"snapshots": [item.to_dict() for item in self.service.list()],
+                                     "serial_histories": self.service.serial_histories()})
         if suffix == "current":
             item = self.service.current()
             return ApiResponse(200, {"snapshot": item.to_dict() if item else None,

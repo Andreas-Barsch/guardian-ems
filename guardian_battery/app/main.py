@@ -10,15 +10,17 @@ import statistics
 from collections import deque
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
 from cell_history import CellHistoryWriter
 from config_history import ConfigHistory
-from config_ui import configure_maintenance_live_publisher, start_config_server
+from config_ui import (configure_maintenance_live_publisher,
+                       record_stable_observed_positions, start_config_server)
 from maintenance_mqtt import MaintenanceMqttPublisher
-from position_history import update_observed_stack
+from position_history import DEFAULT_POSITION_HISTORY_FILE, documented_identity_at, update_observed_stack
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -1044,19 +1046,6 @@ def main() -> None:
                 incident = update_incident_state(status, alarms, options)
                 log_result(modules, status, alarms, bool(options["detailed_log"]))
                 now_wall=time.time(); cell_results={}
-                if options["cell_diagnostics_enabled"] and modules and now_wall-last_cell_poll >= int(options["cell_diagnostics_interval_seconds"]):
-                    for module in modules:
-                        try:
-                            rows=parse_bat(console.command(f"bat {module.module}"))
-                            if rows:
-                                sample = CellSample(time.time(), module.module, [r['voltage_mv'] for r in rows], module.current_a, module.soc_percent, [r['temperature_c'] for r in rows], [r['balancing'] for r in rows])
-                                cell_store.add(sample)
-                                try:
-                                    cell_history.append(sample)
-                                except Exception as history_exc:
-                                    LOG.warning("Cell History Modul %s: %s", module.module, history_exc)
-                        except Exception as exc: LOG.warning("Zelldiagnostik Modul %s: %s",module.module,exc)
-                    last_cell_poll=now_wall; cell_store.save()
                 if modules and now_wall-last_stat_poll >= int(options["bms_stat_interval_seconds"]):
                     try:
                         parsed=parse_stat(console.command("stat"))
@@ -1078,6 +1067,34 @@ def main() -> None:
                     last_info_poll = now_wall
 
                 update_observed_stack(module_infos)
+                try:
+                    record_stable_observed_positions()
+                except Exception as exc:
+                    LOG.warning("Positionshistorie konnte nicht fortgeschrieben werden: %s", exc)
+
+                # Identity is resolved before a new raw sample is persisted, so
+                # the first sample after a confirmed swap cannot inherit the
+                # physical serial previously installed at this position.
+                if options["cell_diagnostics_enabled"] and modules and now_wall-last_cell_poll >= int(options["cell_diagnostics_interval_seconds"]):
+                    for module in modules:
+                        try:
+                            rows=parse_bat(console.command(f"bat {module.module}"))
+                            if rows:
+                                sample_time = time.time()
+                                sample = CellSample(sample_time, module.module, [r['voltage_mv'] for r in rows], module.current_a, module.soc_percent, [r['temperature_c'] for r in rows], [r['balancing'] for r in rows])
+                                cell_store.add(sample)
+                                try:
+                                    serial, position_history_id = documented_identity_at(
+                                        DEFAULT_POSITION_HISTORY_FILE, module.module,
+                                        datetime.fromtimestamp(sample_time, timezone.utc),
+                                    )
+                                    cell_history.append({**asdict(sample), "module_serial": serial,
+                                                         "position_history_id": position_history_id,
+                                                         "identity_source": "position_history" if serial else "unknown"})
+                                except Exception as history_exc:
+                                    LOG.warning("Cell History Modul %s: %s", module.module, history_exc)
+                        except Exception as exc: LOG.warning("Zelldiagnostik Modul %s: %s",module.module,exc)
+                    last_cell_poll=now_wall; cell_store.save()
 
                 for module in modules: cell_results[module.module]=cell_store.analyse(module.module,options)
                 publisher.publish(

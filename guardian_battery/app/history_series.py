@@ -1,106 +1,164 @@
-"""Guardian-owned time-series reads combined with shared event overlays."""
-
+"""Single-pass Guardian JSONL reads and bounded extrema-preserving projection."""
 from __future__ import annotations
 
 import json
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
 
 DEFAULT_CELL_HISTORY_DIR = Path("/share/guardian_battery/cell_history")
 SERIES_METRICS = frozenset({"soc", "current", "cell_voltage", "cell_temperature"})
+DEFAULT_MAX_DISPLAY_POINTS = 6000
 
 
 class SeriesHistoryError(RuntimeError):
     pass
 
 
-class CellHistorySeries:
-    def __init__(self, directory: Path | str = DEFAULT_CELL_HISTORY_DIR):
-        self.directory = Path(directory)
+class _ExtremaCollector:
+    """Keep exact short series, then switch to fixed time-bucket min/max."""
+    def __init__(self, limit: int, start_epoch: float, end_epoch: float):
+        self.limit = max(4, limit)
+        self.start = start_epoch
+        self.span = max(1.0, end_epoch - start_epoch)
+        self.exact: list[dict] | None = []
+        self.first = None
+        self.last = None
+        self.buckets: dict[int, tuple[dict, dict]] = {}
+        self.bucket_count = max(1, (self.limit - 2) // 2)
 
-    def query(self, *, metric: str, timestamp_from: str, timestamp_to: str,
-              module_number: int, cell_number: int | None = None) -> list[dict[str, Any]]:
-        if metric not in SERIES_METRICS:
-            raise ValueError("unsupported series metric")
-        start = datetime.fromisoformat(timestamp_from)
-        end = datetime.fromisoformat(timestamp_to)
-        start_day = start.astimezone(timezone.utc).date().isoformat()
-        end_day = end.astimezone(timezone.utc).date().isoformat()
+    def add(self, point: dict) -> None:
+        self.first = self.first or point
+        self.last = point
+        if self.exact is not None:
+            self.exact.append(point)
+            if len(self.exact) <= self.limit:
+                return
+            exact, self.exact = self.exact, None
+            for existing in exact[1:-1]:
+                self._bucket(existing)
+            return
+        self._bucket(point)
+
+    def _bucket(self, point: dict) -> None:
+        index = min(self.bucket_count - 1, max(0, int(
+            (point["_epoch"] - self.start) / self.span * self.bucket_count)))
+        low, high = self.buckets.get(index, (point, point))
+        if point["value"] < low["value"]:
+            low = point
+        if point["value"] > high["value"]:
+            high = point
+        self.buckets[index] = (low, high)
+
+    def points(self) -> list[dict]:
+        if self.exact is not None:
+            result = self.exact
+        else:
+            result = [self.first]
+            for low, high in self.buckets.values():
+                result.extend(sorted({id(low): low, id(high): high}.values(),
+                                     key=lambda item: item["_epoch"]))
+            result.append(self.last)
+        unique = {id(point): point for point in result if point is not None}
+        return [{key: value for key, value in point.items() if key != "_epoch"}
+                for point in sorted(unique.values(), key=lambda item: item["_epoch"])][:self.limit]
+
+
+class CellHistorySeries:
+    def __init__(self, directory=DEFAULT_CELL_HISTORY_DIR, cache_size=24):
+        self.directory = Path(directory)
+        self.cache_size = cache_size
+        self._cache = OrderedDict()
+
+    def _paths(self, start, end):
         if not self.directory.exists():
             return []
+        first = datetime.fromisoformat(start).astimezone(timezone.utc).date().isoformat()
+        last = datetime.fromisoformat(end).astimezone(timezone.utc).date().isoformat()
+        return sorted(path for path in self.directory.glob("*.jsonl") if first <= path.stem <= last)
+
+    def query_bundle(self, *, metric, timestamp_from, timestamp_to, module_number,
+                     cell_number=None, max_points=DEFAULT_MAX_DISPLAY_POINTS):
+        if metric not in SERIES_METRICS:
+            raise ValueError("unsupported series metric")
+        paths = self._paths(timestamp_from, timestamp_to)
         try:
-            paths = sorted(path for path in self.directory.glob("*.jsonl")
-                           if start_day <= path.stem <= end_day)
+            signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths)
         except OSError as exc:
             raise SeriesHistoryError("cell history is unavailable") from exc
-        points = []
-        for path in paths:
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except OSError as exc:
-                raise SeriesHistoryError("cell history is unavailable") from exc
-            for line_number, line in enumerate(lines, 1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                    point = self._point(record, metric, module_number, cell_number)
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError) as exc:
-                    raise SeriesHistoryError(
-                        f"cell history {path.name} line {line_number} is invalid"
-                    ) from exc
-                candidates = point if isinstance(point, list) else [point]
-                points.extend(candidate for candidate in candidates if candidate and
-                              timestamp_from <= candidate["timestamp"] <= timestamp_to)
-        return sorted(points, key=lambda point: (point["timestamp"], point.get("cell_number", 0)))
+        key = (signature, metric, timestamp_from, timestamp_to, module_number, cell_number, max_points)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return {**self._cache[key], "cache_hit": True}
 
-    def samples(self, *, timestamp_from: str, timestamp_to: str, module_number: int) -> list[dict[str, Any]]:
-        """Read only the raw fields required by the canonical phase rule."""
-        start = datetime.fromisoformat(timestamp_from); end = datetime.fromisoformat(timestamp_to)
-        if not self.directory.exists(): return []
-        start_day = start.astimezone(timezone.utc).date().isoformat()
-        end_day = end.astimezone(timezone.utc).date().isoformat()
-        result = []
+        started = time.perf_counter()
+        start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
+        end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
+        group_count = 15 if metric in {"cell_voltage", "cell_temperature"} and cell_number is None else 1
+        per_group = max(4, max_points // group_count)
+        collectors: dict[int, _ExtremaCollector] = {}
+        samples, raw_records, raw_points = [], 0, 0
         try:
-            paths = sorted(path for path in self.directory.glob("*.jsonl") if start_day <= path.stem <= end_day)
             for path in paths:
-                for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                    if not line.strip(): continue
-                    record = json.loads(line)
-                    if record.get("schema_version") != 1: raise ValueError("schema")
-                    if int(record["module"]) != module_number: continue
-                    timestamp = datetime.fromtimestamp(float(record["timestamp"]), timezone.utc).isoformat()
-                    if timestamp_from <= timestamp <= timestamp_to:
-                        result.append({"timestamp": timestamp, "current_a": float(record["current_a"]),
-                                       "soc_percent": float(record["soc_percent"]),
-                                       "voltages_mv": [float(value) for value in record["voltages_mv"]]})
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            raise SeriesHistoryError("cell history is unavailable") from exc
-        return sorted(result, key=lambda item: item["timestamp"])
+                with path.open(encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, 1):
+                        if not line.strip():
+                            continue
+                        record = json.loads(line)
+                        if record.get("schema_version") != 1:
+                            raise ValueError("schema")
+                        if int(record["module"]) != module_number:
+                            continue
+                        epoch = float(record["timestamp"])
+                        if not start_epoch <= epoch <= end_epoch:
+                            continue
+                        timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                        raw_records += 1
+                        samples.append({"timestamp": timestamp, "current_a": float(record["current_a"]),
+                                        "soc_percent": float(record["soc_percent"]),
+                                        "voltages_mv": [float(value) for value in record["voltages_mv"]],
+                                        "module_serial": record.get("module_serial")})
+                        for point in self._points(record, metric, cell_number, timestamp, epoch):
+                            group = point.get("cell_number", 0)
+                            collectors.setdefault(group, _ExtremaCollector(per_group, start_epoch, end_epoch)).add(point)
+                            raw_points += 1
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError) as exc:
+            raise SeriesHistoryError(f"cell history is invalid: {exc}") from exc
+
+        scan_seconds = time.perf_counter() - started
+        downsample_started = time.perf_counter()
+        points = [point for collector in collectors.values() for point in collector.points()]
+        points.sort(key=lambda point: (point["timestamp"], point.get("cell_number", 0)))
+        downsample_seconds = time.perf_counter() - downsample_started
+        result = {"points": points, "samples": samples, "raw_records": raw_records,
+                  "raw_points": raw_points, "read_seconds": scan_seconds,
+                  "downsample_seconds": downsample_seconds,
+                  "cache_hit": False}
+        self._cache[key] = result
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+        return result
+
+    def query(self, **kwargs):
+        return self.query_bundle(**kwargs)["points"]
+
+    def samples(self, *, timestamp_from, timestamp_to, module_number):
+        return self.query_bundle(metric="soc", timestamp_from=timestamp_from,
+                                 timestamp_to=timestamp_to, module_number=module_number)["samples"]
 
     @staticmethod
-    def _point(record: Any, metric: str, module_number: int,
-               cell_number: int | None) -> dict[str, Any] | None:
-        if not isinstance(record, dict) or record.get("schema_version") != 1:
-            raise ValueError("unsupported cell history schema")
-        if int(record["module"]) != module_number:
-            return None
-        raw_timestamp = record["timestamp"]
-        if isinstance(raw_timestamp, bool) or not isinstance(raw_timestamp, (int, float)):
-            raise ValueError("timestamp must be numeric")
-        timestamp = datetime.fromtimestamp(raw_timestamp, timezone.utc).isoformat()
+    def _points(record, metric, cell, timestamp, epoch):
+        provenance = {key: record[key] for key in
+                      ("module_serial", "position_history_id", "identity_source")
+                      if record.get(key) is not None}
+        common = {"timestamp": timestamp, "_epoch": epoch, **provenance}
         if metric == "soc":
-            value = float(record["soc_percent"])
-        elif metric == "current":
-            value = float(record["current_a"])
-        elif metric in {"cell_voltage", "cell_temperature"} and cell_number is None:
-            values = record["voltages_mv" if metric == "cell_voltage" else "temperatures_c"]
-            return [{"timestamp": timestamp, "value": float(value), "cell_number": index}
-                    for index, value in enumerate(values, 1)]
-        elif metric == "cell_voltage":
-            value = float(record["voltages_mv"][cell_number - 1])
-        else:
-            value = float(record["temperatures_c"][cell_number - 1])
-        return {"timestamp": timestamp, "value": value}
+            return [{**common, "value": float(record["soc_percent"])}]
+        if metric == "current":
+            return [{**common, "value": float(record["current_a"])}]
+        values = record["voltages_mv" if metric == "cell_voltage" else "temperatures_c"]
+        if cell is not None:
+            return [{**common, "value": float(values[cell - 1])}]
+        return [{**common, "value": float(value), "cell_number": index}
+                for index, value in enumerate(values, 1)]

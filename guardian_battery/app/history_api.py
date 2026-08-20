@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import time
 from urllib.parse import parse_qs, urlsplit
 
 from event_overlay import EventOverlayAdapter, OverlayContext
@@ -81,9 +83,11 @@ class HistoryApi:
         include_archived = self._boolean(values.get("include_archived", "false"))
         if active in (False, None):
             include_archived = True
-        points = self.series.query(metric=metric, timestamp_from=timestamp_from,
-                                   timestamp_to=timestamp_to, module_number=module_number,
-                                   cell_number=cell_number)
+        backend_started = time.perf_counter()
+        bundle = self.series.query_bundle(metric=metric, timestamp_from=timestamp_from,
+                                          timestamp_to=timestamp_to, module_number=module_number,
+                                          cell_number=cell_number)
+        points = bundle["points"]
         markers = self.overlays.markers(OverlayContext(
             timestamp_from=timestamp_from, timestamp_to=timestamp_to,
             module_number=module_number, cell_number=cell_number,
@@ -92,6 +96,9 @@ class HistoryApi:
         ))
         mode = values.get("analysis_mode", "historical")
         phases = []
+        diagnostic_phases = []
+        visual_parameters = {}
+        phase_seconds = 0.0
         if self.phase_engine is not None:
             what_if = None
             if mode == "what_if":
@@ -103,19 +110,34 @@ class HistoryApi:
                 }
                 try: what_if = {key: float(values[source]) for key, source in names.items()}
                 except (KeyError, ValueError) as exc: raise HistoryApiProblem("what-if mode requires four numeric phase parameters") from exc
-            samples = self.series.samples(timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-                                          module_number=module_number)
-            phases = self.phase_engine.intervals(samples, mode=mode, what_if=what_if,
-                                                  window_to=timestamp_to)
-        return ApiResponse(200, {
+            phase_started = time.perf_counter()
+            analysis = self.phase_engine.analyse(bundle["samples"], mode=mode, what_if=what_if,
+                                                 window_to=timestamp_to)
+            phase_seconds = time.perf_counter() - phase_started
+            phases = analysis["visual_intervals"]
+            diagnostic_phases = analysis["diagnostic_intervals"]
+            visual_parameters = analysis["visual_parameters"]
+        response = {
             "series": {"metric": metric, "module_number": module_number,
                        "cell_number": cell_number, "points": points},
             "overlays": [marker.to_dict() for marker in markers],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
             "semantics": {"overlay_timestamp": "occurred_at", "correlation_only": True},
             "phase_analysis": {"mode": mode, "intervals": phases,
-                               "raw_measurements_unchanged": True},
-        })
+                               "diagnostic_intervals": diagnostic_phases,
+                               "visual_parameters": visual_parameters,
+                               "raw_measurements_unchanged": True,
+                               "diagnostic_phase_unchanged": True},
+        }
+        response["performance"] = {
+            "raw_records": bundle["raw_records"], "raw_points": bundle["raw_points"],
+            "display_points": len(points), "history_read_seconds": round(bundle["read_seconds"], 6),
+            "downsample_seconds": round(bundle["downsample_seconds"], 6),
+            "phase_projection_seconds": round(phase_seconds, 6), "cache_hit": bundle["cache_hit"],
+            "backend_seconds": round(time.perf_counter() - backend_started, 6),
+        }
+        response["performance"]["payload_bytes"] = len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode())
+        return ApiResponse(200, response)
 
     @staticmethod
     def _timestamp(value: str, field: str) -> str:

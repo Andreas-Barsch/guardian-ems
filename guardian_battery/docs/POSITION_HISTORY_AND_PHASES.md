@@ -11,11 +11,14 @@ Die Initialdokumentation darf nur zum Erfassungszeitpunkt entstehen. Spätere,
 auch rückdatierte Änderungen bleiben zusätzliche Datensätze; bestehende
 Historie wird nie umgeschrieben.
 
-Aktuell vom BMS beobachtete Barcodes sind flüchtige Laufzeitinformationen.
-Sie werden nicht automatisch zur historischen Wahrheit. Abweichungen zwischen
-Beobachtung und Dokumentation werden nur angezeigt. Ebenso werden bestehende
-Zellmessungen ohne quellseitige Seriennummer nicht nachträglich einer
-Seriennummer zugeschrieben.
+Aktuell vom BMS beobachtete Barcodes werden stabilisiert: Erst drei identische,
+aufeinanderfolgende erfolgreiche Lesungen bestätigen eine Zuordnung. Fehlende,
+unlesbare oder wechselnde Antworten verändern nichts. Eine bestätigte
+Abweichung erzeugt ein systemseitiges Maintenance Event und einen neuen
+append-only Vollsnapshot; vorhandene Snapshots werden nie überschrieben. Nach
+einem Neustart wird die dokumentierte Historie aus JSONL rekonstruiert und eine
+Beobachtung erneut stabil bestätigt. Bestehende Zellmessungen ohne quellseitige
+Seriennummer werden nicht nachträglich einer Seriennummer zugeschrieben.
 
 Die Ingress-API unter `api/position-history` bietet die vollständige Historie,
 den aktuellen dokumentierten Stand, Auflösung Position→Seriennummer und
@@ -44,7 +47,7 @@ unangetastet lassen.
 
 ## Phase Engine
 
-Die Phase Engine verwendet exakt dieselbe deterministische Regel wie die
+Die diagnostische Phase Engine verwendet exakt dieselbe deterministische Regel wie die
 Live-Zelldiagnostik: Strom klassifiziert Laden, Entladen oder Ruhe; SOC und die
 mittlere Zellspannung ergänzen Low- beziehungsweise High-SOC. Es gibt keine
 lernende oder KI-basierte Klassifikation.
@@ -67,3 +70,34 @@ Home-Assistant Recorder und JSONL-Historien werden dabei nicht verändert.
 Ohne Messpunkte bleibt die X-Zeitachse erhalten, während keine Y-Skala und kein
 Messpfad erfunden werden. Maintenance-Schraubenschlüssel werden auf einer
 eigenen Markerzeile weiterhin anhand von `occurred_at` positioniert.
+
+### Visual Phase Projection
+
+Die UI-Projektion ist eine zweite, ausschließlich visuelle Ebene. Sie verändert
+weder Messwerte noch diagnostische Intervalle. Die zentralen Defaults sind:
+
+- neue Phase nach mindestens 180 Sekunden stabiler Klassifikation;
+- Stromhysterese 0,2 A um die diagnostischen Lade-/Entladegrenzen;
+- Zusammenführen einer Unterbrechung von höchstens 120 Sekunden, wenn davor
+  und danach dieselbe visuelle Phase liegt.
+
+Einzelne Ausschläge und kurzes Schwellwertflattern erzeugen dadurch keinen
+eigenen Farbstreifen. Echte länger anhaltende Wechsel bleiben sichtbar. Die
+API liefert kompakte visuelle und getrennte diagnostische Intervalle; die
+Oberfläche kann die Hintergrundebene mit „Phasen anzeigen“ ein- oder
+ausschalten.
+
+## History-Performance
+
+Guardian speichert weiterhin sämtliche Rohsamples append-only in täglichen
+JSONL-Dateien. Die History-API liest die benötigten Tagesdateien einmal,
+erstellt Messreihe und Phasensamples im selben Durchlauf und cached Ergebnisse
+mit Dateigröße und Änderungszeit als Invalidierungssignatur. Für die Anzeige
+werden pro Zeitfenster höchstens 6.000 Punkte übertragen. Zeitbasierte Buckets
+bewahren Minimum und Maximum jeder Zellreihe; es findet keine Glättung oder
+Mittelwertbildung der Rohdaten statt.
+
+Die Home-Assistant-Standardkarte `history-graph` unterstützt keine fremden
+Guardian-Hintergrundebenen und bleibt daher unverändert. SOC, Strom,
+Zellspannung und Zelltemperatur verwenden die zentrale Guardian-History-Ansicht
+mit derselben Phasenprojektion für Stack-, Modul- und Zellkontext.

@@ -1,5 +1,23 @@
 # Guardian Battery Changelog
 
+## 0.6.1 - Visual phases, scalable history and physical identity
+
+- Trennt diagnostische Phasen strikt von einer zeitstabilisierten Visual Phase
+  Projection mit Mindestdauer, Hysterese und Short-Gap-Merging.
+- Stellt die zentrale Projektion für SOC, Strom, Zellspannung und
+  Zelltemperatur bereit; der Benutzer kann die Phasenebene ausblenden.
+- Liest Guardian-JSONL-History nur einmal pro Anfrage, begrenzt die
+  Darstellungsdaten extrema-erhaltend und invalidiert einen LRU-Cache anhand
+  der Quelldateisignatur. Rohdaten bleiben unverändert.
+- Verknüpft neue Messsamples mit der zum Messzeitpunkt dokumentierten
+  physischen Seriennummer; frühere unbekannte Identitäten bleiben unbekannt.
+- Stabilisiert BMS-Seriennummern über drei erfolgreiche Lesungen und schreibt
+  bestätigte Positionsänderungen über System-Maintenance-Event und append-only
+  Positionssnapshot fort.
+- Zeigt physische Seriennummern mit ihren Positionszeiträumen in den
+  Modulinformationen.
+- Guardian/Add-on `0.6.1`; Diagnostic Engine unverändert `0.4.12`.
+
 ## 0.5.1 - Maintenance identity and history UI patch
 
 - Patch-Release des unter `6144cfa` abgenommenen Korrekturpakets für einen

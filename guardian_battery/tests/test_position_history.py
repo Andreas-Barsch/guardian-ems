@@ -5,7 +5,8 @@ import pytest
 from maintenance import MaintenanceEventLog
 from maintenance_service import MaintenanceRepository, MaintenanceService
 from position_history import (PositionHistoryConflictError, PositionHistoryLog,
-                              PositionHistoryService, PositionHistoryValidationError)
+                              PositionHistoryService, PositionHistoryValidationError,
+                              documented_identity_at, observed_stack, update_observed_stack)
 from position_history_api import PositionHistoryApi
 
 
@@ -87,3 +88,40 @@ def test_serial_options_are_unique_and_temporally_classified(tmp_path):
         {"serial": "SN-A", "relationship": "earlier"},
         {"serial": "SN-Y", "relationship": "later"},
     ]
+
+
+def test_documented_measurement_identity_never_backfills_from_the_future(tmp_path):
+    event, service=env(tmp_path)
+    first=service.record(effective_at="2026-08-19T10:00:00Z",maintenance_event_id=event.maintenance_event_id,
+                         positions=state(**{"5":"SN-X"}),expected_latest_snapshot_id=None)
+    service.record(effective_at="2026-08-20T10:00:00Z",maintenance_event_id=event.maintenance_event_id,
+                   positions=state(**{"5":"SN-Y"}),expected_latest_snapshot_id=first.position_history_id)
+    assert documented_identity_at(service.log.path,5,"2026-08-18T10:00:00Z") == (None,None)
+    assert documented_identity_at(service.log.path,5,"2026-08-19T12:00:00Z") == ("SN-X",first.position_history_id)
+
+
+def test_observed_identity_requires_repeated_stable_bms_reads(monkeypatch):
+    import position_history
+    monkeypatch.setattr(position_history,"_OBSERVED_STACK",{})
+    monkeypatch.setattr(position_history,"_OBSERVATION_CANDIDATES",{})
+    update_observed_stack({5:{"barcode":"SN-X"}}); update_observed_stack({5:{"barcode":"SN-Y"}})
+    assert observed_stack().get(5) is None
+    for _ in range(3): update_observed_stack({5:{"barcode":"SN-Y"}})
+    assert observed_stack()[5] == "SN-Y"
+    update_observed_stack({5:{}})
+    assert observed_stack()[5] == "SN-Y"
+
+
+def test_physical_serial_history_tracks_swaps_removal_and_reinsertion(tmp_path):
+    event, service=env(tmp_path)
+    first=service.record(effective_at="2026-08-19T10:00:00Z",maintenance_event_id=event.maintenance_event_id,
+                         positions=state(**{"5":"SN-X","6":"SN-Y"}),expected_latest_snapshot_id=None)
+    second=service.record(effective_at="2026-08-20T10:00:00Z",maintenance_event_id=event.maintenance_event_id,
+                          positions=state(**{"5":"SN-Y","6":"SN-X"}),expected_latest_snapshot_id=first.position_history_id)
+    third=service.record(effective_at="2026-08-21T10:00:00Z",maintenance_event_id=event.maintenance_event_id,
+                         positions=state(**{"5":"SN-Y"}),expected_latest_snapshot_id=second.position_history_id)
+    service.record(effective_at="2026-08-22T10:00:00Z",maintenance_event_id=event.maintenance_event_id,
+                   positions=state(**{"2":"SN-X","5":"SN-Y"}),expected_latest_snapshot_id=third.position_history_id)
+    x=next(item for item in service.serial_histories() if item["serial"]=="SN-X")
+    assert [interval["position"] for interval in x["intervals"]] == [5,6,None,2]
+    assert x["intervals"][0]["valid_to"] == "2026-08-20T10:00:00+00:00"

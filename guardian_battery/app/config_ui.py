@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,7 +26,8 @@ from event_overlay import EventOverlayAdapter
 from history_api import HISTORY_API_ROUTE, HistoryApi
 from history_series import DEFAULT_CELL_HISTORY_DIR, CellHistorySeries
 from history_ui import render_history_html
-from position_history import DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog, PositionHistoryService
+from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog,
+                              PositionHistoryService, stable_observed_changes)
 from position_history_api import POSITION_HISTORY_API_ROUTE, PositionHistoryApi
 from module_information_ui import render_module_information_html
 from config_history import ConfigHistory
@@ -42,6 +44,7 @@ _TIMELINE_API = None
 _HISTORY_API = None
 _POSITION_HISTORY_API = None
 _MAINTENANCE_LIVE_PUBLISHER = None
+_AUTOMATIC_POSITION_LOCK = threading.Lock()
 
 
 def configure_maintenance_live_publisher(publisher):
@@ -102,6 +105,44 @@ def _get_position_history_api():
                 _POSITION_HISTORY_API = PositionHistoryApi(PositionHistoryService(
                     PositionHistoryLog(DEFAULT_POSITION_HISTORY_FILE), maintenance))
     return _POSITION_HISTORY_API
+
+
+def record_stable_observed_positions() -> bool:
+    """Append one documentary snapshot after BMS identity changed stably.
+
+    The generated system event is persisted but deliberately not emitted as a
+    live MQTT maintenance event. Missing or unstable reads never reach here.
+    """
+    with _AUTOMATIC_POSITION_LOCK:
+        position_service = _get_position_history_api().service
+        current = position_service.current()
+        changes = stable_observed_changes(current.positions if current else None)
+        if not changes:
+            return False
+        positions = dict(current.positions) if current else {str(index): None for index in range(1, 7)}
+        previous = ", ".join(f"P{position}: {positions[str(position)] or 'unbekannt'}" for position in sorted(changes))
+        for position, serial in changes.items():
+            # A physical serial can occupy only one position in one snapshot.
+            for key, value in list(positions.items()):
+                if value == serial:
+                    positions[key] = None
+            positions[str(position)] = serial
+        now = datetime.now(timezone.utc)
+        event = _get_maintenance_api().service.create(
+            occurred_at=now, category="module_replacement",
+            title="Automatisch erkannte Modulzuordnung",
+            affected_system="Pylontech Stack",
+            description="Guardian hat eine wiederholt stabile Seriennummernzuordnung erkannt.",
+            previous_state=previous,
+            result=", ".join(f"P{position}: {serial}" for position, serial in sorted(changes.items())),
+            source={"kind": "guardian_bms_identity", "confirmation_reads": 3},
+        )
+        position_service.record(
+            effective_at=now.isoformat(), maintenance_event_id=event.maintenance_event_id,
+            positions=positions,
+            expected_latest_snapshot_id=current.position_history_id if current else None,
+        )
+        return True
 
 DEFAULTS = {
  'serial_port':'auto','baudrate':115200,'poll_interval_seconds':10,'module_count':6,'command':'pwr','command_timeout_seconds':5,
@@ -346,8 +387,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_maintenance_api(): self._maintenance_request('DELETE'); return
         self._send(404,{'error':'not found'})
 
-def start_config_server(port=8099, maintenance_live_publisher=None):
+def start_config_server(port=8099, maintenance_live_publisher=None, bind_host="0.0.0.0"):
     configure_maintenance_live_publisher(maintenance_live_publisher)
-    server=ThreadingHTTPServer(('0.0.0.0',port),Handler)
+    server=ThreadingHTTPServer((bind_host,port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True,name='guardian-config-ui').start()
     return server

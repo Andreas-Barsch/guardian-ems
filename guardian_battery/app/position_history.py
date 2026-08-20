@@ -237,6 +237,28 @@ class PositionHistoryService:
         order = {"effective": 0, "earlier": 1, "earlier_and_later": 2, "later": 3}
         return sorted(result, key=lambda item: (order[item["relationship"]], item["serial"]))
 
+    def serial_histories(self) -> list[dict[str, Any]]:
+        """Project immutable snapshots into physical-module position intervals."""
+        snapshots = self.list()
+        serials = sorted({serial for item in snapshots for serial in item.positions.values() if serial})
+        result = []
+        for serial in serials:
+            intervals = []
+            first_known = next(index for index, snapshot in enumerate(snapshots)
+                               if serial in snapshot.positions.values())
+            for index in range(first_known, len(snapshots)):
+                snapshot = snapshots[index]
+                position = next((int(key) for key, value in snapshot.positions.items() if value == serial), None)
+                end = snapshots[index + 1].effective_at if index + 1 < len(snapshots) else None
+                if intervals and intervals[-1]["position"] == position:
+                    intervals[-1]["valid_to"] = end
+                else:
+                    intervals.append({"valid_from": snapshot.effective_at, "valid_to": end,
+                                      "position": position,
+                                      "maintenance_event_id": snapshot.maintenance_event_id})
+            result.append({"serial": serial, "intervals": intervals})
+        return result
+
     def divergence(self, observed: Mapping[int | str, str | None]) -> list[dict[str, Any]]:
         current = self.current()
         documented = current.positions if current else {str(item): None for item in STACK_POSITIONS}
@@ -253,16 +275,39 @@ class PositionHistoryService:
 
 
 _OBSERVED_STACK: dict[int, str | None] = {}
+_OBSERVATION_CANDIDATES: dict[int, tuple[str, int]] = {}
+OBSERVATION_CONFIRMATIONS = 3
 
 
 def update_observed_stack(module_infos: Mapping[int, Mapping[str, Any]]) -> None:
-    """Update ephemeral observations; this never writes documentary history."""
-    global _OBSERVED_STACK
-    _OBSERVED_STACK = {
-        position: (str(info.get("barcode")).strip() if info.get("barcode") else None)
-        for position, info in module_infos.items() if position in STACK_POSITIONS
-    }
+    """Stabilise BMS identity observations; missing reads never imply removal."""
+    global _OBSERVED_STACK, _OBSERVATION_CANDIDATES
+    for position, info in module_infos.items():
+        if position not in STACK_POSITIONS: continue
+        serial = str(info.get("barcode")).strip() if info.get("barcode") else None
+        if not serial: continue
+        candidate, count = _OBSERVATION_CANDIDATES.get(position, ("", 0))
+        count = count + 1 if candidate == serial else 1
+        _OBSERVATION_CANDIDATES[position] = (serial, count)
+        if count >= OBSERVATION_CONFIRMATIONS: _OBSERVED_STACK[position] = serial
 
 
 def observed_stack() -> dict[int, str | None]:
     return dict(_OBSERVED_STACK)
+
+
+def stable_observed_changes(documented: Mapping[str, str | None] | None) -> dict[int, str]:
+    """Return confirmed serial changes only; incomplete observations are ignored."""
+    expected = documented or {str(position): None for position in STACK_POSITIONS}
+    return {position: serial for position, serial in _OBSERVED_STACK.items()
+            if serial and expected.get(str(position)) != serial}
+
+
+def documented_identity_at(path: Path | str, position: int, timestamp: datetime | str) -> tuple[str | None, str | None]:
+    """Resolve only documentary identity; legacy/unknown history stays unknown."""
+    target = normalize_utc_timestamp(timestamp, "timestamp")
+    snapshots = sorted(PositionHistoryLog(path).read_all(), key=lambda item: (item.effective_at, item.created_at, item.position_history_id))
+    matches = [item for item in snapshots if item.effective_at <= target]
+    if not matches: return None, None
+    snapshot = matches[-1]
+    return snapshot.positions[str(position)], snapshot.position_history_id

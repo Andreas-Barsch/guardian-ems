@@ -35,7 +35,7 @@ def test_svg_chart_has_real_axes_units_layers_resize_and_local_tooltip():
     assert "Intl.DateTimeFormat('de-DE'" in html
     assert "niceStep" in html and "tickCount" in html
     assert "Alle Zellen / Modulebene" in html
-    assert "grid-template-columns:minmax(145px" in html
+    assert "grid-template-columns:minmax(135px" in html
     assert "byId('cell').disabled=!cell" in html
     assert 'id="cell-label" hidden' not in html
     assert "@media(max-width:980px)" in html
@@ -54,3 +54,10 @@ def test_empty_phase_wrench_and_cell_identification_are_explicit():
     assert "emptyMarkerTop" in html
     assert "pointer-events:none" in html
     assert "if(!points.length){byId('tooltip').hidden=true;return}" not in html
+
+
+def test_visual_phase_toggle_is_central_and_layers_are_ordered():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert 'id="show-phases"' in html and ">EIN<" in html and ">AUS<" in html
+    assert html.index('id="phase-layer"') < html.index('id="series-layer"') < html.index('id="marker-layer"')
+    assert "byId('show-phases').onchange" in html

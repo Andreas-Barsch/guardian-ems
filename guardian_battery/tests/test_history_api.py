@@ -111,3 +111,38 @@ def test_phase_projection_modes_are_separate_from_raw_series(tmp_path):
                          "&what_if_discharge_current_a=3")
     assert what_if.body["phase_analysis"]["intervals"][0]["phase"] == "rest"
     assert config.read_text().count("\n") == 1
+
+
+def test_series_downsampling_preserves_extrema_and_cache_invalidates(tmp_path):
+    directory = tmp_path / "cell_history"; directory.mkdir()
+    day = "2026-08-15"; rows=[]
+    start=datetime(2026,8,15,tzinfo=timezone.utc).timestamp()
+    for index in range(200):
+        value=5000 if index==87 else 1000 if index==113 else 3300+index%7
+        rows.append(json.dumps({"schema_version":1,"timestamp":start+index*60,"module":3,
+          "voltages_mv":[value]*15,"current_a":0,"soc_percent":50,"temperatures_c":[25]*15,
+          "balancing":[False]*15,"physical_groups":{}}))
+    path=directory/f"{day}.jsonl"; path.write_text("\n".join(rows)+"\n")
+    series=CellHistorySeries(directory)
+    args=dict(metric="cell_voltage",timestamp_from="2026-08-15T00:00:00+00:00",
+              timestamp_to="2026-08-16T00:00:00+00:00",module_number=3,cell_number=1,max_points=40)
+    first=series.query_bundle(**args); second=series.query_bundle(**args)
+    assert len(first["points"]) <= 40 and {1000.0,5000.0} <= {p["value"] for p in first["points"]}
+    assert not first["cache_hit"] and second["cache_hit"]
+    path.write_text(path.read_text()+rows[0]+"\n")
+    assert not series.query_bundle(**args)["cache_hit"]
+
+
+def test_series_points_carry_only_documented_physical_identity(tmp_path):
+    directory=tmp_path/"cell_history"; directory.mkdir()
+    timestamp=datetime(2026,8,15,8,tzinfo=timezone.utc).timestamp()
+    base={"schema_version":1,"timestamp":timestamp,"module":3,"voltages_mv":[3300]*15,
+          "current_a":0,"soc_percent":50,"temperatures_c":[25]*15,"balancing":[False]*15,"physical_groups":{}}
+    path=directory/"2026-08-15.jsonl"
+    path.write_text(json.dumps(base)+"\n"+json.dumps({**base,"timestamp":timestamp+60,"module_serial":"SN-X",
+                    "position_history_id":"PHS-1","identity_source":"position_history"})+"\n")
+    result=CellHistorySeries(directory).query_bundle(metric="soc",timestamp_from="2026-08-15T00:00:00+00:00",
+        timestamp_to="2026-08-16T00:00:00+00:00",module_number=3)
+    assert "module_serial" not in result["points"][0]
+    assert result["points"][1]["module_serial"] == "SN-X"
+    assert result["points"][1]["identity_source"] == "position_history"

@@ -83,3 +83,22 @@ def test_runtime_live_publisher_is_injected_into_existing_and_future_api(tmp_pat
     replacement = object()
     config_ui.configure_maintenance_live_publisher(replacement)
     assert api.live_publisher is replacement
+
+
+def test_confirmed_bms_identity_creates_append_only_system_event_and_snapshot(tmp_path, monkeypatch):
+    import position_history
+    maintenance_path=tmp_path/'maintenance.jsonl'; position_path=tmp_path/'positions.jsonl'
+    monkeypatch.setattr(config_ui,'DEFAULT_MAINTENANCE_EVENT_FILE',maintenance_path)
+    monkeypatch.setattr(config_ui,'DEFAULT_POSITION_HISTORY_FILE',position_path)
+    monkeypatch.setattr(config_ui,'_MAINTENANCE_API',None)
+    monkeypatch.setattr(config_ui,'_POSITION_HISTORY_API',None)
+    monkeypatch.setattr(position_history,'_OBSERVED_STACK',{})
+    monkeypatch.setattr(position_history,'_OBSERVATION_CANDIDATES',{})
+    for _ in range(3): position_history.update_observed_stack({2:{'barcode':'SN-A'}})
+    assert config_ui.record_stable_observed_positions() is True
+    assert config_ui.record_stable_observed_positions() is False
+    snapshot=config_ui._get_position_history_api().service.current()
+    event=config_ui._get_maintenance_api().service.get(snapshot.maintenance_event_id)
+    assert snapshot.positions['2']=='SN-A'
+    assert event.source['kind']=='guardian_bms_identity'
+    assert len(position_path.read_text().splitlines())==1
