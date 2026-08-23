@@ -580,3 +580,88 @@ Vor jeder weiteren Entwicklung mit Codex gilt:
     weitere deklarative Unterrouten desselben Add-on-Ingress-Panels.
 -   Guardian Home Andreas verwendet deshalb direkte Funktionskacheln ohne
     Portal-Zwischenstufe.
+
+## 18. Aktueller Arbeitsstand Guardian Battery 0.6.6
+
+### 18.1 Verifizierter Release-Stand
+
+- Guardian Battery / Add-on: `0.6.6`
+- Branch des Release-Kandidaten: `guardian-0.6.6`
+- Release-Commit: `0b45680d347f535a969e4bed74aa20e9148f3978`
+- Commit-Message: `Prepare Guardian Battery 0.6.6 release`
+- Diagnostic Engine: weiterhin `0.4.12`
+- Die Diagnostic Engine wurde mit 0.6.5/0.6.6 fachlich nicht verändert.
+- Release-Validierung 0.6.6:
+  - vollständige Testsuite: `195 passed`
+  - relevante Regressionstests: `40 passed`
+  - Zellansichten: exakt 90 = 6 Module × 15 Zellen, keine Duplikate
+  - `git bundle verify`: erfolgreich
+- Verifiziertes 0.6.6-Bundle:
+  - SHA-256: `44db010e1bb5ca09c0abf8269be15f154ba17c2cdbac0de92e675de561975016`
+
+### 18.2 Zelldiagnostik ab 0.6.5/0.6.6
+
+- Die Zellansichten trennen aktuelle Momentwerte von historischer phasenbezogener Evidenz.
+- Die Gesamtbewertung stammt aus der historischen phasenbezogenen Evidenz und ist kein Momentwert.
+- Die Phasenevidenz wird getrennt für folgende Diagnosebereiche dargestellt:
+  1. Entladung
+  2. Tiefbereich
+  3. Ladung
+  4. Hochbereich
+- Confidence, gültige Messpunkte, Medianabweichung und relative Kennwerte sind gemeinsam zu interpretieren.
+- Die Bewertungs-Hilfe `ⓘ Bewertung erklären` ist Bestandteil der Zellansichten.
+- Die 0.6.5-Zelldiagnostik einschließlich Gesamtbewertung, Phasenevidenz und Bewertungshilfe wurde in 0.6.6 erhalten.
+
+### 18.3 Navigationskorrektur 0.6.6
+
+- In 0.6.5 vorhandene zusätzliche Funktions-/Ingress-Karten auf der Zelldiagnostik-Übersicht erwiesen sich als ungeeignet.
+- In 0.6.6 wurden diese unerwünschten Karten und die zugehörigen Ingress-Links aus der Overview entfernt.
+- Es wurde keine Ersatznavigation in die Zelldiagnostik eingebaut.
+- Die ursprüngliche lokale Bewertungslogik-Navigation und die sechs Modulzugänge bleiben erhalten.
+- Mehrere Home-Assistant-Sidebar-Ziele können nicht einfach als Unterrouten desselben Add-on-Ingress-Panels erzeugt werden.
+- Ein direkter Sidebar-Deep-Link `Guardian Maintenance` in eine interne Add-on-Unterroute ist weiterhin offen und darf nicht als gelöst dokumentiert werden.
+
+### 18.4 Offene UI-/Analyseanforderungen
+
+#### Zeitverlauf: Einzel- und Gemeinsam-Modus
+
+- Der bestehende Einzelmodus bleibt erhalten.
+- Zusätzlich soll ein Gemeinsam-Modus mehrere Messgrößen gleichzeitig auswählbar machen:
+  - SOC
+  - Strom
+  - Zellspannung
+  - Zelltemperatur
+- Unterschiedliche physikalische Einheiten werden nicht auf eine gemeinsame Y-Achse gezwungen.
+- Die Größen sollen als getrennte, zeitlich synchronisierte Spuren bzw. Skalen innerhalb derselben Analyseansicht erscheinen.
+- Alle Spuren verwenden denselben Zeitraum und dieselbe Phasen-/Bereichsprojektion.
+- Für Zellspannung und Zelltemperatur bleibt die Zell-Multiauswahl erhalten.
+
+#### Phasenspezifische Bewertungsgrenzen
+
+- Die Hilfe unter `Phasenspezifische Grenzen` muss die tatsächlich aktuell wirksamen Grenzwerte getrennt für Entladung, Tiefbereich, Ladung und Hochbereich anzeigen.
+- Pro Diagnosebereich gilt die Darstellung:
+  `unter X mV = NORMAL · ab X mV = BEOBACHTEN · ab Y mV = AUFFÄLLIG · ab Z mV = KRITISCH`
+- X, Y und Z dürfen nicht als feste Defaultwerte im Hilfetext codiert werden.
+- Die Werte müssen dynamisch aus der aktuell gültigen phasenspezifischen Guardian-Konfiguration stammen.
+- Maßgeblich für die Bewertung ist der Betrag der phasenbezogenen Medianabweichung der Zelle vom Modulmedian.
+- Die UI verwendet konsistent die Statussemantik `NORMAL / BEOBACHTEN / AUFFÄLLIG / KRITISCH`.
+
+### 18.5 Design Request: Balancing-Kontext
+
+- Predictive Maintenance soll künftig berücksichtigen, ob eine auffällige Zelle ausreichend lange Bedingungen erreicht hat, unter denen das Pylontech-BMS grundsätzlich balancieren konnte.
+- Unterschieden werden soll zwischen:
+  - persistenter Zellabweichung trotz ausreichender/wiederholter Balancing-Gelegenheiten,
+  - Zellabweichung ohne ausreichende Balancing-Gelegenheit.
+- Persistenz trotz Balancing-Gelegenheiten liefert stärkere diagnostische Evidenz für eine mögliche Zell-, Kapazitäts- oder Widerstandsauffälligkeit.
+- Hersteller- oder firmwareabhängige Balancing-Schwellen dürfen nicht ungeprüft fest codiert werden; sie müssen verifiziert beziehungsweise konfigurierbar sein.
+- Diese Anforderung verändert die aktuelle Diagnostic Engine `0.4.12` nicht.
+
+### 18.6 Weiterhin verbindliche Arbeitsweise
+
+- Die Regeln aus Abschnitt 15 bleiben unverändert verbindlich.
+- Terminalausgaben kurz und screenshot-tauglich halten.
+- Pro Schritt nur die kleinste notwendige Prüfung.
+- Keine manuellen Code-Schnipsel in bestehende Guardian-Programmdateien einfügen lassen.
+- Git-Arbeitsbaum, installierte Home-Assistant-App und `/share/guardian_battery` strikt unterscheiden.
+- Persistente Guardian-Daten unter `/share/guardian_battery` dürfen durch Entwicklungs-, Release- oder Dokumentationsarbeiten nicht verändert werden.
+- Nicht unmittelbar verifizierte Zustände ausdrücklich als `nicht verifiziert` kennzeichnen.
