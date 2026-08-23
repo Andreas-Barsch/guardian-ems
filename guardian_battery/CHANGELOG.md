@@ -1,5 +1,18 @@
 # Guardian Battery Changelog
 
+## 0.6.7 - Combined history view and dynamic phase limits
+
+- Ergänzt den Zeitverlauf um den Modus „Gemeinsam“ mit Mehrfachauswahl von
+  SOC, Strom, Zellspannung und Zelltemperatur.
+- Zeigt getrennte, zeitsynchronisierte Diagrammspuren mit eigener Y-Skalierung
+  und unabhängiger Zellenauswahl für Zellspannung und Zelltemperatur.
+- Verwendet eine gemeinsame Phasen- und Maintenance-Projektion sowie
+  Single-Pass-Verarbeitung für kombinierte Zeitreihen.
+- Zeigt die phasenspezifischen Diagnosegrenzen dynamisch aus der aktiven
+  Guardian-Konfiguration mit einheitlicher Statussemantik NORMAL, BEOBACHTEN,
+  AUFFÄLLIG und KRITISCH.
+- Guardian/Add-on `0.6.7`; Diagnostic Engine unverändert `0.4.12`.
+
 ## 0.6.6 - Restore the cell diagnostics overview
 
 - Stellt die geordnete Zelldiagnostik-Hauptübersicht wieder her.
