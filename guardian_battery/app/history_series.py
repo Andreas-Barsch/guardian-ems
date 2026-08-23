@@ -80,16 +80,45 @@ class CellHistorySeries:
 
     def query_bundle(self, *, metric, timestamp_from, timestamp_to, module_number,
                      cell_number=None, cell_numbers=None, max_points=DEFAULT_MAX_DISPLAY_POINTS):
-        if metric not in SERIES_METRICS:
-            raise ValueError("unsupported series metric")
+        result = self.query_bundles(
+            requests=({"metric": metric, "cell_number": cell_number,
+                       "cell_numbers": cell_numbers},),
+            timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+            module_number=module_number, max_points=max_points,
+        )
+        bundle = result["series"][0]
+        return {
+            **bundle,
+            "samples": result["samples"],
+            "raw_records": result["raw_records"],
+            "read_seconds": result["read_seconds"],
+            "downsample_seconds": result["downsample_seconds"],
+            "cache_hit": result["cache_hit"],
+        }
+
+    def query_bundles(self, *, requests, timestamp_from, timestamp_to, module_number,
+                      max_points=DEFAULT_MAX_DISPLAY_POINTS):
+        """Project several metrics from one JSONL scan and one shared sample set."""
+        normalized = []
+        for request in requests:
+            metric = request["metric"]
+            if metric not in SERIES_METRICS:
+                raise ValueError("unsupported series metric")
+            cell_number = request.get("cell_number")
+            cell_numbers = request.get("cell_numbers")
+            selected_cells = tuple(sorted(cell_numbers)) if cell_numbers else None
+            normalized.append((metric, cell_number, selected_cells))
+        if not normalized:
+            raise ValueError("at least one series metric is required")
+        if len({metric for metric, _, _ in normalized}) != len(normalized):
+            raise ValueError("series metrics must be unique")
         paths = self._paths(timestamp_from, timestamp_to)
         try:
             signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths)
         except OSError as exc:
             raise SeriesHistoryError("cell history is unavailable") from exc
-        selected_cells = tuple(sorted(cell_numbers)) if cell_numbers else None
-        key = (signature, metric, timestamp_from, timestamp_to, module_number, cell_number,
-               selected_cells, max_points)
+        key = (signature, tuple(normalized), timestamp_from, timestamp_to, module_number,
+               max_points)
         if key in self._cache:
             self._cache.move_to_end(key)
             return {**self._cache[key], "cache_hit": True}
@@ -97,10 +126,14 @@ class CellHistorySeries:
         started = time.perf_counter()
         start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
         end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
-        group_count = len(selected_cells) if selected_cells else (15 if metric in {"cell_voltage", "cell_temperature"} and cell_number is None else 1)
-        per_group = max(4, max_points // group_count)
-        collectors: dict[int, _ExtremaCollector] = {}
-        samples, raw_records, raw_points = [], 0, 0
+        collectors = []
+        for metric, cell_number, selected_cells in normalized:
+            group_count = len(selected_cells) if selected_cells else (
+                15 if metric in {"cell_voltage", "cell_temperature"}
+                and cell_number is None else 1)
+            collectors.append((max(4, max_points // group_count), {}))
+        samples, raw_records = [], 0
+        raw_points = [0] * len(normalized)
         try:
             for path in paths:
                 with path.open(encoding="utf-8") as handle:
@@ -121,21 +154,32 @@ class CellHistorySeries:
                                         "soc_percent": float(record["soc_percent"]),
                                         "voltages_mv": [float(value) for value in record["voltages_mv"]],
                                         "module_serial": record.get("module_serial")})
-                        for point in self._points(record, metric, cell_number, timestamp, epoch,
-                                                  selected_cells):
-                            group = point.get("cell_number", 0)
-                            collectors.setdefault(group, _ExtremaCollector(per_group, start_epoch, end_epoch)).add(point)
-                            raw_points += 1
+                        for index, (metric, cell_number, selected_cells) in enumerate(normalized):
+                            per_group, metric_collectors = collectors[index]
+                            for point in self._points(record, metric, cell_number, timestamp,
+                                                      epoch, selected_cells):
+                                group = point.get("cell_number", 0)
+                                metric_collectors.setdefault(
+                                    group,
+                                    _ExtremaCollector(per_group, start_epoch, end_epoch),
+                                ).add(point)
+                                raw_points[index] += 1
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError) as exc:
             raise SeriesHistoryError(f"cell history is invalid: {exc}") from exc
 
         scan_seconds = time.perf_counter() - started
         downsample_started = time.perf_counter()
-        points = [point for collector in collectors.values() for point in collector.points()]
-        points.sort(key=lambda point: (point["timestamp"], point.get("cell_number", 0)))
+        projected = []
+        for index, (metric, cell_number, selected_cells) in enumerate(normalized):
+            points = [point for collector in collectors[index][1].values()
+                      for point in collector.points()]
+            points.sort(key=lambda point: (point["timestamp"], point.get("cell_number", 0)))
+            projected.append({"metric": metric, "cell_number": cell_number,
+                              "cell_numbers": list(selected_cells or ()), "points": points,
+                              "raw_points": raw_points[index]})
         downsample_seconds = time.perf_counter() - downsample_started
-        result = {"points": points, "samples": samples, "raw_records": raw_records,
-                  "raw_points": raw_points, "read_seconds": scan_seconds,
+        result = {"series": projected, "samples": samples, "raw_records": raw_records,
+                  "read_seconds": scan_seconds,
                   "downsample_seconds": downsample_seconds,
                   "cache_hit": False}
         self._cache[key] = result

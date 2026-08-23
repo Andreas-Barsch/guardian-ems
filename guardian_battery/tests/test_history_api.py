@@ -93,6 +93,33 @@ def test_cell_multi_select_uses_one_history_scan_and_returns_selected_series(tmp
     assert second.body["performance"]["cache_hit"] is True
 
 
+def test_combined_metrics_use_one_scan_and_independent_cell_selections(tmp_path, monkeypatch):
+    _, directory, api = api_env(tmp_path)
+    write_sample(directory, datetime(2026, 8, 15, 8, tzinfo=timezone.utc).timestamp())
+    opened = []
+    original_open = type(directory).open
+
+    def counted_open(path, *args, **kwargs):
+        if path.parent == directory and path.suffix == ".jsonl":
+            opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(directory), "open", counted_open)
+    target = ("/api/history/series?metrics=soc,current,cell_voltage,cell_temperature"
+              "&from=2026-08-15T00:00:00Z&to=2026-08-16T00:00:00Z&module_number=3"
+              "&voltage_cell_numbers=2,6,12&temperature_cell_numbers=2,6")
+    response = api.handle("GET", target)
+    assert response.status == 200
+    assert opened == [directory / "2026-08-15.jsonl"]
+    assert [item["metric"] for item in response.body["series"]] == [
+        "soc", "current", "cell_voltage", "cell_temperature"]
+    assert response.body["series"][2]["cell_numbers"] == [2, 6, 12]
+    assert response.body["series"][3]["cell_numbers"] == [2, 6]
+    assert {point["cell_number"] for point in response.body["series"][2]["points"]} == {2, 6, 12}
+    assert {point["cell_number"] for point in response.body["series"][3]["points"]} == {2, 6}
+    assert response.body["performance"]["raw_records"] == 1
+
+
 def test_api_rejects_invalid_requests_and_corrupt_series(tmp_path):
     _, directory, api = api_env(tmp_path)
     for query in ("", "?metric=bad&from=x&to=x&module_number=3",

@@ -19,7 +19,8 @@ from phase_engine import PhaseEngineError, PHASE_PARAMETER_KEYS
 LOG = logging.getLogger(__name__)
 HISTORY_API_ROUTE = "/api/history/series"
 HISTORY_FILTERS = frozenset(
-    {"metric", "from", "to", "module_number", "cell_number", "cell_numbers", "include_archived", "active",
+    {"metric", "metrics", "from", "to", "module_number", "cell_number", "cell_numbers",
+     "voltage_cell_numbers", "temperature_cell_numbers", "include_archived", "active",
      "analysis_mode", "what_if_low_soc_percent", "what_if_high_soc_percent",
      "what_if_charge_current_a", "what_if_discharge_current_a"}
 )
@@ -67,11 +68,14 @@ class HistoryApi:
         if any(len(values) != 1 for values in raw.values()):
             raise HistoryApiProblem("query parameters must occur once")
         values = {key: items[0] for key, items in raw.items()}
-        missing = {"metric", "from", "to", "module_number"} - set(values)
+        missing = {"from", "to", "module_number"} - set(values)
         if missing:
             raise HistoryApiProblem(f"missing query parameters: {', '.join(sorted(missing))}")
-        metric = values["metric"]
-        if metric not in SERIES_METRICS:
+        if ("metric" in values) == ("metrics" in values):
+            raise HistoryApiProblem("exactly one of metric or metrics is required")
+        combined = "metrics" in values
+        metrics = self._metrics(values.get("metrics")) if combined else (values["metric"],)
+        if any(metric not in SERIES_METRICS for metric in metrics):
             raise HistoryApiProblem("metric is unsupported")
         timestamp_from = self._timestamp(values["from"], "from")
         timestamp_to = self._timestamp(values["to"], "to")
@@ -80,20 +84,39 @@ class HistoryApi:
         module_number = self._integer(values["module_number"], "module_number", 1, 6)
         cell_number = self._integer(values.get("cell_number"), "cell_number", 1, 15)
         cell_numbers = self._integers(values.get("cell_numbers"), "cell_numbers", 1, 15)
+        voltage_cells = self._integers(values.get("voltage_cell_numbers"),
+                                       "voltage_cell_numbers", 1, 15)
+        temperature_cells = self._integers(values.get("temperature_cell_numbers"),
+                                           "temperature_cell_numbers", 1, 15)
         if cell_number is not None and cell_numbers is not None:
             raise HistoryApiProblem("cell_number and cell_numbers are mutually exclusive")
-        if cell_numbers is not None and metric not in {"cell_voltage", "cell_temperature"}:
+        if combined and (cell_number is not None or cell_numbers is not None):
+            raise HistoryApiProblem("combined mode uses metric-specific cell selections")
+        if not combined and (voltage_cells is not None or temperature_cells is not None):
+            raise HistoryApiProblem("metric-specific cell selections require combined mode")
+        if cell_numbers is not None and metrics[0] not in {"cell_voltage", "cell_temperature"}:
             raise HistoryApiProblem("cell_numbers requires a cell metric")
+        if voltage_cells is not None and "cell_voltage" not in metrics:
+            raise HistoryApiProblem("voltage_cell_numbers requires cell_voltage")
+        if temperature_cells is not None and "cell_temperature" not in metrics:
+            raise HistoryApiProblem("temperature_cell_numbers requires cell_temperature")
         active = self._active(values.get("active", "true"))
         include_archived = self._boolean(values.get("include_archived", "false"))
         if active in (False, None):
             include_archived = True
         backend_started = time.perf_counter()
-        bundle = self.series.query_bundle(metric=metric, timestamp_from=timestamp_from,
-                                          timestamp_to=timestamp_to, module_number=module_number,
-                                          cell_number=cell_number, cell_numbers=cell_numbers)
-        points = bundle["points"]
-        marker_cells = cell_numbers or (cell_number,)
+        requests = []
+        for metric in metrics:
+            selected = (voltage_cells if metric == "cell_voltage" else temperature_cells
+                        if metric == "cell_temperature" else None)
+            requests.append({"metric": metric,
+                             "cell_number": None if combined else cell_number,
+                             "cell_numbers": selected if combined else cell_numbers})
+        bundle = self.series.query_bundles(
+            requests=requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+            module_number=module_number)
+        marker_cells = (tuple(sorted(set((voltage_cells or ()) + (temperature_cells or ()))))
+                        or (None,)) if combined else cell_numbers or (cell_number,)
         projected = [marker for selected_cell in marker_cells
                      for marker in self.overlays.markers(OverlayContext(
                          timestamp_from=timestamp_from, timestamp_to=timestamp_to,
@@ -128,9 +151,13 @@ class HistoryApi:
             diagnostic_phases = analysis["diagnostic_intervals"]
             visual_parameters = analysis["visual_parameters"]
         response = {
-            "series": {"metric": metric, "module_number": module_number,
-                       "cell_number": cell_number, "cell_numbers": list(cell_numbers or ()),
-                       "points": points},
+            "series": [{**{key: value for key, value in item.items() if key != "raw_points"},
+                        "module_number": module_number} for item in bundle["series"]]
+                      if combined else {
+                          **{key: value for key, value in bundle["series"][0].items()
+                             if key != "raw_points"},
+                          "module_number": module_number,
+                      },
             "overlays": [marker.to_dict() for marker in markers],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
             "semantics": {"overlay_timestamp": "occurred_at", "correlation_only": True},
@@ -141,14 +168,27 @@ class HistoryApi:
                                "diagnostic_phase_unchanged": True},
         }
         response["performance"] = {
-            "raw_records": bundle["raw_records"], "raw_points": bundle["raw_points"],
-            "display_points": len(points), "history_read_seconds": round(bundle["read_seconds"], 6),
+            "raw_records": bundle["raw_records"],
+            "raw_points": sum(item["raw_points"] for item in bundle["series"]),
+            "display_points": sum(len(item["points"]) for item in bundle["series"]),
+            "history_read_seconds": round(bundle["read_seconds"], 6),
             "downsample_seconds": round(bundle["downsample_seconds"], 6),
             "phase_projection_seconds": round(phase_seconds, 6), "cache_hit": bundle["cache_hit"],
             "backend_seconds": round(time.perf_counter() - backend_started, 6),
         }
         response["performance"]["payload_bytes"] = len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode())
         return ApiResponse(200, response)
+
+    @staticmethod
+    def _metrics(value: str | None) -> tuple[str, ...]:
+        parts = tuple(part.strip() for part in (value or "").split(","))
+        if not parts or any(not part for part in parts):
+            raise HistoryApiProblem("metrics must contain comma-separated metric names")
+        if len(set(parts)) != len(parts):
+            raise HistoryApiProblem("metrics must be unique")
+        if any(metric not in SERIES_METRICS for metric in parts):
+            raise HistoryApiProblem("metric is unsupported")
+        return parts
 
     @staticmethod
     def _timestamp(value: str, field: str) -> str:
