@@ -18,6 +18,7 @@ from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMET
 from cell_history import CellHistoryWriter
 from diagnostic_aggregates import DiagnosticAggregateStore
 from diagnostic_backfill import DiagnosticAggregateBackfill
+from current_condition_backfill import CurrentConditionBackfill
 from config_history import ConfigHistory
 from config_ui import (configure_maintenance_live_publisher,
                        record_stable_observed_positions, start_config_server)
@@ -1053,6 +1054,22 @@ def main() -> None:
     publisher.discovery(int(options["module_count"]))
     configure_maintenance_live_publisher(publisher.maintenance_events)
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
+    try:
+        current_backfill = CurrentConditionBackfill(
+            CELL_HISTORY_DIR, DEFAULT_POSITION_HISTORY_FILE
+        ).run(cell_store)
+        LOG.info(
+            "Current-Condition-Rebuild: discovered=%s scanned=%s skipped=%s "
+            "incremental=%s valid=%s merged=%s duplicates=%s identity_unknown=%s "
+            "invalid=%s errors=%s",
+            current_backfill["files_discovered"], current_backfill["files_scanned"],
+            current_backfill["files_skipped"], current_backfill["incremental_files"],
+            current_backfill["valid_samples"], current_backfill["samples_merged"],
+            current_backfill["duplicates"], current_backfill["identity_unknown"],
+            current_backfill["invalid_lines"], current_backfill["file_errors"],
+        )
+    except Exception as exc:
+        LOG.warning("Current-Condition-Rebuild fehlgeschlagen: %s", exc)
     aggregate_store = DiagnosticAggregateStore(
         DIAGNOSTIC_AGGREGATE_FILE,
         CellDiagnosticStore.phases,

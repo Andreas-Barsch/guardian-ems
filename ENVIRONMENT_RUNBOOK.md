@@ -1,8 +1,14 @@
 # Guardian EMS -- Environment Runbook
 
-## Guardian Battery 0.7.1 – Historical aggregate backfill
+## Guardian Battery 0.7.2 – Current-Condition raw-history rebuild
 
-Guardian Battery und das Add-on tragen im Release die Version `0.7.1`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`; die neuen Verfahren sind ergänzende Evidence Diagnostics.
+Guardian Battery und das Add-on tragen im Release die Version `0.7.2`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`.
+
+Ab 0.7.2 ergänzt beziehungsweise rekonstruiert ein Startprozess den begrenzten klassischen Current-Condition-Arbeitscache `cell_diagnostics.json` aus geeigneten Rohsamples in `cell_history/*.jsonl`. Er dedupliziert über dokumentierte physische Seriennummer, Modulposition und Timestamp, sortiert chronologisch und behält je Modul höchstens `cell_diag_history_max_samples` (Standard `8.640`). Explizite Sample-Seriennummern haben Vorrang; andernfalls wird ausschließlich die Positionshistorie zum Samplezeitpunkt verwendet. Samples vor der ersten sicheren Zuordnung oder mit sonst unklarer Identität werden nicht geraten und nicht rekonstruiert.
+
+Persistente Datei-, Offset- und Positionshistorien-Signaturen in `cell_diagnostics.json` verhindern vollständige Scans bei jedem Neustart: unveränderte Tagesdateien bleiben ungeöffnet, gewachsene Dateien werden ab dem letzten vollständigen Byte-Offset nachgezogen, ersetzte Dateien werden einmal vollständig geprüft. Beschädigte Einzelzeilen werden protokolliert und übersprungen; eine beschädigte Cachedatei löst einen Raw-Rebuild aus. Der neue Cache wird atomar ersetzt, ohne Rohhistorie oder `diagnostic_aggregates.json` zu verändern.
+
+Die Current Condition verwendet nach dem Rebuild ausschließlich die unveränderte `CellDiagnosticStore.analyse()`-Originalmethodik. Der rekonstruierte Ringpuffer wird wie bisher mit der aktuell aktiven Diagnosekonfiguration bewertet; 0.7.2 implementiert ausdrücklich keine retrospektive As-was-Neubewertung.
 
 Die zusätzlichen Diagnoseverfahren verarbeiten jeden eingehenden Modulsample genau einmal. Der begrenzte In-Memory-Ringpuffer `cell_diagnostics.json` liefert kurzzeitige Sequenzen; robuste, versionierte Tages-/Phasenaggregate werden davon getrennt und atomar in `diagnostic_aggregates.json` persistiert. Die append-only Rohhistorie unter `cell_history/` wird weder migriert noch umgeschrieben. Ein Neustart kann die kompakten Aggregate direkt weiterverwenden, ohne wiederholte JSONL-Scans pro Zelle oder Verfahren.
 

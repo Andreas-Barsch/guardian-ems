@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.2 – Current-Condition raw-history rebuild
+
+- Rekonstruiert den begrenzten klassischen Current-Condition-Arbeitscache beim Start aus geeigneten Rohsamples der vorhandenen `cell_history/*.jsonl`-Tagesdateien.
+- Verwendet explizite Sample-Seriennummern oder ausschließlich die dokumentierte Positionshistorie zum Samplezeitpunkt; unbekannte physische Identität wird nicht geraten.
+- Dedupliziert Cache- und Rohsamples, hält das konfigurierte Ringpufferlimit ein und liest unveränderte vollständig erfasste Dateien anhand persistenter Coverage-/Dateisignaturen nicht erneut.
+- Schreibt nur `cell_diagnostics.json` atomar neu; Rohhistorie und getrennte `diagnostic_aggregates.json` bleiben unverändert.
+- Die Current Condition verwendet weiterhin unverändert die Originalmethodik und bewertet den rekonstruierten Ringpuffer mit der aktuell aktiven Diagnosekonfiguration; eine retrospektive As-was-Neubewertung ist nicht enthalten.
+- Guardian/Add-on sind `0.7.2`; die statuswirksame Diagnostic Engine bleibt fachlich unverändert `0.4.12`.
+
 ## 0.7.1 – Historical aggregate backfill
 
 - Aggregiert beim Start fehlende geeignete Samples aus vorhandenen append-only `cell_history/*.jsonl`-Tagesdateien in die versionierten Evidence-Diagnostics-Aggregate nach.

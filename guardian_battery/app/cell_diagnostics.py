@@ -172,6 +172,8 @@ class CellDiagnosticStore:
             lambda: deque(maxlen=max_samples_per_module)
         )
         self._analysis_cache = {}
+        self.rebuild_sources = {}
+        self.load_error = False
 
         self._load()
 
@@ -180,14 +182,21 @@ class CellDiagnosticStore:
             if self.path.exists():
                 data = json.loads(self.path.read_text())
 
+                sources = data.get("raw_history_sources", {})
+                if isinstance(sources, dict):
+                    self.rebuild_sources = sources
+
                 for key, values in data.get("samples", {}).items():
                     self.samples[int(key)].extend(
                         values[-self.max_samples:]
                     )
         except Exception:
             self.samples.clear()
+            self.rebuild_sources = {}
+            self.load_error = True
 
     def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
 
         tmp.write_text(
@@ -196,7 +205,8 @@ class CellDiagnosticStore:
                     "samples": {
                         str(key): list(values)
                         for key, values in self.samples.items()
-                    }
+                    },
+                    "raw_history_sources": self.rebuild_sources,
                 },
                 separators=(",", ":"),
             )
