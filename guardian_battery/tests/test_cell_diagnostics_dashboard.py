@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import yaml
 
@@ -24,6 +25,12 @@ def test_all_cell_views_separate_momentary_values_and_historic_evidence():
     for path in DASHBOARDS:
         views = _cell_views(path)
         assert len(views) == 90
+        assert len({view["path"] for view in views}) == 90
+        assert {view["path"] for view in views} == {
+            f"module-{module}-cell-{cell}"
+            for module in range(1, 7)
+            for cell in range(1, 16)
+        }
         for view in views:
             summary = view["cards"][0]["content"]
             assert "Gesamtbewertung: {{ s }}" in summary
@@ -81,3 +88,35 @@ def test_all_cell_views_explain_the_actual_aggregation_semantics():
             assert "confidence_medium_samples" in content
             assert "confidence_high_samples" in content
             assert "Confidence ist kein Gesundheitsprozentwert" in content
+            labels = ["1. **Entladung:**", "2. **Tiefbereich:**", "3. **Ladung:**", "4. **Hochbereich:**"]
+            assert [content.index(label) for label in labels] == sorted(content.index(label) for label in labels)
+            for phase in ("discharge", "low", "charge", "high"):
+                for threshold in ("observe", "warning", "critical"):
+                    assert f"'{phase}_{threshold}_mv'" in content
+            assert "unter {{ state_attr" in content
+            assert "= NORMAL" in content
+            assert "= BEOBACHTEN" in content
+            assert "= AUFFÄLLIG" in content
+            assert "= KRITISCH" in content
+
+
+def test_threshold_help_changes_with_active_configuration_and_has_no_fixed_defaults():
+    content = _cell_views(DASHBOARDS[0])[0]["cards"][2]["content"]
+    pattern = re.compile(
+        r"{{ state_attr\('sensor\.guardian_battery_zelldiagnostik_konfiguration', '([^']+)'\) }}"
+    )
+
+    def render_thresholds(values):
+        return pattern.sub(lambda match: str(values[match.group(1)]), content)
+
+    keys = {
+        f"{phase}_{threshold}_mv"
+        for phase in ("discharge", "low", "charge", "high")
+        for threshold in ("observe", "warning", "critical")
+    }
+    first = render_thresholds({key: index + 51 for index, key in enumerate(sorted(keys))})
+    changed = render_thresholds({key: index + 81 for index, key in enumerate(sorted(keys))})
+    assert first != changed
+    assert all(f"{value} mV" in first for value in range(51, 63))
+    threshold_section = content.split("**Aktuell wirksame phasenspezifische Grenzen:**", 1)[1]
+    assert not re.search(r"\b(?:10|20|40) mV\b", threshold_section)

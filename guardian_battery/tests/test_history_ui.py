@@ -34,11 +34,12 @@ def test_svg_chart_has_real_axes_units_layers_resize_and_local_tooltip():
     assert "ResizeObserver" in html
     assert "Intl.DateTimeFormat('de-DE'" in html
     assert "niceStep" in html and "tickCount" in html
-    assert 'id="cell-picker"' in html
-    assert 'id="cells-all"' in html and 'id="cells-none"' in html
+    assert 'id="voltage-cell-picker"' in html
+    assert 'id="temperature-cell-picker"' in html
+    assert 'id="voltage-cells-all"' in html and 'id="temperature-cells-none"' in html
     assert "cell_numbers" in html and "selectedCells" in html
     assert "grid-template-columns:minmax(135px" in html
-    assert "picker.hidden=!cell" in html and "picker.disabled=!cell" in html
+    assert "picker.hidden=!visible" in html and "picker.disabled=!visible" in html
     assert 'id="cell-label" hidden' not in html
     assert "@media(max-width:980px)" in html
     assert "@media(max-width:620px)" in html
@@ -93,10 +94,26 @@ def test_visual_areas_are_permanent_german_and_help_is_dynamic_and_focused():
 
 def test_multicell_controls_are_wired_to_dom_and_query():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
-    assert '<fieldset id="cell-picker" hidden>' in html
-    assert "input.onchange=updateCellState" in html
-    assert "byId('cells-all').onclick=()=>setCells(true)" in html
-    assert "byId('cells-none').onclick=()=>setCells(false)" in html
+    assert '<fieldset id="voltage-cell-picker" hidden>' in html
+    assert '<fieldset id="temperature-cell-picker" hidden>' in html
+    assert "input.onchange=updateControlState" in html
+    assert "byId(kind+'-cells-all').onclick=()=>setCells(kind,true)" in html
+    assert "byId(kind+'-cells-none').onclick=()=>setCells(kind,false)" in html
     assert "q.set('cell_numbers',cells.join(','))" in html
-    assert "selectedCells().length" in html
+    assert "q.set(param,cells.join(','))" in html
+    assert "selectedCells(kind).length" in html
     assert "Aktivitätsfilter" not in html
+
+
+def test_single_is_default_and_combined_mode_has_independent_stacked_tracks():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert '<option value="single">Einzel</option><option value="combined">Gemeinsam</option>' in html
+    assert '<fieldset id="metric-picker" hidden>' in html
+    assert "Alle Messgrößen" in html and 'id="metrics-none"' in html
+    for metric in ("soc", "current", "cell_voltage", "cell_temperature"):
+        assert metric in html
+    assert "voltage_cell_numbers" in html and "temperature_cell_numbers" in html
+    assert 'id="combined-charts" class="track-stack" hidden' in html
+    assert "for(const series of data.series)renderTrack(series,data)" in html
+    assert "syncTracks(time)" in html and "class:'sync-cursor'" in html
+    assert "unit=UNITS[metric]" in html
