@@ -9,6 +9,7 @@ from typing import Any
 from maintenance import MaintenanceEvent
 from maintenance_ui import maintenance_deep_link
 from version import GUARDIAN_VERSION
+from mqtt_projection import MQTT_MAX_PAYLOAD_BYTES
 
 
 LIVE_EVENT_TOLERANCE_SECONDS = 5 * 60
@@ -53,9 +54,13 @@ class MaintenanceMqttPublisher:
             "device": device,
             "icon": "mdi:tools",
         }
+        encoded = json.dumps(payload, ensure_ascii=False)
+        if (len(encoded.encode("utf-8")) + len(DISCOVERY_TOPIC.encode("utf-8")) + 7
+                > MQTT_MAX_PAYLOAD_BYTES):
+            raise ValueError("maintenance discovery MQTT payload exceeds 65536 bytes")
         self.client.publish(
             DISCOVERY_TOPIC,
-            json.dumps(payload, ensure_ascii=False),
+            encoded,
             retain=True,
         )
 
@@ -78,9 +83,13 @@ class MaintenanceMqttPublisher:
             payload["module_number"] = event.module_number
         if event.cell_number is not None:
             payload["cell_number"] = event.cell_number
+        encoded = json.dumps(payload, ensure_ascii=False)
+        if (len(encoded.encode("utf-8")) + len(self.event_topic.encode("utf-8")) + 7
+                > MQTT_MAX_PAYLOAD_BYTES):
+            raise ValueError("maintenance MQTT payload exceeds 65536 bytes")
         result = self.client.publish(
             self.event_topic,
-            json.dumps(payload, ensure_ascii=False),
+            encoded,
             retain=False,
         )
         result_code = getattr(result, "rc", 0)

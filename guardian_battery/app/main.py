@@ -24,6 +24,9 @@ from config_ui import (configure_maintenance_live_publisher,
                        record_stable_observed_positions, start_config_server)
 from maintenance_mqtt import MaintenanceMqttPublisher
 from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
+from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
+                             compact_battery_diagnostics, compact_cell_attributes,
+                             compact_text)
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
                               resolve_maintenance_event_identities, update_observed_stack)
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
@@ -588,11 +591,11 @@ class Mqtt:
         self.client.will_set(f"{self.prefix}/battery/availability", "offline", retain=True)
         self.client.connect(host, port, keepalive=60)
         self.client.loop_start()
-        self.client.publish(f"{self.prefix}/battery/availability", "online", retain=True)
+        self._publish(f"{self.prefix}/battery/availability", "online", retain=True)
         self.maintenance_events = MaintenanceMqttPublisher(self.client, self.prefix)
 
     def close(self) -> None:
-        self.client.publish(f"{self.prefix}/battery/availability", "offline", retain=True)
+        self._publish(f"{self.prefix}/battery/availability", "offline", retain=True)
         self.client.loop_stop()
         self.client.disconnect()
 
@@ -698,7 +701,7 @@ class Mqtt:
             if device_class in {"voltage", "current", "temperature", "battery"} or unit in {"%", "mV"}:
                 payload["state_class"] = "measurement"
 
-            self.client.publish(
+            self._publish(
                 f"homeassistant/sensor/guardian_battery/{object_id}/config",
                 json.dumps(payload),
                 retain=True,
@@ -709,18 +712,29 @@ class Mqtt:
             return
         if isinstance(value, float):
             value = f"{value:.4f}".rstrip("0").rstrip(".")
-        self.client.publish(
+        self._publish(
             f"{self.prefix}/battery/sensor/{name}/state",
-            str(value),
+            compact_text(value, 4096),
             retain=True,
         )
 
     def attributes(self, name: str, attributes: dict) -> None:
-        self.client.publish(
+        self._publish(
             f"{self.prefix}/battery/sensor/{name}/attributes",
             json.dumps(attributes, ensure_ascii=False),
             retain=True,
+            limit=MQTT_MAX_ATTRIBUTE_BYTES,
         )
+
+    def _publish(self, topic: str, payload, *, retain: bool, limit: int = MQTT_MAX_PAYLOAD_BYTES):
+        encoded = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
+        packet_size = len(encoded) + len(topic.encode("utf-8")) + 7
+        if packet_size > limit:
+            raise ValueError(
+                f"MQTT packet exceeds {limit} bytes for {topic}: "
+                f"payload={len(encoded)}, packet<={packet_size}"
+            )
+        return self.client.publish(topic, payload, retain=retain)
 
     @staticmethod
     def _diag_meta(metric: str, phase: str | None = None) -> dict:
@@ -826,12 +840,12 @@ class Mqtt:
             "incident": incident,
             "alarms": alarms,
             "modules": payload_modules,
-            "cell_diagnostics": cell_results,
+            "cell_diagnostics": compact_battery_diagnostics(cell_results, module_infos),
             "bms_stat": bms_stat,
             "module_info": module_infos,
         }
-        self.client.publish(f"{self.prefix}/battery/state", json.dumps(payload, ensure_ascii=False), retain=True)
-        self.client.publish(f"{self.prefix}/battery/alarms", json.dumps(alarms, ensure_ascii=False), retain=True)
+        self._publish(f"{self.prefix}/battery/state", json.dumps(payload, ensure_ascii=False), retain=True)
+        self._publish(f"{self.prefix}/battery/alarms", json.dumps(alarms, ensure_ascii=False), retain=True)
 
         for module in modules:
             assessment = assessments[module.module]
@@ -912,36 +926,14 @@ class Mqtt:
                 for phase in ("low", "discharge", "charge", "high"):
                     self.state(f"{cp}_{phase}_samples", phases.get(phase, {}).get("samples"))
 
-                # Explainability metadata appears in Home Assistant's entity "More info" dialog.
-                status_meta = self._diag_meta("status")
+                # Bounded transport projection for Home Assistant's entity metadata.
+                status_meta = self._diag_meta("status") | compact_cell_attributes(
+                    cell, diag.get("advanced_diagnostics", {})
+                )
                 status_meta["physical_group"] = ((int(cell["cell"]) - 1) // 5) + 1
                 status_meta["physical_group_cells"] = {1: "1-5", 2: "6-10", 3: "11-15"}[status_meta["physical_group"]]
                 status_meta["evidence_phase"] = cell.get("evidence_phase")
                 status_meta["evidence_deviation_mv"] = cell.get("evidence_deviation_mv")
-                status_meta["current_condition"] = cell.get("diagnostics", {}).get("current_condition")
-                status_meta["trend"] = cell.get("diagnostics", {}).get("trend")
-                status_meta["maintenance_risk"] = cell.get("diagnostics", {}).get("maintenance_risk")
-                status_meta["maintenance_risk_reason"] = cell.get("diagnostics", {}).get("maintenance_risk_reason")
-                status_meta["method_quality"] = cell.get("diagnostics", {}).get("method_quality")
-                status_meta["trend_risk_confidence"] = cell.get("diagnostics", {}).get("trend_risk_confidence")
-                status_meta["trend_risk_confidence_basis"] = cell.get("diagnostics", {}).get("trend_risk_confidence_basis", {})
-                status_meta["evidence_families"] = cell.get("diagnostics", {}).get("evidence_families", {})
-                status_meta["contributing_evidence"] = cell.get("diagnostics", {}).get("contributing_evidence", [])
-                status_meta["missing_evidence"] = cell.get("diagnostics", {}).get("missing_evidence", [])
-                status_meta["diagnostic_methods"] = cell.get("diagnostics", {}).get("methods", {})
-                status_meta["balancing_context"] = cell.get("diagnostics", {}).get("methods", {}).get("balancing_context", {})
-                status_meta["maintenance_context"] = cell.get("diagnostics", {}).get("maintenance_context", {})
-                status_meta["ica_dva_readiness"] = cell.get("diagnostics", {}).get("ica_dva_readiness", {})
-                advanced = diag.get("advanced_diagnostics", {})
-                status_meta["diagnostic_provenance"] = {
-                    key: advanced.get(key)
-                    for key in (
-                        "schema_version", "guardian_version",
-                        "diagnostic_engine_version", "config_id",
-                        "evaluated_at", "observation_period",
-                        "single_pass_sample_count",
-                    )
-                }
                 self.attributes(f"{cp}_status", status_meta)
                 self.attributes(f"{cp}_confidence", self._diag_meta("confidence"))
                 self.attributes(f"{cp}_voltage", self._diag_meta("voltage"))
@@ -1199,10 +1191,13 @@ def main() -> None:
                     maintenance_events = ()
                 for module in modules:
                     latest_serial = cell_store.current_serial(module.module)
-                    cell_results[module.module] = cell_store.analyse(
+                    analysis = cell_store.analyse(
                         module.module, options, maintenance_events,
                         aggregate_store.for_identity(module.module, latest_serial),
                     )
+                    cell_results[module.module] = {
+                        **analysis, "physical_module_serial": latest_serial
+                    }
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
                     cell_results, bms_stat, module_infos

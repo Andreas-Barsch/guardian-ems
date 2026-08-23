@@ -1,8 +1,12 @@
 # Guardian EMS -- Environment Runbook
 
-## Guardian Battery 0.7.3 – Physical-identity Current Condition
+## Guardian Battery 0.7.4 – Compact MQTT projection
 
-Guardian Battery und das Add-on tragen im Release die Version `0.7.3`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`.
+Guardian Battery und das Add-on tragen im Release die Version `0.7.4`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`.
+
+Ab 0.7.4 besitzt MQTT eine ausdrückliche, von der internen Diagnoseberechnung getrennte Transportprojektion. `guardian/battery/state` enthält nur kompakte Modulzusammenfassungen; Zellstatus-Attribute enthalten ausschließlich kompakte Status-, Phasen-, Trend-, Risk-, Qualitäts-, Begründungs- und Provenienzwerte. Vollständige Advanced-Diagnostics-Objekte, Methods, Evidence Families, Sequenz-/Kurvenarrays, Maintenance-Kontextlisten, Rohsamples und Tagesaggregate bleiben intern und werden nicht über MQTT transportiert.
+
+Jede MQTT-Payload wird vor dem Publish gegen ein hartes Limit von 65.536 Byte geprüft, Entity-Attribute zusätzlich gegen 16.384 Byte. Der Worst-Case-Regressionstest mit sechs Modulen und 90 vollständig befüllten Zellprojektionen ergibt rund 6,2 KiB für `guardian/battery/state` sowie rund 10,5 KiB für das größte Zellattribut. Discovery bleibt unverändert in einzelnen kleinen Retained-Paketen. Das Brokerlimit darf nicht als Ersatz für kompakte Guardian-Payloads erhöht werden.
 
 Ab 0.7.3 ist die dokumentierte physische Seriennummer die historische Primärachse des klassischen Current-Condition-Ringpuffers. Die aktuelle Position bestimmt über den jüngsten Positionssnapshot ausschließlich die aktuell eingebaute Identität; analysiert werden anschließend alle sicher zugeordneten Samples dieser Seriennummer über frühere und aktuelle Positionen hinweg. Ein Modultausch vermischt die Vorgänger- und Nachfolgeridentität nicht. Das Limit `cell_diag_history_max_samples` gilt je physischer Seriennummer; unbekannte Identitäten bleiben separat positionsgebunden.
 

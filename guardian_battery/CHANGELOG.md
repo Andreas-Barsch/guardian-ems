@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.4 – Compact MQTT projection
+
+- Ersetzt die vollständige Diagnoseobjekt-Serialisierung in `guardian/battery/state` durch stabile kompakte Modulprojektionen und verhindert dadurch wiederkehrende Mosquitto-Trennungen wegen übergroßer Pakete.
+- Reduziert Zellstatus-Attribute auf Current Condition, Confidence, Phasenstatus/-samplezahlen, Trend, Maintenance Risk, Qualitätsstatus, kurze Begründung, Methodenzusammenfassungen und Provenienz-ID.
+- Hält vollständige Advanced Diagnostics, Methods, Evidence Families, Sequenzarrays, Maintenance-Kontextlisten, Rohsamples und Aggregate aus MQTT fern; intern bleiben sie vollständig verfügbar.
+- Erzwingt maximal 65.536 Byte je MQTT-Payload und maximal 16.384 Byte je Entity-Attributpayload; Texte werden deterministisch begrenzt.
+- Home-Assistant-Discovery, Retained-Verhalten und sämtliche Diagnosemethoden bleiben unverändert.
+- Guardian/Add-on sind `0.7.4`; die Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.3 – Physical-identity Current Condition
 
 - Verwendet die physische Modulseriennummer als historische Primärachse der klassischen Current Condition; sicher identifizierte Samples bleiben bei Umpositionierungen positionsübergreifend zusammenhängend.
