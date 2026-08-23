@@ -1198,8 +1198,7 @@ def main() -> None:
                     LOG.warning("Maintenance-Kontext nicht lesbar: %s", exc)
                     maintenance_events = ()
                 for module in modules:
-                    module_samples = list(cell_store.samples.get(module.module, ()))
-                    latest_serial = module_samples[-1].get("module_serial") if module_samples else None
+                    latest_serial = cell_store.current_serial(module.module)
                     cell_results[module.module] = cell_store.analyse(
                         module.module, options, maintenance_events,
                         aggregate_store.for_identity(module.module, latest_serial),

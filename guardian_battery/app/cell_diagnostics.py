@@ -167,12 +167,13 @@ class CellDiagnosticStore:
     ):
         self.path = path
         self.max_samples = max_samples_per_module
-
-        self.samples = defaultdict(
-            lambda: deque(maxlen=max_samples_per_module)
-        )
+        self.identity_samples = defaultdict(lambda: deque(maxlen=max_samples_per_module))
+        self.unknown_samples = defaultdict(lambda: deque(maxlen=max_samples_per_module))
+        self._latest_by_position = {}
+        self._documented_current_identity = {}
         self._analysis_cache = {}
         self.rebuild_sources = {}
+        self.expected_materialized_coverage = {}
         self.load_error = False
 
         self._load()
@@ -185,15 +186,110 @@ class CellDiagnosticStore:
                 sources = data.get("raw_history_sources", {})
                 if isinstance(sources, dict):
                     self.rebuild_sources = sources
-
-                for key, values in data.get("samples", {}).items():
-                    self.samples[int(key)].extend(
-                        values[-self.max_samples:]
-                    )
+                coverage = data.get("expected_materialized_coverage", {})
+                if isinstance(coverage, dict):
+                    self.expected_materialized_coverage = coverage
+                if isinstance(data.get("identity_samples"), dict):
+                    for serial, values in data["identity_samples"].items():
+                        if isinstance(serial, str) and serial:
+                            self.identity_samples[serial].extend(values[-self.max_samples:])
+                    for module, values in data.get("unknown_samples", {}).items():
+                        self.unknown_samples[int(module)].extend(values[-self.max_samples:])
+                    self._rebuild_latest_positions()
+                else:
+                    legacy = [value for values in data.get("samples", {}).values() for value in values]
+                    self.replace_samples(legacy)
         except Exception:
-            self.samples.clear()
+            self.identity_samples.clear()
+            self.unknown_samples.clear()
+            self._latest_by_position.clear()
             self.rebuild_sources = {}
+            self.expected_materialized_coverage = {}
             self.load_error = True
+
+    def _rebuild_latest_positions(self):
+        self._latest_by_position.clear()
+        for value in self.iter_all_samples():
+            module = int(value["module"])
+            current = self._latest_by_position.get(module)
+            if current is None or float(value["timestamp"]) >= float(current["timestamp"]):
+                self._latest_by_position[module] = value
+
+    def iter_all_samples(self):
+        for values in self.identity_samples.values():
+            yield from values
+        for values in self.unknown_samples.values():
+            yield from values
+
+    @property
+    def samples(self):
+        """Compatibility projection grouped by historical module position."""
+        result = defaultdict(lambda: deque(maxlen=self.max_samples))
+        for value in sorted(self.iter_all_samples(), key=lambda item: float(item["timestamp"])):
+            result[int(value["module"])].append(value)
+        return result
+
+    def replace_samples(self, values):
+        self.identity_samples.clear()
+        self.unknown_samples.clear()
+        ordered = sorted(values, key=lambda item: float(item["timestamp"]))
+        for value in ordered:
+            serial = value.get("module_serial")
+            target = self.identity_samples[str(serial)] if serial else self.unknown_samples[int(value["module"])]
+            target.append(dict(value))
+        self._rebuild_latest_positions()
+        self._analysis_cache.clear()
+
+    def current_serial(self, module):
+        if int(module) in self._documented_current_identity:
+            return self._documented_current_identity[int(module)]
+        latest = self._latest_by_position.get(int(module))
+        return latest.get("module_serial") if latest else None
+
+    def set_current_identities(self, positions):
+        self._documented_current_identity = {
+            int(module): serial for module, serial in positions.items()
+        }
+        self._analysis_cache.clear()
+
+    def values_for_module(self, module):
+        serial = self.current_serial(module)
+        if serial:
+            return list(self.identity_samples.get(serial, ()))
+        latest = self._latest_by_position.get(int(module))
+        if not latest:
+            return []
+        latest_documented = max(
+            (float(value["timestamp"]) for values in self.identity_samples.values()
+             for value in values if int(value["module"]) == int(module)),
+            default=float("-inf"),
+        )
+        return [value for value in self.unknown_samples.get(int(module), ())
+                if float(value["timestamp"]) > latest_documented]
+
+    def coverage_snapshot(self):
+        result = {}
+        for serial, values in self.identity_samples.items():
+            if values:
+                result[serial] = {
+                    "sample_count": len(values),
+                    "oldest_timestamp": float(values[0]["timestamp"]),
+                    "newest_timestamp": float(values[-1]["timestamp"]),
+                }
+        return result
+
+    def materialized_coverage_satisfied(self):
+        actual = self.coverage_snapshot()
+        for serial, expected in self.expected_materialized_coverage.items():
+            current = actual.get(serial)
+            if not current or current["sample_count"] < int(expected.get("sample_count", 0)):
+                return False
+            if current["newest_timestamp"] < float(expected.get("newest_timestamp", 0)):
+                return False
+            if (int(expected.get("sample_count", 0)) < self.max_samples
+                    and current["oldest_timestamp"] > float(expected.get("oldest_timestamp", 0))):
+                return False
+        return True
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,11 +298,14 @@ class CellDiagnosticStore:
         tmp.write_text(
             json.dumps(
                 {
-                    "samples": {
-                        str(key): list(values)
-                        for key, values in self.samples.items()
+                    "identity_samples": {
+                        serial: list(values) for serial, values in self.identity_samples.items()
+                    },
+                    "unknown_samples": {
+                        str(module): list(values) for module, values in self.unknown_samples.items()
                     },
                     "raw_history_sources": self.rebuild_sources,
+                    "expected_materialized_coverage": self.expected_materialized_coverage,
                 },
                 separators=(",", ":"),
             )
@@ -215,10 +314,15 @@ class CellDiagnosticStore:
         tmp.replace(self.path)
 
     def add(self, sample):
-        self.samples[sample.module].append(
-            asdict(sample)
-        )
-        self._analysis_cache.pop(sample.module, None)
+        value = asdict(sample)
+        if sample.module_serial:
+            self.identity_samples[sample.module_serial].append(value)
+        else:
+            self.unknown_samples[sample.module].append(value)
+        current = self._latest_by_position.get(sample.module)
+        if current is None or sample.timestamp >= float(current["timestamp"]):
+            self._latest_by_position[sample.module] = value
+        self._analysis_cache.clear()
 
     @staticmethod
     def phases(sample, options):
@@ -283,19 +387,7 @@ class CellDiagnosticStore:
         maintenance_events=(),
         aggregate_records=(),
     ):
-        all_values = list(
-            self.samples.get(module, ())
-        )
-        latest_serial = all_values[-1].get("module_serial") if all_values else None
-        if latest_serial:
-            values = [value for value in all_values if value.get("module_serial") == latest_serial]
-        else:
-            last_documented = max(
-                (index for index, value in enumerate(all_values) if value.get("module_serial")),
-                default=-1,
-            )
-            values = [value for value in all_values[last_documented + 1:]
-                      if not value.get("module_serial")]
+        values = self.values_for_module(module)
 
         maintenance_signature = tuple(
             (

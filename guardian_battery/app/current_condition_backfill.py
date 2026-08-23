@@ -15,7 +15,7 @@ from position_history import PositionHistoryLog
 
 
 LOG = logging.getLogger("guardian_battery")
-SOURCE_SCHEMA_VERSION = 1
+SOURCE_SCHEMA_VERSION = 2
 
 
 class CurrentConditionBackfill:
@@ -112,16 +112,18 @@ class CurrentConditionBackfill:
 
         merged = {}
         slot_keys = {}
-        for values in store.samples.values():
-            for value in values:
-                try:
-                    sample_key = self._sample_key(value)
-                    merged[sample_key] = dict(value)
-                    slot_keys.setdefault(sample_key[1:], set()).add(sample_key)
-                except (KeyError, TypeError, ValueError):
-                    continue
+        for value in store.iter_all_samples():
+            try:
+                sample_key = self._sample_key(value)
+                merged[sample_key] = dict(value)
+                slot_keys.setdefault(sample_key[1:], set()).add(sample_key)
+            except (KeyError, TypeError, ValueError):
+                continue
 
         sources = store.rebuild_sources if isinstance(store.rebuild_sources, dict) else {}
+        if not store.materialized_coverage_satisfied():
+            sources = {}
+            report["materialized_cache_incomplete"] = True
         next_sources = dict(sources)
         paths = sorted(self.history_directory.glob("*.jsonl"))
         report["files_discovered"] = len(paths)
@@ -196,15 +198,12 @@ class CurrentConditionBackfill:
                 "position_history": identity_signature,
             }
 
-        rebuilt = {}
-        for value in sorted(merged.values(), key=lambda item: (item["timestamp"], item["module"])):
-            rebuilt.setdefault(int(value["module"]), []).append(value)
-        store.samples.clear()
-        for module, values in rebuilt.items():
-            store.samples[module].extend(values[-store.max_samples:])
+        store.replace_samples(merged.values())
+        if identity_index[1]:
+            store.set_current_identities(identity_index[1][-1].positions)
         store.rebuild_sources = next_sources
-        store._analysis_cache.clear()
         if report["files_scanned"] or store.load_error:
+            store.expected_materialized_coverage = store.coverage_snapshot()
             store.save()
             store.load_error = False
         return report

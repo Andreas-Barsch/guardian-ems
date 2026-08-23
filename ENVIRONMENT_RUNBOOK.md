@@ -1,10 +1,14 @@
 # Guardian EMS -- Environment Runbook
 
-## Guardian Battery 0.7.2 – Current-Condition raw-history rebuild
+## Guardian Battery 0.7.3 – Physical-identity Current Condition
 
-Guardian Battery und das Add-on tragen im Release die Version `0.7.2`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`.
+Guardian Battery und das Add-on tragen im Release die Version `0.7.3`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`.
 
-Ab 0.7.2 ergänzt beziehungsweise rekonstruiert ein Startprozess den begrenzten klassischen Current-Condition-Arbeitscache `cell_diagnostics.json` aus geeigneten Rohsamples in `cell_history/*.jsonl`. Er dedupliziert über dokumentierte physische Seriennummer, Modulposition und Timestamp, sortiert chronologisch und behält je Modul höchstens `cell_diag_history_max_samples` (Standard `8.640`). Explizite Sample-Seriennummern haben Vorrang; andernfalls wird ausschließlich die Positionshistorie zum Samplezeitpunkt verwendet. Samples vor der ersten sicheren Zuordnung oder mit sonst unklarer Identität werden nicht geraten und nicht rekonstruiert.
+Ab 0.7.3 ist die dokumentierte physische Seriennummer die historische Primärachse des klassischen Current-Condition-Ringpuffers. Die aktuelle Position bestimmt über den jüngsten Positionssnapshot ausschließlich die aktuell eingebaute Identität; analysiert werden anschließend alle sicher zugeordneten Samples dieser Seriennummer über frühere und aktuelle Positionen hinweg. Ein Modultausch vermischt die Vorgänger- und Nachfolgeridentität nicht. Das Limit `cell_diag_history_max_samples` gilt je physischer Seriennummer; unbekannte Identitäten bleiben separat positionsgebunden.
+
+Coverage-Schema 2 macht die fachlich unvollständigen positionszentrierten 0.7.2-Marker ungültig und erzwingt beim ersten 0.7.3-Start einen vollständigen Neuaufbau ab Offset 0. Zusätzlich werden erwartete Serienidentitäten, Samplezahlen sowie ältester und jüngster Timestamp des materialisierten Ringpuffers persistiert. Ein verkürzter Cache mit formal unveränderten Dateisignaturen löst dadurch ebenfalls einen Reparatur-Rebuild aus. Danach bleiben unveränderte Dateien ungeöffnet und gewachsene Dateien werden wieder inkrementell nachgezogen.
+
+Ab 0.7.2 ergänzt beziehungsweise rekonstruiert ein Startprozess den begrenzten klassischen Current-Condition-Arbeitscache `cell_diagnostics.json` aus geeigneten Rohsamples in `cell_history/*.jsonl`. Er dedupliziert über dokumentierte physische Seriennummer, Modulposition und Timestamp und sortiert chronologisch. Explizite Sample-Seriennummern haben Vorrang; andernfalls wird ausschließlich die Positionshistorie zum Samplezeitpunkt verwendet. Samples vor der ersten sicheren Zuordnung oder mit sonst unklarer Identität werden nicht geraten und nicht rekonstruiert.
 
 Persistente Datei-, Offset- und Positionshistorien-Signaturen in `cell_diagnostics.json` verhindern vollständige Scans bei jedem Neustart: unveränderte Tagesdateien bleiben ungeöffnet, gewachsene Dateien werden ab dem letzten vollständigen Byte-Offset nachgezogen, ersetzte Dateien werden einmal vollständig geprüft. Beschädigte Einzelzeilen werden protokolliert und übersprungen; eine beschädigte Cachedatei löst einen Raw-Rebuild aus. Der neue Cache wird atomar ersetzt, ohne Rohhistorie oder `diagnostic_aggregates.json` zu verändern.
 

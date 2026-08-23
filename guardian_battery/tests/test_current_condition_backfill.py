@@ -13,12 +13,12 @@ def epoch(value):
     return datetime.fromisoformat(value).timestamp()
 
 
-def raw(timestamp, module=1, serial="SN-A", delta=0):
+def raw(timestamp, module=1, serial="SN-A", delta=0, current=-2.0, soc=50.0):
     voltages = [3300.0] * 15
     voltages[0] += delta
     result = {
         "schema_version": 1, "timestamp": timestamp, "module": module,
-        "voltages_mv": voltages, "current_a": -2.0, "soc_percent": 50.0,
+        "voltages_mv": voltages, "current_a": current, "soc_percent": soc,
         "temperatures_c": [25.0] * 15, "balancing": [False] * 15,
     }
     if serial is not None:
@@ -99,7 +99,7 @@ def test_corrupt_cache_and_raw_line_rebuild_safely(tmp_path):
     report = rebuild.run(store)
     assert report["invalid_lines"] == 1
     assert len(store.samples[1]) == 1
-    assert json.loads(store_path.read_text())["samples"]["1"]
+    assert json.loads(store_path.read_text())["identity_samples"]["SN-A"]
 
 
 def test_unknown_before_first_snapshot_is_skipped_and_later_identity_is_resolved(tmp_path):
@@ -202,3 +202,89 @@ def test_rebuild_does_not_read_or_change_diagnostic_aggregates(tmp_path):
     ])
     rebuild.run(store)
     assert aggregate.read_text() == '{"sentinel":true}'
+
+
+def test_repositioned_physical_module_uses_samples_from_both_positions(tmp_path):
+    store, rebuild = setup(tmp_path)
+    positions = tmp_path / "position_history.jsonl"
+    snapshot(positions, "2026-08-20T10:00:00+00:00", {2: "SN-X", 5: "SN-A"})
+    snapshot(positions, "2026-08-20T12:00:00+00:00", {2: "SN-A", 5: "SN-X"})
+    records = [
+        raw(epoch(f"2026-08-20T10:{minute:02d}:00+00:00"), 2, None,
+            current=2.0, soc=85.0)
+        for minute in range(31)
+    ] + [
+        raw(epoch(f"2026-08-20T12:{minute:02d}:00+00:00"), 5, None)
+        for minute in range(4)
+    ]
+    write_day(tmp_path / "cell_history", "2026-08-20", records)
+    rebuild.run(store)
+    assert store.current_serial(5) == "SN-X"
+    assert len(store.values_for_module(5)) == 35
+    result = store.analyse(5, DEFAULTS)
+    assert result["cells"][0]["phases"]["charge"]["samples"] == 31
+    assert result["cells"][0]["phases"]["high"]["samples"] == 31
+    assert result["cells"][0]["phases"]["discharge"]["samples"] == 4
+    assert result["cells"][0]["status"] != "LERNPHASE"
+    assert result["cells"][0]["diagnostics"]["methods"]["balancing_context"]["valid_data"] == 35
+
+
+def test_replacement_at_same_position_never_mixes_physical_modules(tmp_path):
+    store, rebuild = setup(tmp_path)
+    positions = tmp_path / "position_history.jsonl"
+    snapshot(positions, "2026-08-20T10:00:00+00:00", {5: "SN-A"})
+    snapshot(positions, "2026-08-20T12:00:00+00:00", {5: "SN-B"})
+    records = [raw(epoch("2026-08-20T11:00:00+00:00"), 5, None),
+               raw(epoch("2026-08-20T13:00:00+00:00"), 5, None)]
+    write_day(tmp_path / "cell_history", "2026-08-20", records)
+    rebuild.run(store)
+    assert store.current_serial(5) == "SN-B"
+    assert [item["module_serial"] for item in store.values_for_module(5)] == ["SN-B"]
+
+
+def test_ring_limit_is_per_physical_identity_across_positions(tmp_path):
+    store, rebuild = setup(tmp_path, maximum=3)
+    records = [raw(epoch(f"2026-08-20T10:0{minute}:00+00:00"), 2, "SN-X")
+               for minute in range(3)]
+    records += [raw(epoch(f"2026-08-20T11:0{minute}:00+00:00"), 5, "SN-X")
+                for minute in range(3)]
+    records += [raw(epoch(f"2026-08-20T12:0{minute}:00+00:00"), 5, "SN-Y")
+                for minute in range(2)]
+    write_day(tmp_path / "cell_history", "2026-08-20", records)
+    rebuild.run(store)
+    assert len(store.identity_samples["SN-X"]) == 3
+    assert {item["module"] for item in store.identity_samples["SN-X"]} == {5}
+    assert len(store.identity_samples["SN-Y"]) == 2
+
+
+def test_legacy_072_coverage_marker_forces_one_full_rebuild(tmp_path):
+    store, rebuild = setup(tmp_path)
+    path = write_day(tmp_path / "cell_history", "2026-08-20", [
+        raw(epoch("2026-08-20T10:00:00+00:00")),
+        raw(epoch("2026-08-20T11:00:00+00:00")),
+    ])
+    signature = rebuild._signature(path)
+    store.rebuild_sources[path.name] = {
+        "schema_version": 1, "file": signature, "offset": signature["size"],
+        "position_history": {"missing": True},
+    }
+    report = rebuild.run(store)
+    assert report["files_scanned"] == 1 and report["files_skipped"] == 0
+    assert len(store.identity_samples["SN-A"]) == 2
+    assert rebuild.run(CellDiagnosticStore(store.path))["files_skipped"] == 1
+
+
+def test_shortened_materialized_cache_with_valid_markers_is_rebuilt(tmp_path):
+    store, rebuild = setup(tmp_path)
+    write_day(tmp_path / "cell_history", "2026-08-20", [
+        raw(epoch(f"2026-08-20T10:0{minute}:00+00:00")) for minute in range(5)
+    ])
+    rebuild.run(store)
+    persisted = json.loads(store.path.read_text())
+    persisted["identity_samples"]["SN-A"] = persisted["identity_samples"]["SN-A"][-2:]
+    store.path.write_text(json.dumps(persisted))
+    shortened = CellDiagnosticStore(store.path)
+    report = rebuild.run(shortened)
+    assert report["materialized_cache_incomplete"] is True
+    assert report["files_scanned"] == 1
+    assert len(shortened.identity_samples["SN-A"]) == 5

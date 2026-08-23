@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.3 – Physical-identity Current Condition
+
+- Verwendet die physische Modulseriennummer als historische Primärachse der klassischen Current Condition; sicher identifizierte Samples bleiben bei Umpositionierungen positionsübergreifend zusammenhängend.
+- Trennt Modultausche strikt nach Serienidentität und hält `cell_diag_history_max_samples` je physischem Modul statt je historischer Position.
+- Führt Coverage-Schema 2 mit materialisierter Identitäts-, Samplezahl- und Zeitbereichsabdeckung ein; 0.7.2-Marker lösen einmalig einen vollständigen Raw-History-Neuaufbau aus.
+- Übergibt dieselbe korrigierte identitätszentrierte Samplefolge an Balancing- und Advanced-Evidence-Verfahren, ohne deren Fachmethodik zu verändern.
+- Current-Condition-Formel, Vier-Phasen-Logik, Grenzwerte, Status und Confidence bleiben unverändert; `diagnostic_aggregates.json` bleibt eine getrennte Langzeitquelle.
+- Guardian/Add-on sind `0.7.3`; die Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.2 – Current-Condition raw-history rebuild
 
 - Rekonstruiert den begrenzten klassischen Current-Condition-Arbeitscache beim Start aus geeigneten Rohsamples der vorhandenen `cell_history/*.jsonl`-Tagesdateien.
