@@ -1,5 +1,11 @@
 # Guardian Battery Changelog
 
+## 0.6.8 – Native Guardian Maintenance sidebar entry
+
+- Benennt den nativen Add-on-Ingress-Seitenleisteneintrag in `Guardian Maintenance` um.
+- Verwendet für den nativen Ingress-Eintrag das Icon `mdi:wrench-clock`.
+- Add-on-Name und Slug bleiben unverändert; Diagnostic Engine weiterhin `0.4.12`.
+
 ## 0.6.7 - Combined history view and dynamic phase limits
 
 - Ergänzt den Zeitverlauf um den Modus „Gemeinsam“ mit Mehrfachauswahl von
