@@ -18,7 +18,7 @@ lovelace:
     guardian-cell-diagnostics:
       mode: yaml
       title: Zelldiagnostik
-      icon: mdi:battery-search
+      icon: mdi:battery
       show_in_sidebar: true
       filename: dashboards/guardian_cell_diagnostics.yaml
     guardian-module-information:
