@@ -101,6 +101,36 @@ def test_documented_measurement_identity_never_backfills_from_the_future(tmp_pat
     assert documented_identity_at(service.log.path,5,"2026-08-19T12:00:00Z") == ("SN-X",first.position_history_id)
 
 
+def test_runtime_maintenance_identity_uses_position_history_at_event_time(tmp_path):
+    from position_history import resolve_maintenance_event_identities
+    event, service = env(tmp_path)
+    first = service.record(effective_at="2026-08-19T10:00:00Z",
+                           maintenance_event_id=event.maintenance_event_id,
+                           positions=state(**{"5": "SN-X"}), expected_latest_snapshot_id=None)
+    service.record(effective_at="2026-08-20T10:00:00Z",
+                   maintenance_event_id=event.maintenance_event_id,
+                   positions=state(**{"5": "SN-Y"}),
+                   expected_latest_snapshot_id=first.position_history_id)
+    raw = {**event.to_dict(), "occurred_at": "2026-08-19T12:00:00+00:00",
+           "module_number": 5, "module_serial": None}
+    resolved = resolve_maintenance_event_identities([raw], service.log.path)[0]
+    assert resolved["resolved_module_serial"] == "SN-X"
+    assert resolved["identity_status"] == "position_history"
+
+
+def test_runtime_maintenance_identity_does_not_guess_before_first_snapshot(tmp_path):
+    from position_history import resolve_maintenance_event_identities
+    event, service = env(tmp_path)
+    service.record(effective_at="2026-08-19T10:00:00Z",
+                   maintenance_event_id=event.maintenance_event_id,
+                   positions=state(**{"5": "SN-X"}), expected_latest_snapshot_id=None)
+    raw = {**event.to_dict(), "occurred_at": "2026-08-18T12:00:00+00:00",
+           "module_number": 5, "module_serial": None}
+    resolved = resolve_maintenance_event_identities([raw], service.log.path)[0]
+    assert resolved["resolved_module_serial"] is None
+    assert resolved["identity_status"] == "unknown"
+
+
 def test_observed_identity_requires_repeated_stable_bms_reads(monkeypatch):
     import position_history
     monkeypatch.setattr(position_history,"_OBSERVED_STACK",{})

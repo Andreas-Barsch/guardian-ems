@@ -1,5 +1,17 @@
 # Guardian EMS -- Environment Runbook
 
+## Guardian Battery 0.7.0 – Evidence Diagnostics
+
+Guardian Battery und das Add-on tragen im Release die Version `0.7.0`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`; die neuen Verfahren sind ergänzende Evidence Diagnostics.
+
+Die zusätzlichen Diagnoseverfahren verarbeiten jeden eingehenden Modulsample genau einmal. Der begrenzte In-Memory-Ringpuffer `cell_diagnostics.json` liefert kurzzeitige Sequenzen; robuste, versionierte Tages-/Phasenaggregate werden davon getrennt und atomar in `diagnostic_aggregates.json` persistiert. Die append-only Rohhistorie unter `cell_history/` wird weder migriert noch umgeschrieben. Ein Neustart kann die kompakten Aggregate direkt weiterverwenden, ohne wiederholte JSONL-Scans pro Zelle oder Verfahren.
+
+Neue Diagnoseergebnisse enthalten Schema-Version, Guardian-Version, Diagnostic-Engine-Version, Config-ID, Auswertungszeitpunkt und Datenzeitraum. Aggregate und Maintenance-Korrelation sind nach dokumentierter physischer Modulseriennummer getrennt; bei unbekannter Identität wird nicht anhand einer bloßen Position geraten. Die experimentellen Konfigurationswerte sind Quality Gates für Bewertbarkeit, Reproduzierbarkeit und Trendrichtung; sie sind keine wissenschaftlich validierten Alarmgrenzen.
+
+Die zwei Dashboarddefinitionen bleiben getrennte Deploymentartefakte: `guardian_battery/dashboards/guardian_cell_diagnostics.yaml` ist die Add-on-Quelle, `homeassistant/dashboards/guardian_cell_diagnostics.yaml` die Home-Assistant-Kopie. Ein Add-on-Update kopiert die Home-Assistant-Datei nicht automatisch nach `/homeassistant` beziehungsweise `/config/dashboards`. Produktive Daten unter `/share/guardian_battery` gehören nie zum Release-Copy und dürfen bei Update, Rollback oder Dashboard-Aktualisierung nicht überschrieben werden.
+
+Der seit 0.6.8 verwendete native Add-on-Ingress-Seitenleisteneintrag bleibt `Guardian Maintenance` mit `mdi:wrench-clock`; Add-on-Name und Slug bleiben `Guardian Battery` beziehungsweise `guardian_battery`. Verbindlich gilt weiterhin: Git-/Source-Stand, installierte Add-on-Version und produktive Home-Assistant-Dashboard-/`configuration`-Dateien sind drei getrennte Zustände und müssen bei einem Deployment jeweils ausdrücklich geprüft werden.
+
 Stand: 2026-08-19
 
 ## Zweck

@@ -344,3 +344,25 @@ def documented_identity_at(path: Path | str, position: int, timestamp: datetime 
     if not matches: return None, None
     snapshot = matches[-1]
     return snapshot.positions[str(position)], snapshot.position_history_id
+
+
+def resolve_maintenance_event_identities(events, path: Path | str) -> list[dict[str, Any]]:
+    """Resolve event identity at occurred_at without using today's position."""
+    result = []
+    for event in events:
+        raw = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        serial = raw.get("module_serial")
+        identity_status = "explicit" if serial else "unknown"
+        if not serial and raw.get("module_number") is not None:
+            try:
+                serial, _snapshot_id = documented_identity_at(
+                    path, int(raw["module_number"]), raw["occurred_at"]
+                )
+                identity_status = "position_history" if serial else "unknown"
+            except Exception:
+                serial = None
+                identity_status = "unknown"
+        raw["resolved_module_serial"] = serial
+        raw["identity_status"] = identity_status
+        result.append(raw)
+    return result

@@ -16,11 +16,14 @@ from typing import Optional
 
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
 from cell_history import CellHistoryWriter
+from diagnostic_aggregates import DiagnosticAggregateStore
 from config_history import ConfigHistory
 from config_ui import (configure_maintenance_live_publisher,
                        record_stable_observed_positions, start_config_server)
 from maintenance_mqtt import MaintenanceMqttPublisher
-from position_history import DEFAULT_POSITION_HISTORY_FILE, documented_identity_at, update_observed_stack
+from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
+from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
+                              resolve_maintenance_event_identities, update_observed_stack)
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -41,6 +44,7 @@ HISTORY_FILE = SHARE_DIR / "trend_history.json"
 INCIDENT_FILE = SHARE_DIR / "incident_state.json"
 CELL_DIAG_FILE = SHARE_DIR / "cell_diagnostics.json"
 CELL_HISTORY_DIR = SHARE_DIR / "cell_history"
+DIAGNOSTIC_AGGREGATE_FILE = SHARE_DIR / "diagnostic_aggregates.json"
 CONFIG_HISTORY_FILE = SHARE_DIR / "config_history.jsonl"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -646,6 +650,9 @@ class Mqtt:
                 (f"module_{module}_cell_diag_samples", f"Modul {module} Zelldiagnostik Messpunkte", None, None, "mdi:counter"),
                 (f"module_{module}_cell_diag_worst_cell", f"Modul {module} auffälligste Zelle", None, None, "mdi:battery-alert"),
                 (f"module_{module}_cell_diag_evidence", f"Modul {module} Zelldiagnostik Evidenzabweichung", "mV", None, "mdi:delta"),
+                (f"module_{module}_cell_diag_trend", f"Modul {module} Zelldiagnostik Trend", None, None, "mdi:trending-up"),
+                (f"module_{module}_cell_diag_maintenance_risk", f"Modul {module} Maintenance Risk", None, None, "mdi:wrench-clock"),
+                (f"module_{module}_cell_diag_trend_risk_confidence", f"Modul {module} Trend Risk Confidence", None, None, "mdi:check-decagram-outline"),
             ])
             for cell in range(1, 16):
                 sensors.extend([
@@ -865,6 +872,9 @@ class Mqtt:
                 f"{base}_cell_diag_samples": diag.get("sample_count"),
                 f"{base}_cell_diag_worst_cell": diag.get("evidence_worst_cell"),
                 f"{base}_cell_diag_evidence": diag.get("evidence_deviation_mv"),
+                f"{base}_cell_diag_trend": diag.get("trend"),
+                f"{base}_cell_diag_maintenance_risk": diag.get("maintenance_risk"),
+                f"{base}_cell_diag_trend_risk_confidence": diag.get("trend_risk_confidence"),
             })
             for key, value in values.items(): self.state(key, value)
             if diag.get("current_median_mv") is not None:
@@ -906,6 +916,30 @@ class Mqtt:
                 status_meta["physical_group_cells"] = {1: "1-5", 2: "6-10", 3: "11-15"}[status_meta["physical_group"]]
                 status_meta["evidence_phase"] = cell.get("evidence_phase")
                 status_meta["evidence_deviation_mv"] = cell.get("evidence_deviation_mv")
+                status_meta["current_condition"] = cell.get("diagnostics", {}).get("current_condition")
+                status_meta["trend"] = cell.get("diagnostics", {}).get("trend")
+                status_meta["maintenance_risk"] = cell.get("diagnostics", {}).get("maintenance_risk")
+                status_meta["maintenance_risk_reason"] = cell.get("diagnostics", {}).get("maintenance_risk_reason")
+                status_meta["method_quality"] = cell.get("diagnostics", {}).get("method_quality")
+                status_meta["trend_risk_confidence"] = cell.get("diagnostics", {}).get("trend_risk_confidence")
+                status_meta["trend_risk_confidence_basis"] = cell.get("diagnostics", {}).get("trend_risk_confidence_basis", {})
+                status_meta["evidence_families"] = cell.get("diagnostics", {}).get("evidence_families", {})
+                status_meta["contributing_evidence"] = cell.get("diagnostics", {}).get("contributing_evidence", [])
+                status_meta["missing_evidence"] = cell.get("diagnostics", {}).get("missing_evidence", [])
+                status_meta["diagnostic_methods"] = cell.get("diagnostics", {}).get("methods", {})
+                status_meta["balancing_context"] = cell.get("diagnostics", {}).get("methods", {}).get("balancing_context", {})
+                status_meta["maintenance_context"] = cell.get("diagnostics", {}).get("maintenance_context", {})
+                status_meta["ica_dva_readiness"] = cell.get("diagnostics", {}).get("ica_dva_readiness", {})
+                advanced = diag.get("advanced_diagnostics", {})
+                status_meta["diagnostic_provenance"] = {
+                    key: advanced.get(key)
+                    for key in (
+                        "schema_version", "guardian_version",
+                        "diagnostic_engine_version", "config_id",
+                        "evaluated_at", "observation_period",
+                        "single_pass_sample_count",
+                    )
+                }
                 self.attributes(f"{cp}_status", status_meta)
                 self.attributes(f"{cp}_confidence", self._diag_meta("confidence"))
                 self.attributes(f"{cp}_voltage", self._diag_meta("voltage"))
@@ -1018,6 +1052,14 @@ def main() -> None:
     publisher.discovery(int(options["module_count"]))
     configure_maintenance_live_publisher(publisher.maintenance_events)
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
+    aggregate_store = DiagnosticAggregateStore(
+        DIAGNOSTIC_AGGREGATE_FILE,
+        CellDiagnosticStore.phases,
+        int(options.get("cell_diag_aggregate_retention_days", 730)),
+    )
+    maintenance_log = MaintenanceEventLog(DEFAULT_MAINTENANCE_EVENT_FILE)
+    maintenance_events = ()
+    maintenance_mtime_ns = None
     cell_history = CellHistoryWriter(CELL_HISTORY_DIR)
     last_cell_poll = 0.0
     last_stat_poll = 0.0
@@ -1088,22 +1130,48 @@ def main() -> None:
                             rows=parse_bat(console.command(f"bat {module.module}"))
                             if rows:
                                 sample_time = time.time()
-                                sample = CellSample(sample_time, module.module, [r['voltage_mv'] for r in rows], module.current_a, module.soc_percent, [r['temperature_c'] for r in rows], [r['balancing'] for r in rows])
-                                cell_store.add(sample)
                                 try:
                                     serial, position_history_id = documented_identity_at(
                                         DEFAULT_POSITION_HISTORY_FILE, module.module,
                                         datetime.fromtimestamp(sample_time, timezone.utc),
                                     )
+                                except Exception as identity_exc:
+                                    LOG.warning("Physische Identität Modul %s unklar: %s", module.module, identity_exc)
+                                    serial, position_history_id = None, None
+                                sample = CellSample(
+                                    sample_time, module.module,
+                                    [r['voltage_mv'] for r in rows], module.current_a,
+                                    module.soc_percent, [r['temperature_c'] for r in rows],
+                                    [r['balancing'] for r in rows], serial, position_history_id,
+                                )
+                                cell_store.add(sample)
+                                aggregate_store.add(sample, options)
+                                try:
                                     cell_history.append({**asdict(sample), "module_serial": serial,
                                                          "position_history_id": position_history_id,
                                                          "identity_source": "position_history" if serial else "unknown"})
                                 except Exception as history_exc:
                                     LOG.warning("Cell History Modul %s: %s", module.module, history_exc)
                         except Exception as exc: LOG.warning("Zelldiagnostik Modul %s: %s",module.module,exc)
-                    last_cell_poll=now_wall; cell_store.save()
+                    last_cell_poll=now_wall; cell_store.save(); aggregate_store.save()
 
-                for module in modules: cell_results[module.module]=cell_store.analyse(module.module,options)
+                try:
+                    current_mtime_ns = maintenance_log.path.stat().st_mtime_ns if maintenance_log.path.exists() else None
+                    if current_mtime_ns != maintenance_mtime_ns:
+                        maintenance_events = resolve_maintenance_event_identities(
+                            maintenance_log.read_all(), DEFAULT_POSITION_HISTORY_FILE
+                        )
+                        maintenance_mtime_ns = current_mtime_ns
+                except Exception as exc:
+                    LOG.warning("Maintenance-Kontext nicht lesbar: %s", exc)
+                    maintenance_events = ()
+                for module in modules:
+                    module_samples = list(cell_store.samples.get(module.module, ()))
+                    latest_serial = module_samples[-1].get("module_serial") if module_samples else None
+                    cell_results[module.module] = cell_store.analyse(
+                        module.module, options, maintenance_events,
+                        aggregate_store.for_identity(module.module, latest_serial),
+                    )
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
                     cell_results, bms_stat, module_infos

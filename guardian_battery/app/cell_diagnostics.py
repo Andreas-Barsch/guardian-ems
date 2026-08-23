@@ -6,6 +6,8 @@ from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from evidence_diagnostics import EvidenceDiagnostics
+
 
 def classify_phases(sample, options):
     """Canonical deterministic phase rule shared by live and history analysis."""
@@ -35,6 +37,8 @@ class CellSample:
     soc_percent: float
     temperatures_c: list[float]
     balancing: list[bool]
+    module_serial: str | None = None
+    position_history_id: str | None = None
 
 
 DIAGNOSTIC_PARAMETER_META = {
@@ -167,6 +171,7 @@ class CellDiagnosticStore:
         self.samples = defaultdict(
             lambda: deque(maxlen=max_samples_per_module)
         )
+        self._analysis_cache = {}
 
         self._load()
 
@@ -203,6 +208,7 @@ class CellDiagnosticStore:
         self.samples[sample.module].append(
             asdict(sample)
         )
+        self._analysis_cache.pop(sample.module, None)
 
     @staticmethod
     def phases(sample, options):
@@ -264,10 +270,44 @@ class CellDiagnosticStore:
         self,
         module,
         options,
+        maintenance_events=(),
+        aggregate_records=(),
     ):
-        values = list(
+        all_values = list(
             self.samples.get(module, ())
         )
+        latest_serial = all_values[-1].get("module_serial") if all_values else None
+        if latest_serial:
+            values = [value for value in all_values if value.get("module_serial") == latest_serial]
+        else:
+            last_documented = max(
+                (index for index, value in enumerate(all_values) if value.get("module_serial")),
+                default=-1,
+            )
+            values = [value for value in all_values[last_documented + 1:]
+                      if not value.get("module_serial")]
+
+        maintenance_signature = tuple(
+            (
+                getattr(event, "maintenance_event_id", None)
+                or (event.get("maintenance_event_id") if isinstance(event, dict) else None),
+                getattr(event, "revision", None)
+                or (event.get("revision") if isinstance(event, dict) else None),
+            )
+            for event in maintenance_events
+        )
+        signature = (
+            len(values),
+            values[-1].get("timestamp") if values else None,
+            json.dumps(options, sort_keys=True, default=str),
+            maintenance_signature,
+            tuple((item.get("day"), item.get("phase"), item.get("cell"),
+                   item.get("sample_count"), item.get("config_id"))
+                  for item in aggregate_records),
+        )
+        cached = self._analysis_cache.get(module)
+        if cached and cached[0] == signature:
+            return cached[1]
 
         if not values:
             return {
@@ -600,7 +640,13 @@ class CellDiagnosticStore:
             ),
         )
 
-        return {
+        advanced = EvidenceDiagnostics(self.phases).analyse(
+            values, options, cells, maintenance_events, aggregate_records
+        )
+        for cell, evidence in zip(cells, advanced["cells"]):
+            cell["diagnostics"] = evidence
+
+        result = {
             "module": module,
             "status": worst[
                 "status"
@@ -632,16 +678,12 @@ class CellDiagnosticStore:
             "method":
                 "Phase-Resolved Cell Voltage Consistency",
             "cells": cells,
-
-            # Bereits vorhandene spätere
-            # Diagnoseverfahren bleiben
-            # ausdrücklich getrennt.
-            "dynamic_resistance":
-                "DATENSAMMLUNG",
-            "capacity_consistency":
-                "NICHT BEWERTBAR",
-            "rest_drift":
-                "DATENSAMMLUNG",
-            "ica_dva":
-                "NICHT BEWERTBAR",
+            "advanced_diagnostics": advanced,
+            "trend": advanced["module"]["trend"],
+            "maintenance_risk": advanced["module"]["maintenance_risk"],
+            "trend_risk_confidence": advanced["module"]["trend_risk_confidence"],
+            "evidence_families": advanced["module"]["evidence_families"],
+            "contributing_evidence": advanced["module"]["contributing_evidence"],
         }
+        self._analysis_cache[module] = (signature, result)
+        return result

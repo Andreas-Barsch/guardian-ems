@@ -1,5 +1,18 @@
 # Guardian Battery Changelog
 
+## 0.7.0 – Evidence-based cell diagnostics
+
+- Ergänzt phasengetrennte historische Ranking-Drift aus robusten Tages-/Phasenaggregaten, ohne Rangwechsel allein als Alarm zu verwenden.
+- Bewertet natürliche Stromsprünge ausschließlich als relativen dynamischen Widerstandsindex; absolute mΩ werden bei der vorhandenen Abtastung nicht ausgewiesen.
+- Ergänzt relative Capacity-Consistency für obere/untere Spannungsbereiche und Lade-/Entladerichtung sowie Vᵢ(Q)-Kurvenevidenz auf einem gemeinsamen, interpolierten Q-Raster ohne Extrapolation. Reproduzierbarkeit und Ruhe-/Relaxationsdrift besitzen strikt ablehnende Quality Gates.
+- Persistiert kompakte, versionierte Tages-/Phasenaggregate getrennt von Rohdaten, damit Langzeit-Ranking nach Neustarts ohne wiederholte Rohhistorien-Scans verfügbar bleibt.
+- Ordnet real gemeldete BMS-Balancing-Samples und dokumentierte Maintenance-Ereignisse anhand der physischen Serienidentität als erklärenden Kontext zu, ohne Positionsgleichheit, Herstellerkriterien oder Kausalität zu erfinden.
+- Trennt Current Condition, Trend, Maintenance Risk sowie Current-Condition- und Trend/Risk-Confidence. Kapazitäts- und Kurvenevidenz zählen als eine unabhängige Evidenzfamilie; ein Wartungshinweis erfordert eine harte Current-Condition-Regel oder konvergierende qualifizierte Familien. Es gibt keinen neuen Health Score, keine RUL-, Ausfallzeit- oder Ausfallwahrscheinlichkeitsprognose.
+- Prüft ICA/DVA ausschließlich auf Datenbereitschaft; eine ICA-/DVA-Berechnung wird nicht aktiviert.
+- Current Condition, Trend und Maintenance Risk bleiben getrennte Dimensionen; Trend/Risk Confidence berücksichtigt Datenabdeckung, Beobachtungsdauer, Ereignisse, Reproduzierbarkeit und unabhängige Evidenzfamilien.
+- Alle Quality Gates sind experimentell und müssen mit realen Felddaten validiert werden. Unzureichende Evidenz liefert regulär `NICHT BEWERTBAR`.
+- Guardian/Add-on sind `0.7.0`; die bestehende statuswirksame Diagnostic Engine bleibt fachlich unverändert `0.4.12`.
+
 ## 0.6.8 – Native Guardian Maintenance sidebar entry
 
 - Benennt den nativen Add-on-Ingress-Seitenleisteneintrag in `Guardian Maintenance` um.

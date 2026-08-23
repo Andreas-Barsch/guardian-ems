@@ -21,6 +21,10 @@ def _cell_views(path: Path) -> list[dict]:
     ]
 
 
+def _card(view: dict, title: str) -> dict:
+    return next(card for card in view["cards"] if card.get("title") == title)
+
+
 def test_all_cell_views_separate_momentary_values_and_historic_evidence():
     for path in DASHBOARDS:
         views = _cell_views(path)
@@ -53,7 +57,7 @@ def test_all_cell_views_use_engine_results_and_consistent_phase_order_and_colors
     )
     for path in DASHBOARDS:
         for view in _cell_views(path):
-            evidence = view["cards"][1]["content"]
+            evidence = _card(view, "Phasenbezogene Evidenz")["content"]
             positions = [evidence.index(label) for label, _ in expected]
             assert positions == sorted(positions)
             for label, color in expected:
@@ -77,7 +81,7 @@ def test_all_cell_views_use_engine_results_and_consistent_phase_order_and_colors
 def test_all_cell_views_explain_the_actual_aggregation_semantics():
     for path in DASHBOARDS:
         for view in _cell_views(path):
-            help_card = view["cards"][2]
+            help_card = _card(view, "ⓘ Bewertung erklären")
             assert help_card["title"] == "ⓘ Bewertung erklären"
             content = help_card["content"]
             assert "schlechtesten ausreichend belegten Bereich" in content
@@ -101,7 +105,7 @@ def test_all_cell_views_explain_the_actual_aggregation_semantics():
 
 
 def test_threshold_help_changes_with_active_configuration_and_has_no_fixed_defaults():
-    content = _cell_views(DASHBOARDS[0])[0]["cards"][2]["content"]
+    content = _card(_cell_views(DASHBOARDS[0])[0], "ⓘ Bewertung erklären")["content"]
     pattern = re.compile(
         r"{{ state_attr\('sensor\.guardian_battery_zelldiagnostik_konfiguration', '([^']+)'\) }}"
     )
@@ -120,3 +124,30 @@ def test_threshold_help_changes_with_active_configuration_and_has_no_fixed_defau
     assert all(f"{value} mV" in first for value in range(51, 63))
     threshold_section = content.split("**Aktuell wirksame phasenspezifische Grenzen:**", 1)[1]
     assert not re.search(r"\b(?:10|20|40) mV\b", threshold_section)
+
+
+def test_all_cell_views_show_separate_predictive_dimensions_and_methods():
+    for path in DASHBOARDS:
+        for view in _cell_views(path):
+            overview = _card(view, "Diagnose, Trend & Maintenance Risk")["content"]
+            methods = _card(view, "Zusätzliche Diagnoseverfahren")["content"]
+            contexts = _card(view, "Balancing, Maintenance & ICA/DVA")["content"]
+            content = overview + methods + contexts
+            assert "Current Condition" in content
+            assert "Trend:" in content
+            assert "Maintenance Risk:" in content
+            assert "Trend/Risk Confidence:" in content
+            assert "Current-Condition-Confidence:" in content
+            assert "Evidenzfamilien" in content
+            assert "unabhängige qualifizierte Familien" in content
+            assert "Historische Ranking-Drift" in content
+            assert "Dynamic Resistance" in content
+            assert "Capacity Consistency" in content
+            assert "Curve Analysis" in content
+            assert "Rest / Relaxation / Drift" in content
+            assert "Balancing-Kontext" in content
+            assert "Maintenance-Kontext" in content
+            assert "ICA/DVA" in content
+            assert "Kein Health Score" in content
+            assert "Korrelation/Assoziation" in content
+            assert "keine Kausalitätsaussage" in content

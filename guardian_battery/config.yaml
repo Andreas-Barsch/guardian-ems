@@ -1,5 +1,5 @@
 name: Guardian Battery
-version: 0.6.8
+version: 0.7.0
 slug: guardian_battery
 description: Pylontech-US2000C-Monitoring mit Health Engine, MQTT und Dashboard-Unterstützung.
 
@@ -82,6 +82,37 @@ options:
   cell_diag_high_warning_deviation_mv: 20
   cell_diag_high_critical_deviation_mv: 40
 
+  # Experimentelle Quality Gates: Sie entscheiden nur über Bewertbarkeit,
+  # nicht über einen alarmierenden Zellstatus.
+  cell_diag_trend_min_days: 3
+  cell_diag_trend_min_rank_change: 0.5
+  cell_diag_trend_min_deviation_change_mv: 2
+  cell_diag_resistance_min_delta_current_a: 5
+  cell_diag_resistance_max_step_seconds: 90
+  cell_diag_resistance_min_events: 3
+  cell_diag_resistance_window_samples: 2
+  cell_diag_resistance_max_current_span_a: 0.5
+  cell_diag_resistance_max_relative_mad: 0.25
+  cell_diag_quality_max_temperature_change_c: 2
+  cell_diag_sequence_max_gap_seconds: 120
+  cell_diag_sequence_min_samples: 10
+  cell_diag_sequence_min_duration_seconds: 600
+  cell_diag_sequence_min_charge_ah: 0.2
+  cell_diag_sequence_min_segments: 2
+  cell_diag_rest_max_current_a: 0.3
+  cell_diag_rest_min_duration_seconds: 900
+  cell_diag_balancing_min_active_samples: 3
+  cell_diag_ica_min_samples: 60
+  cell_diag_ica_max_current_cv: 0.1
+  cell_diag_ica_min_voltage_steps: 20
+  cell_diag_maintenance_context_window_hours: 72
+  cell_diag_relative_trend_change_percent: 20
+  cell_diag_aggregate_retention_days: 730
+  cell_diag_capacity_boundary_fraction: 0.9
+  cell_diag_capacity_max_crossing_mad_fraction: 0.05
+  cell_diag_curve_grid_points: 21
+  cell_diag_curve_max_rms_mad_mv: 5
+
 schema:
   serial_port: str
   baudrate: int
@@ -139,3 +170,31 @@ schema:
   cell_diag_high_observe_deviation_mv: int(1,100)
   cell_diag_high_warning_deviation_mv: int(1,200)
   cell_diag_high_critical_deviation_mv: int(1,500)
+  cell_diag_trend_min_days: int(2,90)
+  cell_diag_trend_min_rank_change: float(0.1,5)
+  cell_diag_trend_min_deviation_change_mv: float(0.1,50)
+  cell_diag_resistance_min_delta_current_a: float(0.5,100)
+  cell_diag_resistance_max_step_seconds: int(1,3600)
+  cell_diag_resistance_min_events: int(2,1000)
+  cell_diag_resistance_window_samples: int(1,20)
+  cell_diag_resistance_max_current_span_a: float(0.01,20)
+  cell_diag_resistance_max_relative_mad: float(0.01,2)
+  cell_diag_quality_max_temperature_change_c: float(0.1,20)
+  cell_diag_sequence_max_gap_seconds: int(10,3600)
+  cell_diag_sequence_min_samples: int(3,10000)
+  cell_diag_sequence_min_duration_seconds: int(60,86400)
+  cell_diag_sequence_min_charge_ah: float(0.01,100)
+  cell_diag_sequence_min_segments: int(2,100)
+  cell_diag_rest_max_current_a: float(0.01,10)
+  cell_diag_rest_min_duration_seconds: int(60,86400)
+  cell_diag_balancing_min_active_samples: int(1,10000)
+  cell_diag_ica_min_samples: int(10,100000)
+  cell_diag_ica_max_current_cv: float(0.01,1)
+  cell_diag_ica_min_voltage_steps: int(5,1000)
+  cell_diag_maintenance_context_window_hours: int(1,2160)
+  cell_diag_relative_trend_change_percent: float(1,200)
+  cell_diag_aggregate_retention_days: int(30,3650)
+  cell_diag_capacity_boundary_fraction: float(0.6,0.99)
+  cell_diag_capacity_max_crossing_mad_fraction: float(0.001,0.5)
+  cell_diag_curve_grid_points: int(11,101)
+  cell_diag_curve_max_rms_mad_mv: float(0.1,100)
