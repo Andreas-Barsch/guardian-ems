@@ -54,8 +54,20 @@ class DiagnosticAggregateStore:
         self.phase_classifier = phase_classifier
         self.retention_days = max(30, int(retention_days))
         self.records = {}
+        self.backfill_sources = {}
         self._dirty = False
         self._load()
+
+    @classmethod
+    def in_memory(cls, phase_classifier, retention_days: int = 730):
+        instance = cls.__new__(cls)
+        instance.path = None
+        instance.phase_classifier = phase_classifier
+        instance.retention_days = max(30, int(retention_days))
+        instance.records = {}
+        instance.backfill_sources = {}
+        instance._dirty = False
+        return instance
 
     def _load(self):
         try:
@@ -67,6 +79,9 @@ class DiagnosticAggregateStore:
             records = value.get("records", {})
             if isinstance(records, dict):
                 self.records = records
+            sources = value.get("backfill_sources", {})
+            if isinstance(sources, dict):
+                self.backfill_sources = sources
         except (OSError, ValueError, TypeError):
             self.records = {}
 
@@ -132,6 +147,12 @@ class DiagnosticAggregateStore:
         self.records = {key: value for key, value in self.records.items()
                         if datetime.fromisoformat(value["day"]).date() >= cutoff}
 
+    def prune_through(self, latest_day: str) -> None:
+        before = len(self.records)
+        self._prune(latest_day)
+        if len(self.records) != before:
+            self._dirty = True
+
     def save(self):
         if not self._dirty:
             return False
@@ -141,11 +162,63 @@ class DiagnosticAggregateStore:
             "schema_version": AGGREGATE_SCHEMA_VERSION,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "retention_days": self.retention_days,
+            "backfill_sources": self.backfill_sources,
             "records": self.records,
         }, ensure_ascii=False, separators=(",", ":"), sort_keys=True), encoding="utf-8")
         tmp.replace(self.path)
         self._dirty = False
         return True
+
+    @staticmethod
+    def source_signature(path: Path):
+        stat = Path(path).stat()
+        return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+    @staticmethod
+    def _source_key(path: Path, current_config_id: str):
+        return f"{Path(path).name}|{current_config_id}"
+
+    def source_complete(self, path: Path, signature: dict, current_config_id: str) -> bool:
+        """Return true only when the unchanged source's recorded coverage still exists."""
+        state = self.backfill_sources.get(self._source_key(path, current_config_id))
+        if not isinstance(state, dict) or state.get("signature") != signature:
+            return False
+        for key, expected in state.get("aggregate_coverage", {}).items():
+            actual = self.records.get(key)
+            if (not actual or int(actual.get("sample_count", 0)) < int(expected["sample_count"])
+                    or float(actual.get("last_timestamp", -1)) < float(expected["last_timestamp"])):
+                return False
+        return True
+
+    def mark_source_complete(self, path: Path, signature: dict, current_config_id: str,
+                             record_keys: set[str], statistics: dict) -> None:
+        coverage = {
+            key: {"sample_count": int(value["sample_count"]),
+                  "last_timestamp": float(value["last_timestamp"])}
+            for key, value in self.records.items()
+            if key in record_keys
+        }
+        self.backfill_sources[self._source_key(path, current_config_id)] = {
+            "signature": signature,
+            "config_id": current_config_id,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "days": sorted({self.records[key]["day"] for key in record_keys
+                            if key in self.records}),
+            "aggregate_coverage": coverage,
+            "statistics": dict(statistics),
+        }
+        self._dirty = True
+
+    def merge_backfill_records(self, records: dict) -> int:
+        """Use one raw day as canonical input without double-counting partial state."""
+        changed = 0
+        for key, value in records.items():
+            if self.records.get(key) != value:
+                self.records[key] = value
+                changed += 1
+        if changed:
+            self._dirty = True
+        return changed
 
     def for_identity(self, module, serial):
         identity = serial or f"UNKNOWN-POSITION-{int(module)}"

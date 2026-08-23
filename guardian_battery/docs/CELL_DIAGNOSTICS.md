@@ -1,6 +1,6 @@
 # Guardian Cell Diagnostics 0.4.1
 
-## Guardian Battery 0.7.0
+## Guardian Battery 0.7.1
 
 Die bestehende statuswirksame Methode bleibt **Phase-Resolved Cell Voltage Consistency** in der festen Reihenfolge Entladung, Tiefbereich, Ladung und Hochbereich. Die Diagnostic Engine bleibt `0.4.12`.
 
@@ -10,6 +10,8 @@ Jedes Verfahren kann mit einem konkreten Grund `NICHT BEWERTBAR` liefern. Kapazi
 
 Langzeit-Ranking nutzt kompakte, versionierte Tages-/Phasenaggregate mit Config-ID. Sie liegen getrennt von der unveränderten append-only Rohhistorie und sind nach dokumentierter physischer Modulseriennummer getrennt. Maintenance-Ereignisse werden zum Ereigniszeitpunkt über die Positionshistorie aufgelöst; unbekannte Identität bleibt unbekannt. Absolute Zellkapazität, absolute Zellwiderstände, Hersteller-Balancing-Schwellen, Health Score, Restlebensdauer und Ausfallwahrscheinlichkeit werden nicht aus ungeeigneten Daten abgeleitet.
 
+Beim Start gleicht Guardian ab 0.7.1 vorhandene `cell_history/*.jsonl`-Tagesdateien mit dem Backfill-Nachweis in `diagnostic_aggregates.json` ab. Fehlende oder gewachsene Quellen werden jeweils in einem Dateipass unter der aktiven Config-ID nachaggregiert. Bereits teilweise vorhandene Tagesaggregate werden aus der unveränderten Rohdatei kanonisch hergestellt; vollständig belegte unveränderte Dateien bleiben bei folgenden Starts ungeöffnet. Explizite Sample-Seriennummern haben Vorrang, andernfalls gilt ausschließlich die Positionshistorie zum Samplezeitpunkt. Ohne sichere Identität entsteht kein geratenes Aggregat.
+
 Die konfigurierbaren Quality Gates sind experimentell und benötigen weiterhin empirische Feldvalidierung. Ein nicht bestandenes Quality Gate oder eine unzureichende Datenbasis führt regulär zu `NICHT BEWERTBAR`, nicht zu einer geratenen Diagnose.
 
 Cell Diagnostics is additive to the existing Guardian Battery Health Engine. It does not replace the 0.4.0 stack/module Health Score.
@@ -18,4 +20,4 @@ The new diagnostic engine stores `bat <module>` samples and evaluates all 15 cel
 
 The Pylontech `stat` SOH and cycle count remain manufacturer/BMS values and are published separately.
 
-Advanced methods (dynamic resistance, capacity consistency, rest/drift and ICA/DVA) are intentionally not interpreted until real acquisition timing/data quality has been validated.
+Advanced evidence remains strictly quality-gated. ICA/DVA is limited to data-readiness reporting; no ICA/DVA calculation, absolute capacity, absolute resistance or lifetime prediction is produced.

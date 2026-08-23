@@ -17,6 +17,7 @@ from typing import Optional
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
 from cell_history import CellHistoryWriter
 from diagnostic_aggregates import DiagnosticAggregateStore
+from diagnostic_backfill import DiagnosticAggregateBackfill
 from config_history import ConfigHistory
 from config_ui import (configure_maintenance_live_publisher,
                        record_stable_observed_positions, start_config_server)
@@ -1057,6 +1058,20 @@ def main() -> None:
         CellDiagnosticStore.phases,
         int(options.get("cell_diag_aggregate_retention_days", 730)),
     )
+    try:
+        backfill = DiagnosticAggregateBackfill(
+            CELL_HISTORY_DIR, DEFAULT_POSITION_HISTORY_FILE
+        ).run(aggregate_store, options)
+        LOG.info(
+            "Diagnostic aggregate backfill: discovered=%s scanned=%s skipped=%s "
+            "valid=%s aggregated=%s identity_unknown=%s invalid=%s errors=%s",
+            backfill["files_discovered"], backfill["files_scanned"],
+            backfill["files_skipped"], backfill["valid_samples"],
+            backfill["aggregated_samples"], backfill["identity_unknown"],
+            backfill["invalid_lines"], backfill["file_errors"],
+        )
+    except Exception as exc:
+        LOG.warning("Diagnostic aggregate backfill fehlgeschlagen: %s", exc)
     maintenance_log = MaintenanceEventLog(DEFAULT_MAINTENANCE_EVENT_FILE)
     maintenance_events = ()
     maintenance_mtime_ns = None

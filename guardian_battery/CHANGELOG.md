@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.1 – Historical aggregate backfill
+
+- Aggregiert beim Start fehlende geeignete Samples aus vorhandenen append-only `cell_history/*.jsonl`-Tagesdateien in die versionierten Evidence-Diagnostics-Aggregate nach.
+- Erkennt unveränderte vollständig abgedeckte Quellen anhand Dateisignatur, Config-ID und gespeicherter Aggregatabdeckung; wiederholte Starts zählen keine Samples doppelt.
+- Baut teilweise vorhandene Tagesaggregate kanonisch aus der Rohhistorie auf und arbeitet danach normal inkrementell weiter.
+- Verwendet explizite Seriennummern oder die Positionshistorie zum Samplezeitpunkt; unbekannte physische Identität wird nicht geraten.
+- Überspringt beschädigte Einzelzeilen robust und verändert, migriert oder löscht keine historische JSONL-Datei.
+- Guardian/Add-on sind `0.7.1`; die statuswirksame Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.0 – Evidence-based cell diagnostics
 
 - Ergänzt phasengetrennte historische Ranking-Drift aus robusten Tages-/Phasenaggregaten, ohne Rangwechsel allein als Alarm zu verwenden.

@@ -1,10 +1,12 @@
 # Guardian EMS -- Environment Runbook
 
-## Guardian Battery 0.7.0 – Evidence Diagnostics
+## Guardian Battery 0.7.1 – Historical aggregate backfill
 
-Guardian Battery und das Add-on tragen im Release die Version `0.7.0`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`; die neuen Verfahren sind ergänzende Evidence Diagnostics.
+Guardian Battery und das Add-on tragen im Release die Version `0.7.1`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`; die neuen Verfahren sind ergänzende Evidence Diagnostics.
 
 Die zusätzlichen Diagnoseverfahren verarbeiten jeden eingehenden Modulsample genau einmal. Der begrenzte In-Memory-Ringpuffer `cell_diagnostics.json` liefert kurzzeitige Sequenzen; robuste, versionierte Tages-/Phasenaggregate werden davon getrennt und atomar in `diagnostic_aggregates.json` persistiert. Die append-only Rohhistorie unter `cell_history/` wird weder migriert noch umgeschrieben. Ein Neustart kann die kompakten Aggregate direkt weiterverwenden, ohne wiederholte JSONL-Scans pro Zelle oder Verfahren.
+
+Ab 0.7.1 prüft ein Start-Backfill die vorhandenen `cell_history/*.jsonl`-Tagesdateien gegen einen Config-ID- und Dateisignatur-gebundenen Abschlussnachweis in `diagnostic_aggregates.json`. Nur neue, gewachsene oder nicht mehr vollständig belegte Quellen werden einmal sequentiell gelesen. Der Tagesinhalt wird kanonisch nachaggregiert, sodass ein aus 0.7.0 bereits teilweise vorhandener Tag nicht doppelt gezählt wird. Unveränderte vollständig abgedeckte Dateien werden ohne erneutes Öffnen übersprungen. Beschädigte Einzelzeilen und zeitlich nicht sicher auflösbare physische Identitäten werden protokolliert und ausgelassen; Rohdateien bleiben unverändert.
 
 Neue Diagnoseergebnisse enthalten Schema-Version, Guardian-Version, Diagnostic-Engine-Version, Config-ID, Auswertungszeitpunkt und Datenzeitraum. Aggregate und Maintenance-Korrelation sind nach dokumentierter physischer Modulseriennummer getrennt; bei unbekannter Identität wird nicht anhand einer bloßen Position geraten. Die experimentellen Konfigurationswerte sind Quality Gates für Bewertbarkeit, Reproduzierbarkeit und Trendrichtung; sie sind keine wissenschaftlich validierten Alarmgrenzen.
 
