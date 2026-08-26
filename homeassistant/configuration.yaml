@@ -14,8 +14,9 @@ automation: !include automations.yaml
 script: !include scripts.yaml
 scene: !include scenes.yaml
 lovelace:
+  resource_mode: yaml
   resources:
-    - url: /local/guardian-collapsible-card.js?v=1
+    - url: /local/guardian-collapsible-card.js?v=2
       type: module
   dashboards:
     guardian-cell-diagnostics:
