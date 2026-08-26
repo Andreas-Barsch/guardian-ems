@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
@@ -329,6 +330,16 @@ class CellDiagnosticStore:
         return classify_phases(sample, options)
 
     @staticmethod
+    def valid_cell_voltages(sample):
+        voltages = sample.get("voltages_mv")
+        if not isinstance(voltages, (list, tuple)) or len(voltages) != 15:
+            return False
+        try:
+            return all(math.isfinite(float(voltage)) for voltage in voltages)
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def phase_thresholds(
         phase,
         options,
@@ -387,7 +398,11 @@ class CellDiagnosticStore:
         maintenance_events=(),
         aggregate_records=(),
     ):
-        values = self.values_for_module(module)
+        values = [
+            sample
+            for sample in self.values_for_module(module)
+            if self.valid_cell_voltages(sample)
+        ]
 
         maintenance_signature = tuple(
             (
@@ -441,9 +456,6 @@ class CellDiagnosticStore:
 
         for sample in values:
             voltages = sample["voltages_mv"]
-
-            if len(voltages) != 15:
-                continue
 
             median_voltage = statistics.median(
                 voltages

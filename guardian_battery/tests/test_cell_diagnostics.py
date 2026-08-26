@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from cell_diagnostics import (
     CellDiagnosticStore,
     CellSample,
@@ -125,6 +127,72 @@ def test_phase_assignment():
 
     assert "low" in low
     assert "high" in high
+
+
+def test_low_phase_uses_soc_or_mean_voltage_without_current_or_duration_gate():
+    o = opts()
+    base = {"current_a": 0.0, "soc_percent": 50, "voltages_mv": [3300] * 15}
+    assert "low" not in CellDiagnosticStore.phases(base, o)
+    assert "low" in CellDiagnosticStore.phases(
+        {**base, "soc_percent": o["cell_diag_low_soc_percent"]}, o)
+    assert "low" not in CellDiagnosticStore.phases(
+        {**base, "soc_percent": o["cell_diag_low_soc_percent"] + 0.001}, o)
+    assert "low" in CellDiagnosticStore.phases(
+        {**base, "voltages_mv": [3220] * 15}, o)
+    assert "low" not in CellDiagnosticStore.phases(
+        {**base, "voltages_mv": [3220.001] * 15}, o)
+    for current in (-2.0, 0.0, 2.0):
+        assert "low" in CellDiagnosticStore.phases(
+            {**base, "current_a": current, "soc_percent": 25}, o)
+
+
+def test_one_low_sample_is_counted_but_remains_learning_until_minimum(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "one-low.json")
+    store.add(sample(1, [3300] * 15, current_a=-2.0, soc_percent=25))
+    result = store.analyse(1, opts(cell_diag_min_phase_samples=30))
+    assert result["cells"][9]["phases"]["low"] == {
+        "samples": 1,
+        "median_deviation_mv": 0,
+        "mean_rank": 8.0,
+        "lowest_percent": 100.0,
+        "highest_percent": 100.0,
+        "thresholds_mv": {"observe": 10, "warning": 20, "critical": 40},
+        "status": "LERNPHASE",
+    }
+
+
+@pytest.mark.parametrize(
+    "voltages",
+    (
+        [3300] * 14,
+        [],
+        [3300] * 16,
+        [3300] * 14 + [float("nan")],
+        [3300] * 14 + [float("inf")],
+        [3300] * 14 + [float("-inf")],
+        None,
+        "not-a-cell-array",
+    ),
+)
+def test_invalid_cell_voltage_arrays_are_skipped_without_crashing(tmp_path, voltages):
+    store = CellDiagnosticStore(tmp_path / "invalid-array.json")
+    store.add(sample(1, voltages))
+
+    result = store.analyse(1, opts())
+
+    assert result["status"] == "LERNPHASE"
+    assert result["sample_count"] == 0
+    assert result["cells"] == []
+
+
+def test_exactly_fifteen_finite_cell_voltages_remain_analysable(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "valid-array.json")
+    store.add(sample(1, [3300] * 15))
+
+    result = store.analyse(1, opts())
+
+    assert result["sample_count"] == 1
+    assert len(result["cells"]) == 15
 
 
 def test_status_thresholds_for_discharge(tmp_path):

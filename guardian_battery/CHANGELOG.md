@@ -1,5 +1,15 @@
 # Guardian Battery Changelog
 
+## 0.7.6 – HA UI fixes and diagnostic robustness
+
+- Ersetzt die in Home-Assistant-Markdown nicht zuverlässig interaktiven Diagnosebereiche durch eine HA-kompatible Custom Card; alle vier Bereiche je Zellansicht sind unabhängig und initial geschlossen.
+- Ordnet die aktuelle physische Stackdarstellung von Position 6 oben bis Position 1 unten an.
+- Entfernt die redundante Spalte „aktuell“ aus der Positionshistorie, zeigt frühere Zustände von neu nach alt und bereitet die horizontale Navigation mit fester Positionsspalte vor.
+- Validiert Zellspannungsarrays im `CellDiagnosticStore` defensiv; unvollständige, überzählige oder nicht-endliche Zellarrays verursachen weder einen Absturz noch ein Diagnosesample.
+- Diagnostic Engine `0.4.12`, Diagnosegrenzen, Phasenlogik, Evidence Diagnostics, Maintenance Risk, SOC-Modulmedian und relative Endpoint-Semantik bleiben unverändert.
+- Offen für die reale Home-Assistant-Abnahme bleiben die produktive Custom Card, der Open-State bei einem vollständigen View-Rebuild, reales horizontales Scrollen und die Smartphone-Darstellung.
+- Guardian/Add-on sind `0.7.6`; die Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.5 – Stack SOC and maintenance diagnostics
 
 - Macht die vier Diagnosebereiche aller Zellansichten unabhängig einklappbar, initial geschlossen, und vereinheitlicht die fünfteilige Navigation unter „Guardian Maintenance“.
