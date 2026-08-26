@@ -14,6 +14,7 @@ from maintenance_api import ApiResponse, error_json
 from maintenance_service import MaintenanceHistoryError
 from timeline import TechnicalHistoryError
 from phase_engine import PhaseEngineError, PHASE_PARAMETER_KEYS
+from maintenance_diagnostics import project_maintenance_boundaries
 
 
 LOG = logging.getLogger(__name__)
@@ -127,9 +128,14 @@ class HistoryApi:
                          marker.title): marker for marker in projected}.values())
         markers.sort(key=lambda marker: (marker.timestamp, marker.event_type,
                                          marker.maintenance_event_id or marker.title))
+        maintenance_boundaries = project_maintenance_boundaries(
+            [{**marker.to_dict(), "occurred_at": marker.timestamp}
+             for marker in markers if marker.event_type == "maintenance"]
+        )
         mode = values.get("analysis_mode", "historical")
         phases = []
         diagnostic_phases = []
+        relative_endpoints = []
         visual_parameters = {}
         phase_seconds = 0.0
         if self.phase_engine is not None:
@@ -149,6 +155,7 @@ class HistoryApi:
             phase_seconds = time.perf_counter() - phase_started
             phases = analysis["visual_intervals"]
             diagnostic_phases = analysis["diagnostic_intervals"]
+            relative_endpoints = analysis.get("relative_endpoints", [])
             visual_parameters = analysis["visual_parameters"]
         response = {
             "series": [{**{key: value for key, value in item.items() if key != "raw_points"},
@@ -160,9 +167,15 @@ class HistoryApi:
                       },
             "overlays": [marker.to_dict() for marker in markers],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
-            "semantics": {"overlay_timestamp": "occurred_at", "correlation_only": True},
+            "semantics": {"overlay_timestamp": "occurred_at", "correlation_only": True,
+                          "evidence_levels": ["observation", "correlation", "hypothesis",
+                                              "direct_evidence", "confirmed_cause"],
+                          "relative_endpoints": "observation_only",
+                          "bms_limit_requires_direct_evidence": True},
             "phase_analysis": {"mode": mode, "intervals": phases,
                                "diagnostic_intervals": diagnostic_phases,
+                               "relative_endpoints": relative_endpoints,
+                               "maintenance_boundaries": maintenance_boundaries,
                                "visual_parameters": visual_parameters,
                                "raw_measurements_unchanged": True,
                                "diagnostic_phase_unchanged": True},

@@ -29,6 +29,7 @@ from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_text)
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
                               resolve_maintenance_event_identities, update_observed_stack)
+from stack_soc import current_stack_soc
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -627,6 +628,7 @@ class Mqtt:
             ("bms_soh", "Pylontech BMS SOH", "%", None, "mdi:battery-heart"),
             ("bms_cycles", "Pylontech BMS Zyklen", None, None, "mdi:counter"),
             ("cell_diag_config", "Zelldiagnostik Konfiguration", None, None, "mdi:tune-variant"),
+            ("stack_soc_median", "Guardian SOC-Modulmedian", "%", "battery", "mdi:chart-bell-curve"),
         ]
 
         for module in range(1, module_count + 1):
@@ -637,6 +639,7 @@ class Mqtt:
                 (f"module_{module}_health_reason", f"Modul {module} Bewertung", None, None, "mdi:text-box-check"),
                 (f"module_{module}_recommendation", f"Modul {module} Empfehlung", None, None, "mdi:lightbulb-on"),
                 (f"module_{module}_soc_deviation", f"Modul {module} SOC-Abweichung", "%", None, "mdi:chart-bell-curve"),
+                (f"module_{module}_soc_peer_deviation", f"Modul {module} SOC-Abweichung zum Stackmedian", "pp", None, "mdi:swap-vertical"),
                 (f"module_{module}_cell_delta_trend", f"Modul {module} Zellspreizung Trend", None, None, "mdi:trending-up"),
                 (f"module_{module}_cell_delta_change", f"Modul {module} Zellspreizung Änderung", "mV", None, "mdi:delta"),
                 (f"module_{module}_soc_change", f"Modul {module} SOC Änderung", "%", None, "mdi:chart-timeline-variant"),
@@ -762,7 +765,8 @@ class Mqtt:
         bms_stat: dict | None = None,
         module_infos: dict[int, dict] | None = None,
     ) -> None:
-        median_soc = statistics.median([m.soc_percent for m in modules]) if modules else 0
+        soc_peers = current_stack_soc(modules)
+        median_soc = soc_peers["median"] if soc_peers["median"] is not None else 0
         cell_results = cell_results or {}
         bms_stat = bms_stat or {}
         module_infos = module_infos or {}
@@ -789,6 +793,15 @@ class Mqtt:
         self.state("incident_summary", incident.get("last_summary", "kein Incident"))
         self.state("bms_soh", bms_stat.get("soh_percent"))
         self.state("bms_cycles", bms_stat.get("cycles"))
+        self.state("stack_soc_median", soc_peers["median"])
+        if soc_peers["median"] is not None:
+            self.attributes("stack_soc_median", {
+                "definition": "Median der SOC-Werte aller aktuell vorhandenen Module.",
+                "unit": "%", "peer_level": "module_to_stack",
+                "active_module_count": soc_peers["module_count"],
+                "evidence_level": "observation",
+                "causality": "not_determined",
+            })
 
         # Aktive Zelldiagnostik-Konfiguration für UI/Explainability veröffentlichen.
         # Die Werte stammen direkt aus den App-Optionen, damit Dashboard und
@@ -866,6 +879,9 @@ class Mqtt:
                 f"{base}_health_reason": assessment["assessment"],
                 f"{base}_recommendation": assessment["recommendation"],
                 f"{base}_soc_deviation": assessment["soc_deviation_pct"],
+                f"{base}_soc_peer_deviation": (
+                    round(soc_peers["deviations"][module.module], 2)
+                    if module.module in soc_peers["deviations"] else None),
                 f"{base}_cell_delta_trend": trends.get(module.module, {}).get("cell_delta_trend", "insufficient_data"),
                 f"{base}_cell_delta_change": trends.get(module.module, {}).get("cell_delta_change_mv", 0),
                 f"{base}_soc_change": trends.get(module.module, {}).get("soc_change_pct", 0),
@@ -893,6 +909,12 @@ class Mqtt:
                 f"{base}_cell_diag_trend_risk_confidence": diag.get("trend_risk_confidence"),
             })
             for key, value in values.items(): self.state(key, value)
+            self.attributes(f"{base}_soc_peer_deviation", {
+                "definition": "Modul-SOC minus Median der gleichzeitig vorhandenen Stackmodule.",
+                "unit": "Prozentpunkte", "peer_level": "module_to_stack",
+                "physical_identity": module_info.get("barcode") if module_info else None,
+                "evidence_level": "observation", "causality": "not_determined",
+            })
             if diag.get("current_median_mv") is not None:
                 self.attributes(
                     f"{base}_cell_median",

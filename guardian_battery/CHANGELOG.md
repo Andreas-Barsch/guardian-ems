@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.5 – Stack SOC and maintenance diagnostics
+
+- Macht die vier Diagnosebereiche aller Zellansichten unabhängig einklappbar, initial geschlossen, und vereinheitlicht die fünfteilige Navigation unter „Guardian Maintenance“.
+- Ordnet die Positionshistorie vom aktuellen Stand links bis zum ältesten Stand rechts und verhindert redundante unveränderte Positionssnapshots.
+- Ergänzt den aktuellen und historischen Stack-SOC-Median sowie die vorzeichenbehaftete Modulabweichung in Prozentpunkten anhand der zum Messzeitpunkt dokumentierten physischen Stackbelegung; Ausbau, Wiedereinbau, Positionswechsel und Modultausch bleiben identitätssicher getrennt.
+- Erweitert Maintenance-Marker und projiziert dokumentierte Eingriffe, einschließlich manuellem Balancing, konservativ als Lifecycle-Grenze oder Diagnosekontext, ohne Rohmessungen zu verändern.
+- Ergänzt relative Lade-/Entladeendpunkte ausschließlich als Beobachtung sowie additive Evidenz- und Kausalitätsmetadaten; daraus folgt keine automatische BMS-, Wechselrichter-, Zellfehler- oder Kausalitätsaussage.
+- Cell Diagnostics, statuswirksame Grenzwerte, Confidence, Evidence Diagnostics, Maintenance Risk, Rohdatenerfassung und absolute Phasenlogik bleiben unverändert; die Diagnostic Engine bleibt `0.4.12`.
+- Offene Abnahmepunkte bleiben das noch nicht acquisition-validierte 30-s-Synchronitätsfenster, fehlende individuelle Live-Staleness-Timestamps, der noch nicht synchronisierte Peer-Zyklusvergleich und die reale Home-Assistant-Browserprüfung der nativen `<details>`-Elemente.
+- Guardian/Add-on sind `0.7.5`; die Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.4 – Compact MQTT projection
 
 - Ersetzt die vollständige Diagnoseobjekt-Serialisierung in `guardian/battery/state` durch stabile kompakte Modulprojektionen und verhindert dadurch wiederkehrende Mosquitto-Trennungen wegen übergroßer Pakete.

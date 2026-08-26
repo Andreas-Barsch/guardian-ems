@@ -36,7 +36,10 @@ def test_soc_reference_combines_unchanged_series_and_overlay(tmp_path):
         {"timestamp": "2026-08-12T10:42:00+00:00", "value": 64.0}
     ]
     assert response.body["overlays"][0]["maintenance_event_id"] == event.maintenance_event_id
-    assert response.body["semantics"] == {"overlay_timestamp": "occurred_at", "correlation_only": True}
+    assert response.body["semantics"]["overlay_timestamp"] == "occurred_at"
+    assert response.body["semantics"]["correlation_only"] is True
+    assert response.body["semantics"]["relative_endpoints"] == "observation_only"
+    assert response.body["semantics"]["bms_limit_requires_direct_evidence"] is True
     assert response.body["phase_analysis"]["intervals"] == []
 
 

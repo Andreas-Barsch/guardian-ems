@@ -42,6 +42,52 @@ def test_append_only_time_queries_and_physical_identity(tmp_path):
     assert service.current() == second
 
 
+def test_backdated_append_keeps_chronological_current_and_future_concurrency(tmp_path):
+    event, service = env(tmp_path)
+    first = service.record(effective_at="2026-08-19T10:00:00Z",
+                           maintenance_event_id=event.maintenance_event_id,
+                           positions=state(**{"1": "SN-A"}), expected_latest_snapshot_id=None)
+    current = service.record(effective_at="2026-08-20T10:00:00Z",
+                             maintenance_event_id=event.maintenance_event_id,
+                             positions=state(**{"1": "SN-B"}),
+                             expected_latest_snapshot_id=first.position_history_id)
+    service.record(effective_at="2026-08-19T12:00:00Z",
+                   maintenance_event_id=event.maintenance_event_id,
+                   positions=state(**{"1": "SN-C"}),
+                   expected_latest_snapshot_id=current.position_history_id)
+    assert service.current() == current
+    later = service.record(effective_at="2026-08-21T10:00:00Z",
+                           maintenance_event_id=event.maintenance_event_id,
+                           positions=state(**{"1": "SN-D"}),
+                           expected_latest_snapshot_id=current.position_history_id)
+    assert service.current() == later
+
+
+def test_conflicting_mapping_at_identical_effective_timestamp_is_rejected(tmp_path):
+    event, service = env(tmp_path)
+    first = service.record(effective_at="2026-08-19T10:00:00Z",
+                           maintenance_event_id=event.maintenance_event_id,
+                           positions=state(**{"1": "SN-A"}), expected_latest_snapshot_id=None)
+    with pytest.raises(PositionHistoryValidationError, match="identical effective_at"):
+        service.record(effective_at="2026-08-19T10:00:00Z",
+                       maintenance_event_id=event.maintenance_event_id,
+                       positions=state(**{"1": "SN-B"}),
+                       expected_latest_snapshot_id=first.position_history_id)
+
+
+def test_unchanged_later_mapping_does_not_create_a_history_state(tmp_path):
+    event, service = env(tmp_path)
+    first = service.record(effective_at="2026-08-19T10:00:00Z",
+                           maintenance_event_id=event.maintenance_event_id,
+                           positions=state(**{"1": "SN-A"}), expected_latest_snapshot_id=None)
+    with pytest.raises(PositionHistoryValidationError, match="positions are unchanged"):
+        service.record(effective_at="2026-08-20T10:00:00Z",
+                       maintenance_event_id=event.maintenance_event_id,
+                       positions=state(**{"1": "SN-A"}),
+                       expected_latest_snapshot_id=first.position_history_id)
+    assert service.list() == [first]
+
+
 def test_full_snapshot_validation_concurrency_and_divergence(tmp_path):
     event, service = env(tmp_path)
     first = service.record(effective_at="2026-08-19T10:00:00Z", maintenance_event_id=event.maintenance_event_id,

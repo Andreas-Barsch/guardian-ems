@@ -22,7 +22,29 @@ def _cell_views(path: Path) -> list[dict]:
 
 
 def _card(view: dict, title: str) -> dict:
-    return next(card for card in view["cards"] if card.get("title") == title)
+    return next(card for card in view["cards"]
+                if card.get("title") == title or card.get("guardian_section") == title)
+
+
+def test_four_diagnostic_sections_are_independently_collapsible_and_closed_by_default():
+    expected = {
+        "Diagnose, Trend & Maintenance Risk",
+        "Zusätzliche Diagnoseverfahren",
+        "Balancing, Maintenance & ICA/DVA",
+        "ⓘ Bewertung erklären",
+    }
+    for path in DASHBOARDS:
+        for view in _cell_views(path):
+            sections = {card.get("guardian_section"): card for card in view["cards"]
+                        if card.get("guardian_section")}
+            assert set(sections) == expected
+            for title, card in sections.items():
+                assert card["type"] == "markdown"
+                assert card.get("title") is None
+                assert '<details class="guardian-diagnostic-section">' in card["content"]
+                assert f"<summary><strong>{title}</strong>" in card["content"]
+                assert "<details open" not in card["content"]
+                assert card["content"].rstrip().endswith("</details>")
 
 
 def test_all_cell_views_separate_momentary_values_and_historic_evidence():
@@ -82,7 +104,7 @@ def test_all_cell_views_explain_the_actual_aggregation_semantics():
     for path in DASHBOARDS:
         for view in _cell_views(path):
             help_card = _card(view, "ⓘ Bewertung erklären")
-            assert help_card["title"] == "ⓘ Bewertung erklären"
+            assert help_card["guardian_section"] == "ⓘ Bewertung erklären"
             content = help_card["content"]
             assert "schlechtesten ausreichend belegten Bereich" in content
             assert "größere absolute Medianabweichung" in content

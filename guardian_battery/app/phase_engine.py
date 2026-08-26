@@ -3,6 +3,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from datetime import datetime
 from cell_diagnostics import classify_phases
+from stack_soc import relative_cycle_endpoints
 
 PHASE_MODES=frozenset({"historical","current","what_if"})
 PHASE_PARAMETER_KEYS=("cell_diag_low_soc_percent","cell_diag_high_soc_percent","cell_diag_charge_current_a","cell_diag_discharge_current_a")
@@ -74,6 +75,8 @@ class PhaseEngine:
                 soc="low" if "low" in phases else "high" if "high" in phases else None
             else:previous="unknown";soc=None
             classified.append({"timestamp":sample["timestamp"],"visual_axis":previous,"soc_region":soc})
-        return {"diagnostic_intervals":diagnostic,"visual_intervals":self.visual_projection.project(classified,window_to or (samples[-1]["timestamp"] if samples else "")),"visual_parameters":dict(self.visual_projection.parameters)}
+        endpoint_options = resolve if mode == "historical" else (
+            what_if if mode == "what_if" else self.current_config_provider())
+        return {"diagnostic_intervals":diagnostic,"visual_intervals":self.visual_projection.project(classified,window_to or (samples[-1]["timestamp"] if samples else "")),"relative_endpoints":relative_cycle_endpoints(samples,endpoint_options),"visual_parameters":dict(self.visual_projection.parameters)}
     def intervals(self,samples,*,mode="historical",what_if=None,window_to=None):
         return self.analyse(samples,mode=mode,what_if=what_if,window_to=window_to)["diagnostic_intervals"]

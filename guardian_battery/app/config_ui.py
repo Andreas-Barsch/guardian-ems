@@ -26,6 +26,7 @@ from event_overlay import EventOverlayAdapter
 from history_api import HISTORY_API_ROUTE, HistoryApi
 from history_series import DEFAULT_CELL_HISTORY_DIR, CellHistorySeries
 from history_ui import render_history_html
+from guardian_header import render_guardian_header
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog,
                               PositionHistoryService, classify_stack_change,
                               stable_observed_changes)
@@ -303,7 +304,7 @@ def validate(cfg):
 def _config_html(maintenance_path='maintenance', timeline_path='timeline', history_path='history'):
     page = r'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Konfiguration</title>
 <style>:root{color-scheme:light dark;--b:#1976d2;--warn:#ef6c00}body{font:14px system-ui;margin:0;background:var(--primary-background-color,#fafafa);color:var(--primary-text-color,#222)}header{padding:18px 22px;background:#0d47a1;color:white}header nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}header nav a{color:white;text-decoration:none;padding:8px 12px;border:1px solid #ffffff66;border-radius:8px}header nav a.active{background:white;color:#0d47a1}main{max-width:1100px;margin:auto;padding:16px}.intro,.group{background:var(--card-background-color,#fff);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px #0002}.group h2{margin-top:0}.row{display:grid;grid-template-columns:minmax(240px,1fr) minmax(160px,260px);gap:12px;padding:12px 0;border-top:1px solid #8883}.label{font-weight:650}.meta{font-size:12px;opacity:.72;margin-top:3px}.impact{font-size:12px;margin-top:6px;padding:7px 9px;border-left:3px solid var(--warn);background:#ff980012}input,select{width:100%;box-sizing:border-box;padding:9px;border:1px solid #8888;border-radius:7px;background:transparent;color:inherit}.advanced{border-left:4px solid #777}.actions{position:sticky;bottom:0;background:var(--card-background-color,#fff);padding:12px 16px;border-radius:12px;box-shadow:0 -2px 8px #0002;display:flex;gap:10px;align-items:center}button{padding:10px 16px;border:0;border-radius:8px;cursor:pointer}button.primary{background:var(--b);color:white}.status{margin-left:auto;font-weight:600}.changed{outline:2px solid #ff980088}.sys{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.sys div{padding:8px;background:#8881;border-radius:7px}@media(max-width:650px){.row{grid-template-columns:1fr}.actions{flex-wrap:wrap}.status{width:100%;margin:0}}</style></head>
-<body><header><h1>Guardian Battery</h1><div>Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern</div><nav><a href="./">Module &amp; Stack</a><a class="active" href="configuration">Konfiguration</a><a href="__MAINTENANCE_PATH__">Maintenance-Logbuch</a><a href="__TIMELINE_PATH__">Verlauf</a><a href="__HISTORY_PATH__">Zeitverläufe</a></nav></header><main>
+<body>__HEADER__<main>
 <div class="intro"><b>Wirkung von Änderungen</b><p>Änderungen verändern die zukünftige Erfassung und/oder Bewertung. Historische Rohdaten werden nicht umgeschrieben. Nach erfolgreichem Übernehmen wird Guardian neu gestartet; diagnostisch relevante Änderungen erzeugen einen neuen Provenienz-Eintrag.</p><div class="sys" id="sys"></div></div>
 <form id="form"></form><div class="actions"><button type="button" onclick="resetDefaults()">Auf Standard zurücksetzen</button><button type="button" onclick="reloadCfg()">Änderungen verwerfen</button><button class="primary" type="button" onclick="save()">Validieren & Übernehmen</button><span class="status" id="status"></span></div></main>
 <script>let model,current={};const esc=s=>String(s).replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -317,7 +318,14 @@ load().catch(e=>document.getElementById('status').textContent='Fehler: '+e);</sc
     escaped_maintenance=maintenance_path.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
     escaped_timeline=timeline_path.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
     escaped_history=history_path.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
-    return page.replace('__MAINTENANCE_PATH__',escaped_maintenance).replace('__TIMELINE_PATH__',escaped_timeline).replace('__HISTORY_PATH__',escaped_history)
+    header = render_guardian_header(
+        active="configuration",
+        paths={"modules": "./", "configuration": "configuration",
+               "maintenance": maintenance_path, "timeline": timeline_path,
+               "history": history_path},
+        subtitle="Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern",
+    )
+    return page.replace('__HEADER__', header)
 
 class Handler(BaseHTTPRequestHandler):
     def _ingress_allowed(self):

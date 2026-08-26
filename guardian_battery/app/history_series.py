@@ -7,8 +7,12 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from position_history import DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog
+from stack_soc import STACK_SOC_METRICS, project_stack_soc
+
 DEFAULT_CELL_HISTORY_DIR = Path("/share/guardian_battery/cell_history")
-SERIES_METRICS = frozenset({"soc", "current", "cell_voltage", "cell_temperature"})
+SERIES_METRICS = frozenset({"soc", "current", "cell_voltage", "cell_temperature",
+                            *STACK_SOC_METRICS})
 DEFAULT_MAX_DISPLAY_POINTS = 6000
 
 
@@ -66,8 +70,10 @@ class _ExtremaCollector:
 
 
 class CellHistorySeries:
-    def __init__(self, directory=DEFAULT_CELL_HISTORY_DIR, cache_size=24):
+    def __init__(self, directory=DEFAULT_CELL_HISTORY_DIR, cache_size=24,
+                 position_history_path=DEFAULT_POSITION_HISTORY_FILE):
         self.directory = Path(directory)
+        self.position_history_path = Path(position_history_path)
         self.cache_size = cache_size
         self._cache = OrderedDict()
 
@@ -115,9 +121,13 @@ class CellHistorySeries:
         paths = self._paths(timestamp_from, timestamp_to)
         try:
             signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths)
+            position_signature = ((self.position_history_path.stat().st_size,
+                                   self.position_history_path.stat().st_mtime_ns)
+                                  if any(item[0] in STACK_SOC_METRICS for item in normalized)
+                                  and self.position_history_path.exists() else None)
         except OSError as exc:
             raise SeriesHistoryError("cell history is unavailable") from exc
-        key = (signature, tuple(normalized), timestamp_from, timestamp_to, module_number,
+        key = (signature, position_signature, tuple(normalized), timestamp_from, timestamp_to, module_number,
                max_points)
         if key in self._cache:
             self._cache.move_to_end(key)
@@ -132,7 +142,7 @@ class CellHistorySeries:
                 15 if metric in {"cell_voltage", "cell_temperature"}
                 and cell_number is None else 1)
             collectors.append((max(4, max_points // group_count), {}))
-        samples, raw_records = [], 0
+        samples, raw_records, stack_records = [], 0, []
         raw_points = [0] * len(normalized)
         try:
             for path in paths:
@@ -143,10 +153,12 @@ class CellHistorySeries:
                         record = json.loads(line)
                         if record.get("schema_version") != 1:
                             raise ValueError("schema")
-                        if int(record["module"]) != module_number:
-                            continue
                         epoch = float(record["timestamp"])
                         if not start_epoch <= epoch <= end_epoch:
+                            continue
+                        if any(metric in STACK_SOC_METRICS for metric, _, _ in normalized):
+                            stack_records.append(record)
+                        if int(record["module"]) != module_number:
                             continue
                         timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
                         raw_records += 1
@@ -156,6 +168,8 @@ class CellHistorySeries:
                                         "module_serial": record.get("module_serial")})
                         for index, (metric, cell_number, selected_cells) in enumerate(normalized):
                             per_group, metric_collectors = collectors[index]
+                            if metric in STACK_SOC_METRICS:
+                                continue
                             for point in self._points(record, metric, cell_number, timestamp,
                                                       epoch, selected_cells):
                                 group = point.get("cell_number", 0)
@@ -164,6 +178,24 @@ class CellHistorySeries:
                                     _ExtremaCollector(per_group, start_epoch, end_epoch),
                                 ).add(point)
                                 raw_points[index] += 1
+            if stack_records:
+                snapshots = PositionHistoryLog(self.position_history_path).read_all()
+                projected_soc = project_stack_soc(stack_records, snapshots)
+                for index, (metric, _cell_number, _selected_cells) in enumerate(normalized):
+                    if metric not in STACK_SOC_METRICS:
+                        continue
+                    per_group, metric_collectors = collectors[index]
+                    key_name = "stack_soc_median" if metric == "stack_soc_median" else "soc_deviation_pp"
+                    for item in projected_soc:
+                        if item["module"] != module_number:
+                            continue
+                        point = {"timestamp": item["timestamp"], "_epoch": item["_epoch"],
+                                 "value": item[key_name],
+                                 "module_serial": item["module_serial"],
+                                 "active_module_count": item["active_module_count"]}
+                        metric_collectors.setdefault(
+                            0, _ExtremaCollector(per_group, start_epoch, end_epoch)).add(point)
+                        raw_points[index] += 1
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError) as exc:
             raise SeriesHistoryError(f"cell history is invalid: {exc}") from exc
 

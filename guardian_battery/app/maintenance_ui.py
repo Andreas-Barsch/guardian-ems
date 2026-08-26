@@ -5,6 +5,8 @@ from __future__ import annotations
 from html import escape
 from urllib.parse import quote
 
+from guardian_header import render_guardian_header
+
 
 def maintenance_deep_link(event_id: str) -> str:
     """Return the central ingress-relative target for one stable event ID."""
@@ -17,6 +19,12 @@ def render_maintenance_html(*, configuration_path: str, timeline_path: str = "ti
     config_href = escape(configuration_path, quote=True)
     timeline_href = escape(timeline_path, quote=True)
     history_href = escape(history_path, quote=True)
+    header = render_guardian_header(
+        active="maintenance",
+        paths={"modules": "./", "configuration": configuration_path,
+               "maintenance": "maintenance", "timeline": timeline_path,
+               "history": history_path},
+    )
     return f'''<!doctype html>
 <html lang="de">
 <head>
@@ -41,7 +49,7 @@ def render_maintenance_html(*, configuration_path: str, timeline_path: str = "ti
   </style>
 </head>
 <body>
-<header><h1>Guardian Battery</h1><nav><a href="./">Module &amp; Stack</a><a href="{config_href}">Konfiguration</a><a class="active" href="maintenance">Maintenance-Logbuch</a><a href="{timeline_href}">Verlauf</a><a href="{history_href}">Zeitverläufe</a></nav></header>
+{header}
 <main>
   <div id="message" role="status" aria-live="polite"></div>
   <section id="list-view" class="panel">

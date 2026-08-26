@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from html import escape
 
+from guardian_header import render_guardian_header
+
 
 def render_timeline_html(*, configuration_path: str, maintenance_path: str,
                          history_path: str = "history") -> str:
+    header = render_guardian_header(
+        active="timeline",
+        paths={"modules": "./", "configuration": configuration_path,
+               "maintenance": maintenance_path, "timeline": "timeline",
+               "history": history_path},
+        subtitle="Chronologischer Verlauf vorhandener Guardian-Ereignisquellen",
+    )
     return fr'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Verlauf</title>
 <style>:root{{color-scheme:light dark;--blue:#0d47a1;--line:#78909c;--card:var(--card-background-color,#fff)}}*{{box-sizing:border-box}}body{{font:14px system-ui;margin:0;background:var(--primary-background-color,#f6f7f9);color:var(--primary-text-color,#222)}}header{{padding:18px 22px;background:var(--blue);color:#fff}}nav{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}nav a{{color:#fff;text-decoration:none;padding:8px 12px;border:1px solid #ffffff66;border-radius:8px}}nav a.active{{background:#fff;color:var(--blue)}}main{{max-width:1050px;margin:auto;padding:16px}}.panel{{background:var(--card);padding:16px;border-radius:12px;box-shadow:0 1px 4px #0002}}form{{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:10px;align-items:end}}label{{display:grid;gap:4px}}input,select,button{{font:inherit;padding:9px;border:1px solid #8888;border-radius:8px;background:transparent;color:inherit;min-width:0}}button{{cursor:pointer}}button.primary{{background:#1976d2;color:white;border:0}}.timeline{{margin-top:18px;position:relative}}.timeline:before{{content:'';position:absolute;left:118px;top:0;bottom:0;width:2px;background:var(--line)}}.event{{display:grid;grid-template-columns:100px 20px minmax(0,1fr);gap:8px;margin:0 0 14px}}.time{{text-align:right;font-variant-numeric:tabular-nums;color:var(--secondary-text-color,#555)}}.dot{{width:14px;height:14px;border-radius:50%;margin-top:5px;background:#607d8b;z-index:1}}.event.maintenance .dot{{background:#1976d2}}.event.alarm_started .dot{{background:#d32f2f}}.event.alarm_cleared .dot{{background:#388e3c}}.card{{background:var(--card);padding:12px;border-radius:10px;box-shadow:0 1px 4px #0002;min-width:0}}.kind{{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}}.title{{font-weight:700;margin:3px 0;overflow-wrap:anywhere}}.summary,.meta{{overflow-wrap:anywhere}}.meta{{font-size:12px;opacity:.72;margin-top:6px}}.card a{{display:inline-block;margin-top:8px}}#message{{margin:10px 0}}.error{{padding:10px;border-left:4px solid #d32f2f;background:#d32f2f18}}@media(max-width:760px){{form{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{main{{padding:10px}}form{{grid-template-columns:1fr}}.timeline:before{{left:8px}}.event{{grid-template-columns:18px minmax(0,1fr)}}.time{{grid-column:2;text-align:left}}.dot{{grid-column:1;grid-row:1/3}}.card{{grid-column:2}}}}</style></head>
-<body><header><h1>Guardian Battery</h1><div>Chronologischer Verlauf vorhandener Guardian-Ereignisquellen</div><nav><a href="./">Module &amp; Stack</a><a href="{escape(configuration_path, quote=True)}">Konfiguration</a><a href="{escape(maintenance_path, quote=True)}">Maintenance-Logbuch</a><a class="active" href="timeline">Verlauf</a><a href="{escape(history_path, quote=True)}">Zeitverläufe</a></nav></header><main>
+<body>{header}<main>
 <section class="panel"><h2>Verlauf</h2><p>Zeitliche Korrelation vorhandener Ereignisse; daraus wird keine Kausalität abgeleitet.</p><form id="filters">
 <label>Von <input id="from" type="datetime-local"></label><label>Bis <input id="to" type="datetime-local"></label>
 <label>Ereignisarten <select id="event-types" multiple size="4"><option value="maintenance" selected>Maintenance</option><option value="alarm_started">Alarm begonnen</option><option value="alarm_cleared">Alarm beendet</option><option value="status_changed">Status geändert</option></select></label>

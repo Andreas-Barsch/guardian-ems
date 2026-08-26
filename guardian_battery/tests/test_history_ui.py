@@ -19,6 +19,7 @@ def test_overlay_uses_server_deep_link_and_safe_text_rendering():
     assert ".innerHTML" not in html
     assert "marker-title').textContent=marker.title" in html
     assert "marker-meta').textContent=parts.join" in html
+    assert "marker.metadata?.category||marker.event_type" in html
 
 
 def test_navigation_paths_are_escaped():

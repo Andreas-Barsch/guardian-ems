@@ -185,10 +185,27 @@ class PositionHistoryService:
         )
         with self.log.transaction():
             records = self.log.read_all()
-            latest_append = records[-1] if records else None
-            actual = latest_append.position_history_id if latest_append else None
+            ordered = sorted(
+                records,
+                key=lambda item: (item.effective_at, item.created_at,
+                                  item.position_history_id),
+            )
+            latest = ordered[-1] if ordered else None
+            actual = latest.position_history_id if latest else None
             if expected_latest_snapshot_id != actual:
                 raise PositionHistoryConflictError(expected_latest_snapshot_id, actual)
+            same_time = [item for item in records if item.effective_at == effective]
+            if any(item.positions != snapshot.positions for item in same_time):
+                raise PositionHistoryValidationError(
+                    "conflicting position mapping at identical effective_at"
+                )
+            if any(item.positions == snapshot.positions for item in same_time):
+                return same_time[-1]
+            previous = [item for item in ordered if item.effective_at < effective]
+            if previous and previous[-1].positions == snapshot.positions:
+                raise PositionHistoryValidationError(
+                    "positions are unchanged at effective_at"
+                )
             self.log.append(snapshot)
         return snapshot
 
