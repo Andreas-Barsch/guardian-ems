@@ -30,7 +30,7 @@ def test_navigation_paths_are_escaped():
 
 def test_svg_chart_has_real_axes_units_layers_resize_and_local_tooltip():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
-    for layer in ("phase-layer", "grid-layer", "series-layer", "marker-layer", "interaction-layer"):
+    for layer in ("phase-layer", "grid-layer", "day-layer", "series-layer", "marker-layer", "interaction-layer"):
         assert f'id="{layer}"' in html
     assert "ResizeObserver" in html
     assert "Intl.DateTimeFormat('de-DE'" in html
@@ -45,6 +45,33 @@ def test_svg_chart_has_real_axes_units_layers_resize_and_local_tooltip():
     assert "@media(max-width:980px)" in html
     assert "@media(max-width:620px)" in html
     assert ".innerHTML" not in html
+
+
+def test_local_midnight_boundaries_are_inner_dst_safe_and_shared_by_all_views():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    helper = html.split("function localDayBoundaries", 1)[1].split("function dayLabel", 1)[0]
+    assert "cursor.setHours(0,0,0,0)" in helper
+    assert "cursor.setDate(cursor.getDate()+1)" in helper
+    assert "cursor.getTime()<end" in helper
+    assert "86400000" not in helper and "864e5" not in helper
+    assert "getUTC" not in helper and "setUTC" not in helper
+    assert "function renderDayBoundaries" in html
+    assert "renderDayBoundaries(byId('day-layer'),start,end,x" in html
+    assert "renderDayBoundaries(ui.layers.day,start,end,x" in html
+    assert "['phase','grid','day','axis','series','marker','interaction']" in html
+    assert html.index('id="phase-layer"') < html.index('id="day-layer"') < html.index('id="series-layer"') < html.index('id="marker-layer"')
+    assert "class:'day-boundary'" in html and "class','day-label'" in html
+    assert "stroke-dasharray:2 4" in html and "pointer-events:none" in html
+
+
+def test_midnight_projection_does_not_change_measurement_phase_or_maintenance_data():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert "data.series.points.map" in html
+    assert "data.phase_analysis?.intervals" in html
+    assert "for(const marker of data.overlays)" in html
+    assert "class:'marker'" in html and "class:'wrench'" in html
+    assert "api/history/series?" in html
+    assert "localDayBoundaries(start,end)" in html
 
 
 def test_empty_phase_wrench_and_cell_identification_are_explicit():
