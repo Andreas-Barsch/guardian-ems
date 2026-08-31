@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.8 – Passive RS485 Evidence Acquisition – Runtime Foundation
+
+- Trennt Pylontech Console und passiven RS485-Sniffer in sichere serielle Rollen. Waveshare `1A86:55D3` wird erkannt und von Console-auto ausgeschlossen; Mehrdeutigkeit schlägt kontrolliert fehl statt einen zufälligen Port zu wählen.
+- Ergänzt einen rein lesenden Runtimepfad für 115200/8N1 mit Pylontech-HEX-ASCII-Framing, LENGTH/LENID, LCHKSUM, CHKSUM, zeitlich begrenzter Request-/Response-Korrelation und kontrolliertem Reconnect.
+- Dekodiert 0x92 als direkte Protokollevidenz: CVL/DVL, CCL/DCL einschließlich Rohwert und Vorzeichen, Charge/Discharge Enable, Charge Immediately 1/2 und Full Charge Request. Begrenzte Runtime-Metriken und kompakte Abnahmelogs erzeugen keine Raw-Frame-Logflut.
+- `rs485_sniffer_enabled` bleibt standardmäßig `false`; ohne explizite Aktivierung wird kein RS485-Port geöffnet. Guardian sendet über diese RS485-Schicht keine Protokolltelegramme.
+- Ein möglicher hardware- oder treiberbedingter Pegelimpuls beim pyserial-Open kann erst am realen Adapter geprüft werden.
+- Nicht enthalten sind RS485-Persistenz, MQTT-/HA-Entities, Dashboard-/Config-UI, History-Projektion, Diagnosekopplung oder Kausalitätsbewertung. Die Diagnostic Engine bleibt `0.4.12`.
+
 ## 0.7.7 – HA collapsible cards and local day boundaries
 
 - Lädt die Guardian-Custom-Card in YAML-Lovelace-Konfigurationen über den wirksamen `resource_mode: yaml` und die cache-gebrochene Ressource `/local/guardian-collapsible-card.js?v=2`.

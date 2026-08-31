@@ -2,6 +2,24 @@
 
 Stand: 2026-08-31
 
+## Guardian Battery 0.7.8 – Passive RS485 Runtime Foundation
+
+### Verifizierte Hardware- und Protokollfakten
+
+- **HA-Host verifiziert:** Waveshare USB TO RS485 als `/dev/ttyACM0`, stabiler Hostpfad `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B97005529-if00`, VID:PID `1A86:55D3`.
+- **HA-Host verifiziert:** bestehende Pylontech Console über `/dev/ttyUSB0` mit Prolific-basiertem USB-Serial-Adapter. Die genaue Prolific-VID/PID ist nicht dokumentiert.
+- **Supervisor-Konfiguration verifiziert:** `uart: true`, `usb: false` und keine expliziten Gerätezuordnungen (`devices: []` in der App-Info).
+- **Mac verifiziert:** passiver RS485-Mitschnitt mit 115200/8N1, gültigen Pylontech-Prüfsummen sowie realen 0x42- und 0x92-Frames. CCL, DCL und Charge-/Discharge-Enable-Bits wurden beobachtet.
+
+### Release- und Sicherheitsgrenzen
+
+- Console und RS485 sind getrennte Rollen. Waveshare `1A86:55D3` ist für Console-auto ausgeschlossen; Mehrdeutigkeit und identische aufgelöste Device-Nodes werden fail-closed behandelt.
+- `rs485_sniffer_enabled` ist standardmäßig `false`. Direkt nach Installation wird ohne manuelle Aktivierung kein RS485-Port geöffnet.
+- Der RS485-Runtimepfad liest ausschließlich, besitzt keinen Protokoll-Schreibpfad und erzeugt keine 0x94-/0x95-Kommandos.
+- pyserial öffnet das POSIX-Gerät intern mit `O_RDWR`; Guardian setzt DTR und RTS vor `open()` auf `False`, aktiviert keinen RS485-Sendemodus und ruft keinen Schreibpfad auf.
+- Noch **nicht produktiv verifiziert** sind die parallele Sichtbarkeit beider Adapter im Guardian-Container, `by-id` innerhalb des Containers, Runtime-Reader, Reconnect und ein möglicher hardware-/treiberbedingter Pegelimpuls beim Öffnen.
+- 0.7.8 enthält keine RS485-Persistenz, MQTT-/HA-Projektion, UI-Integration oder Diagnosekopplung. `/share/guardian_battery` bleibt außerhalb dieses Release-Arbeitspakets.
+
 ## Aktueller verifizierter Release- und RC-Stand
 
 - Vor dieser Release-Runde veröffentlichter Stand: Guardian Battery / Add-on
