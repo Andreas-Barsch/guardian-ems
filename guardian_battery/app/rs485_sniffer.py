@@ -384,6 +384,10 @@ class PassiveRs485Reader:
         with self._lock:
             return {**self._status, "latest_management_adrs": sorted(self.latest_management_by_adr)}
 
+    def management(self) -> dict[int, dict]:
+        with self._lock:
+            return {adr: dict(value) for adr, value in self.latest_management_by_adr.items()}
+
     def _set(self, **values) -> None:
         with self._lock:
             self._status.update(values)
@@ -447,12 +451,13 @@ class PassiveRs485Reader:
                     decoded = decode_0x92(correlation)
                     if decoded.get("decoder_supported"):
                         value = {"timestamp": now, "raw_frame": raw, **decoded}
-                        if frame.adr not in self.latest_management_by_adr \
-                                and len(self.latest_management_by_adr) >= self.max_adr_states:
-                            oldest = min(self.latest_management_by_adr,
-                                         key=lambda adr: self.latest_management_by_adr[adr]["timestamp"])
-                            del self.latest_management_by_adr[oldest]
-                        self.latest_management_by_adr[frame.adr] = value
+                        with self._lock:
+                            if frame.adr not in self.latest_management_by_adr \
+                                    and len(self.latest_management_by_adr) >= self.max_adr_states:
+                                oldest = min(self.latest_management_by_adr,
+                                             key=lambda adr: self.latest_management_by_adr[adr]["timestamp"])
+                                del self.latest_management_by_adr[oldest]
+                            self.latest_management_by_adr[frame.adr] = value
                         if not self._first_0x92_logged:
                             LOG.info(
                                 "RS485 first valid 0x92: adr=%02X ccl=%.1fA dcl=%.1fA "

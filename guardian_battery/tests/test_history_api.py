@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from event_overlay import EventOverlayAdapter
 from history_api import HistoryApi
 from history_series import CellHistorySeries
+from rs485_evidence import Rs485HistorySeries
 from config_history import ConfigHistory
 from phase_engine import PhaseEngine
 from test_timeline import add, build
@@ -51,6 +52,30 @@ def test_series_without_maintenance_is_unchanged_and_has_no_markers(tmp_path):
     assert response.status == 200
     assert response.body["series"]["points"][0]["value"] == 64.0
     assert response.body["overlays"] == []
+
+
+def test_rs485_history_api_requires_adr_and_keeps_module_overlay_context(tmp_path):
+    maintenance, _, timeline = build(tmp_path)
+    cell_directory = tmp_path / "cell_history"
+    rs_directory = tmp_path / "rs485_history"
+    timestamp = datetime(2026, 8, 12, 10, 42, tzinfo=timezone.utc).timestamp()
+    write_sample(cell_directory, timestamp, module=3)
+    rs_directory.mkdir()
+    record = {"record_type": "frame", "timestamp": "2026-08-12T10:42:00+00:00",
+              "adr": 2, "identity_resolved": False,
+              "decoded": {"discharge_current_limit_a": -25.0}}
+    (rs_directory / "2026-08-12.jsonl").write_text(json.dumps(record) + "\n")
+    add(maintenance, occurred_at="2026-08-12T10:42:00Z", module_number=3)
+    api = HistoryApi(CellHistorySeries(cell_directory), EventOverlayAdapter(timeline),
+                     rs485_series=Rs485HistorySeries(rs_directory))
+    base = ("/api/history/series?metric=rs485_dcl&from=2026-08-12T00:00:00Z"
+            "&to=2026-08-13T00:00:00Z&module_number=3")
+    assert api.handle("GET", base).status == 400
+    response = api.handle("GET", base + "&adr=2")
+    assert response.status == 200
+    assert response.body["series"]["points"][0]["value"] == -25.0
+    assert response.body["series"]["adr"] == 2
+    assert len(response.body["overlays"]) == 1
 
 
 def test_cell_history_marker_matching_time_and_deep_link(tmp_path):

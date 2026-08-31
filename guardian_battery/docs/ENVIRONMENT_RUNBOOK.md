@@ -17,7 +17,9 @@ Stand: 2026-08-31
 - `rs485_sniffer_enabled` ist standardmäßig `false`. Direkt nach Installation wird ohne manuelle Aktivierung kein RS485-Port geöffnet.
 - Der RS485-Runtimepfad liest ausschließlich, besitzt keinen Protokoll-Schreibpfad und erzeugt keine 0x94-/0x95-Kommandos.
 - pyserial öffnet das POSIX-Gerät intern mit `O_RDWR`; Guardian setzt DTR und RTS vor `open()` auf `False`, aktiviert keinen RS485-Sendemodus und ruft keinen Schreibpfad auf.
-- Noch **nicht produktiv verifiziert** sind die parallele Sichtbarkeit beider Adapter im Guardian-Container, `by-id` innerhalb des Containers, Runtime-Reader, Reconnect und ein möglicher hardware-/treiberbedingter Pegelimpuls beim Öffnen.
+- **Real auf Home Assistant verifiziert:** Prolific-Console und Waveshare-RS485 sind im Guardian-Container parallel sichtbar; beide stabilen `by-id`-Pfade sind verfügbar. Die bestehende Console-Acquisition läuft weiter, während der passive Reader im Zustand `listening` gültige 0x42- und 0x92-Frames empfängt.
+- **Real auf Home Assistant verifiziert:** Eine beobachtete 0x92-Antwort für ADR `02` ergab CCL `0,0 A`, DCL `-25,0 A`, Charge Enable `false` und Discharge Enable `true`; sie stimmt mit dem unabhängigen Mac-Mitschnitt überein.
+- Noch **nicht produktiv verifiziert** sind der physische Waveshare-Disconnect/Reconnect und ein möglicher hardware-/treiberbedingter Pegelimpuls beim Öffnen.
 - 0.7.8 enthält keine RS485-Persistenz, MQTT-/HA-Projektion, UI-Integration oder Diagnosekopplung. `/share/guardian_battery` bleibt außerhalb dieses Release-Arbeitspakets.
 
 ## Aktueller verifizierter Release- und RC-Stand

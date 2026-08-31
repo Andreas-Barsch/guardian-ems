@@ -25,6 +25,7 @@ from timeline_ui import render_timeline_html
 from event_overlay import EventOverlayAdapter
 from history_api import HISTORY_API_ROUTE, HistoryApi
 from history_series import DEFAULT_CELL_HISTORY_DIR, CellHistorySeries
+from rs485_evidence import DEFAULT_RS485_HISTORY_DIR, Rs485HistorySeries
 from history_ui import render_history_html
 from guardian_header import render_guardian_header
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog,
@@ -46,6 +47,7 @@ _TIMELINE_API = None
 _HISTORY_API = None
 _POSITION_HISTORY_API = None
 _MAINTENANCE_LIVE_PUBLISHER = None
+_RS485_STATUS_PROVIDER = None
 _AUTOMATIC_POSITION_LOCK = threading.Lock()
 
 
@@ -55,6 +57,12 @@ def configure_maintenance_live_publisher(publisher):
     _MAINTENANCE_LIVE_PUBLISHER = publisher
     if _MAINTENANCE_API is not None:
         _MAINTENANCE_API.live_publisher = publisher
+
+
+def configure_rs485_status_provider(provider):
+    """Expose compact live RS485 observations to the ingress UI."""
+    global _RS485_STATUS_PROVIDER
+    _RS485_STATUS_PROVIDER = provider
 
 
 def _get_maintenance_api():
@@ -97,6 +105,7 @@ def _get_history_api():
                     CellHistorySeries(DEFAULT_CELL_HISTORY_DIR),
                     EventOverlayAdapter(timeline),
                     PhaseEngine(ConfigHistory(CONFIG_HISTORY_FILE), _read_options),
+                    Rs485HistorySeries(DEFAULT_RS485_HISTORY_DIR),
                 )
     return _HISTORY_API
 
@@ -378,6 +387,13 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_history_api():
             response=_get_history_api().handle('GET',self.path)
             self._send(response.status,response.body,headers=response.headers); return
+        if self.path.rstrip('/').endswith('/api/rs485/status'):
+            payload = (_RS485_STATUS_PROVIDER() if _RS485_STATUS_PROVIDER else
+                       {"status": {"state": "disabled"}, "management": {}, "history": {}})
+            # Raw protocol frames are intentionally never exposed through ingress.
+            management = {str(adr): {key: value for key, value in item.items()
+                          if key != "raw_frame"} for adr, item in payload.get("management", {}).items()}
+            self._send(200, {**payload, "management": management}); return
         if self._is_position_history_api():
             response=_get_position_history_api().handle('GET',self.path,dict(self.headers.items()))
             self._send(response.status,response.body,headers=response.headers); return

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from event_overlay import EventOverlayAdapter, OverlayContext
 from history_series import CellHistorySeries, SERIES_METRICS, SeriesHistoryError
+from rs485_evidence import RS485_SERIES_METRICS, Rs485HistorySeries
 from maintenance import MaintenanceValidationError, normalize_utc_timestamp
 from maintenance_api import ApiResponse, error_json
 from maintenance_service import MaintenanceHistoryError
@@ -22,7 +23,7 @@ HISTORY_API_ROUTE = "/api/history/series"
 HISTORY_FILTERS = frozenset(
     {"metric", "metrics", "from", "to", "module_number", "cell_number", "cell_numbers",
      "voltage_cell_numbers", "temperature_cell_numbers", "include_archived", "active",
-     "analysis_mode", "what_if_low_soc_percent", "what_if_high_soc_percent",
+     "analysis_mode", "adr", "what_if_low_soc_percent", "what_if_high_soc_percent",
      "what_if_charge_current_a", "what_if_discharge_current_a"}
 )
 
@@ -32,10 +33,12 @@ class HistoryApiProblem(ValueError):
 
 
 class HistoryApi:
-    def __init__(self, series: CellHistorySeries, overlays: EventOverlayAdapter, phase_engine=None):
+    def __init__(self, series: CellHistorySeries, overlays: EventOverlayAdapter, phase_engine=None,
+                 rs485_series: Rs485HistorySeries | None = None):
         self.series = series
         self.overlays = overlays
         self.phase_engine = phase_engine
+        self.rs485_series = rs485_series
 
     def handle(self, method: str, target: str) -> ApiResponse:
         try:
@@ -76,13 +79,17 @@ class HistoryApi:
             raise HistoryApiProblem("exactly one of metric or metrics is required")
         combined = "metrics" in values
         metrics = self._metrics(values.get("metrics")) if combined else (values["metric"],)
-        if any(metric not in SERIES_METRICS for metric in metrics):
+        supported_metrics = SERIES_METRICS | RS485_SERIES_METRICS
+        if any(metric not in supported_metrics for metric in metrics):
             raise HistoryApiProblem("metric is unsupported")
         timestamp_from = self._timestamp(values["from"], "from")
         timestamp_to = self._timestamp(values["to"], "to")
         if timestamp_from > timestamp_to:
             raise HistoryApiProblem("from must not exceed to")
         module_number = self._integer(values["module_number"], "module_number", 1, 6)
+        adr = self._integer(values.get("adr"), "adr", 0, 255)
+        if any(metric in RS485_SERIES_METRICS for metric in metrics) and adr is None:
+            raise HistoryApiProblem("adr is required for RS485 metrics")
         cell_number = self._integer(values.get("cell_number"), "cell_number", 1, 15)
         cell_numbers = self._integers(values.get("cell_numbers"), "cell_numbers", 1, 15)
         voltage_cells = self._integers(values.get("voltage_cell_numbers"),
@@ -113,9 +120,20 @@ class HistoryApi:
             requests.append({"metric": metric,
                              "cell_number": None if combined else cell_number,
                              "cell_numbers": selected if combined else cell_numbers})
+        cell_requests = [item for item in requests if item["metric"] not in RS485_SERIES_METRICS]
         bundle = self.series.query_bundles(
-            requests=requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+            requests=cell_requests or [{"metric": "soc", "cell_number": None, "cell_numbers": None}],
+            timestamp_from=timestamp_from, timestamp_to=timestamp_to,
             module_number=module_number)
+        projected_series = list(bundle["series"] if cell_requests else [])
+        if any(item["metric"] in RS485_SERIES_METRICS for item in requests):
+            if self.rs485_series is None:
+                raise HistoryApiProblem("RS485 history is unavailable")
+            rs485_requests = [item for item in requests if item["metric"] in RS485_SERIES_METRICS]
+            projected_series.extend(self.rs485_series.query_bundles(
+                rs485_requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to, adr=adr))
+        by_metric = {item["metric"]: item for item in projected_series}
+        projected_series = [by_metric[metric] for metric in metrics]
         marker_cells = (tuple(sorted(set((voltage_cells or ()) + (temperature_cells or ()))))
                         or (None,)) if combined else cell_numbers or (cell_number,)
         projected = [marker for selected_cell in marker_cells
@@ -180,10 +198,12 @@ class HistoryApi:
                                "raw_measurements_unchanged": True,
                                "diagnostic_phase_unchanged": True},
         }
+        response["series"] = ([{**item, "module_number": module_number} for item in projected_series]
+                              if combined else {**projected_series[0], "module_number": module_number})
         response["performance"] = {
             "raw_records": bundle["raw_records"],
-            "raw_points": sum(item["raw_points"] for item in bundle["series"]),
-            "display_points": sum(len(item["points"]) for item in bundle["series"]),
+            "raw_points": sum(item.get("raw_points", len(item["points"])) for item in projected_series),
+            "display_points": sum(len(item["points"]) for item in projected_series),
             "history_read_seconds": round(bundle["read_seconds"], 6),
             "downsample_seconds": round(bundle["downsample_seconds"], 6),
             "phase_projection_seconds": round(phase_seconds, 6), "cache_hit": bundle["cache_hit"],
@@ -199,7 +219,7 @@ class HistoryApi:
             raise HistoryApiProblem("metrics must contain comma-separated metric names")
         if len(set(parts)) != len(parts):
             raise HistoryApiProblem("metrics must be unique")
-        if any(metric not in SERIES_METRICS for metric in parts):
+        if any(metric not in SERIES_METRICS | RS485_SERIES_METRICS for metric in parts):
             raise HistoryApiProblem("metric is unsupported")
         return parts
 

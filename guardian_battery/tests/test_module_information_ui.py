@@ -15,6 +15,16 @@ def test_module_information_exposes_stack_centred_change_matrix():
     assert "maintenance?event_id=" in html
 
 
+def test_rs485_management_is_compact_adr_based_and_noncausal():
+    html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
+    assert "RS485 / BMS-Management" in html
+    assert "api/rs485/status" in html
+    assert "Identität nicht zugeordnet" in html
+    assert "keine bestätigte Ursache" in html
+    assert "CCL" in html and "DCL" in html
+    assert "STOP REQUEST" in html and "ENABLED" in html
+
+
 def test_current_assignment_and_history_use_physical_top_to_bottom_order():
     html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
     assert "for(let number=6;number>=1;number--)" in html

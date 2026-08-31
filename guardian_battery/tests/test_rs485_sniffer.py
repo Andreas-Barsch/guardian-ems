@@ -262,7 +262,9 @@ def test_runtime_integration_is_feature_flagged_and_not_diagnostic():
     app = Path(__file__).resolve().parents[1] / "app"
     main_source = (app / "main.py").read_text(encoding="utf-8")
     assert 'options.get("rs485_sniffer_enabled", False)' in main_source
-    assert "latest_management_by_adr" not in main_source
+    assert "rs485_mqtt.publish" in main_source
+    assert "cell_store.add(rs485" not in main_source
+    assert "analyse(rs485" not in main_source
     assert "publisher.publish" in main_source
 
 

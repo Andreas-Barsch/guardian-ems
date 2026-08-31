@@ -20,6 +20,7 @@ from diagnostic_backfill import DiagnosticAggregateBackfill
 from current_condition_backfill import CurrentConditionBackfill
 from config_history import ConfigHistory
 from config_ui import (configure_maintenance_live_publisher,
+                       configure_rs485_status_provider,
                        record_stable_observed_positions, start_config_server)
 from maintenance_mqtt import MaintenanceMqttPublisher
 from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
@@ -31,6 +32,8 @@ from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity
 from stack_soc import current_stack_soc
 from serial_devices import discover_serial_devices, resolve_console_port, resolve_rs485_port, ensure_distinct_roles
 from rs485_sniffer import PassiveRs485Reader
+from rs485_evidence import DEFAULT_RS485_HISTORY_DIR, Rs485EvidencePipeline, Rs485EvidenceWriter
+from rs485_mqtt import Rs485MqttProjection
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -206,7 +209,7 @@ def find_port(configured: str) -> str:
     return port
 
 
-def create_rs485_reader(options: dict, console_port: str):
+def create_rs485_reader(options: dict, console_port: str, frame_callback=None):
     if not bool(options.get("rs485_sniffer_enabled", False)):
         LOG.info("RS485 passive sniffer disabled")
         return None
@@ -225,9 +228,9 @@ def create_rs485_reader(options: dict, console_port: str):
         ensure_distinct_roles(console_port, selected)
         return selected
 
-    return PassiveRs485Reader(
-        resolve_port, int(options.get("rs485_sniffer_baudrate", 115200))
-    )
+    arguments = ([resolve_port, int(options.get("rs485_sniffer_baudrate", 115200))])
+    return (PassiveRs485Reader(*arguments, frame_callback=frame_callback)
+            if frame_callback is not None else PassiveRs485Reader(*arguments))
 
 
 class PylontechConsole:
@@ -1084,10 +1087,23 @@ def main() -> None:
         int(options["baudrate"]),
         float(options["command_timeout_seconds"]),
     )
-    rs485_reader = create_rs485_reader(options, port)
+    rs485_writer = None
+    rs485_pipeline = None
+    if bool(options.get("rs485_sniffer_enabled", False)):
+        rs485_writer = Rs485EvidenceWriter(DEFAULT_RS485_HISTORY_DIR)
+        rs485_pipeline = Rs485EvidencePipeline(rs485_writer)
+    rs485_reader = create_rs485_reader(options, port, rs485_pipeline)
     publisher = Mqtt(options)
+    rs485_mqtt = Rs485MqttProjection(
+        publisher, stale_seconds=int(options.get("rs485_sniffer_stale_seconds", 120)))
     publisher.discovery(int(options["module_count"]))
     configure_maintenance_live_publisher(publisher.maintenance_events)
+    configure_rs485_status_provider(
+        (lambda: {"status": {**rs485_reader.status(), "stale_seconds": int(
+                                  options.get("rs485_sniffer_stale_seconds", 120))},
+                  "management": rs485_reader.management(),
+                  "history": rs485_writer.status() if rs485_writer else {}})
+        if rs485_reader else None)
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
     try:
         current_backfill = CurrentConditionBackfill(
@@ -1135,6 +1151,7 @@ def main() -> None:
     module_infos: dict[int, dict] = {}
 
     if rs485_reader is not None:
+        rs485_writer.start()
         rs485_reader.start()
     try:
         while RUNNING:
@@ -1247,6 +1264,10 @@ def main() -> None:
                     modules, status, alarms, options, persistent, trends, incident,
                     cell_results, bms_stat, module_infos
                 )
+                if rs485_reader is not None:
+                    rs485_mqtt.publish(rs485_reader.status(),
+                                       rs485_reader.management(),
+                                       rs485_writer.status())
 
             except Exception as exc:
                 LOG.exception("Abfrage fehlgeschlagen: %s", exc)
@@ -1260,6 +1281,8 @@ def main() -> None:
     finally:
         if rs485_reader is not None:
             rs485_reader.stop()
+        if rs485_writer is not None:
+            rs485_writer.stop()
         console.close()
         publisher.close()
 

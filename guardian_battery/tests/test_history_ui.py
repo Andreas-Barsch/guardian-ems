@@ -74,6 +74,19 @@ def test_midnight_projection_does_not_change_measurement_phase_or_maintenance_da
     assert "localDayBoundaries(start,end)" in html
 
 
+def test_rs485_metrics_are_available_in_single_combined_and_boolean_step_views():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    for metric in ("rs485_ccl", "rs485_dcl", "rs485_charge_enable",
+                   "rs485_discharge_enable", "rs485_cvl", "rs485_dvl"):
+        assert metric in html
+    assert 'id="adr"' in html
+    assert "STOP REQUEST" in html and "ENABLED" in html
+    assert "applyBooleanSteps" in html and "MutationObserver" in html
+    assert "Object.assign(METRIC_LABELS,{rs485_ccl" in html
+    assert "byId('metric-options').replaceChildren();addMetrics()" in html
+    assert "renderDayBoundaries" in html and "for(const marker of data.overlays)" in html
+
+
 def test_empty_phase_wrench_and_cell_identification_are_explicit():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
     assert "Keine Messdaten in diesem Zeitfenster" in html
