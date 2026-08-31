@@ -1,5 +1,15 @@
 # Guardian Battery Changelog
 
+## 0.7.7 – HA collapsible cards and local day boundaries
+
+- Lädt die Guardian-Custom-Card in YAML-Lovelace-Konfigurationen über den wirksamen `resource_mode: yaml` und die cache-gebrochene Ressource `/local/guardian-collapsible-card.js?v=2`.
+- Erzeugt die Markdown-Child-Card lifecycle-sicher und idempotent, erhält unabhängige Open-States bei normalen `hass`-Updates und zeigt kontrollierte Lade- beziehungsweise Fehlerzustände. Die reale Home-Assistant-Abnahme dieses Collapsible-Card-Fixes ist PASS.
+- Markiert in mehrtägigen Guardian-Zeitverläufen jede innere lokale Tagesgrenze dezent bei 00:00 mit Datumslabel; Start und Ende werden nicht künstlich markiert und Sommer-/Winterzeit mit 23-/25-Stunden-Tagen wird berücksichtigt.
+- Tagesmarker gelten für Einzel- und Gemeinsam-Ansicht sowie alle Größen der gemeinsamen History-/Chart-Infrastruktur, ohne Messwerte, Phasenflächen, Maintenance-/Lifecycle-Marker, Tooltips oder Datenabfragen zu verändern.
+- Diagnostic Engine `0.4.12`, Diagnosealgorithmen, Evidence Diagnostics, Diagnosegrenzen, Maintenance Risk, SOC-Modulmedian und relative Endpoint-Semantik bleiben unverändert.
+- Nach regulärer Installation von 0.7.7 bleibt die reale HA-Abnahme der Mitternachtsmarker, Datumslabel, Markerüberlagerungen, mehrtägigen Einzel-/Gemeinsam-Ansichten und Smartphone-Darstellung offen.
+- Guardian/Add-on sind `0.7.7`; die Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.6 – HA UI fixes and diagnostic robustness
 
 - Ersetzt die in Home-Assistant-Markdown nicht zuverlässig interaktiven Diagnosebereiche durch eine HA-kompatible Custom Card; alle vier Bereiche je Zellansicht sind unabhängig und initial geschlossen.

@@ -1,5 +1,5 @@
 name: Guardian Battery
-version: 0.7.6
+version: 0.7.7
 slug: guardian_battery
 description: Pylontech-US2000C-Monitoring mit Health Engine, MQTT und Dashboard-Unterstützung.
 

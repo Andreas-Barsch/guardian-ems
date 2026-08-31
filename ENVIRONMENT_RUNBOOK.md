@@ -1,5 +1,27 @@
 # Guardian EMS -- Environment Runbook
 
+## Aktueller verifizierter Release- und RC-Stand (2026-08-31)
+
+- Vor dieser Release-Runde veröffentlichter Stand: Guardian Battery / Add-on
+  `0.7.6`, `main` auf
+  `c5c0ae63aaaf79929acd4b364a95b3708a415fc9`.
+- Diagnostic Engine: unverändert `0.4.12`.
+- Verifizierter 0.7.7-Release-Kandidat: Branch `guardian-0.7.7-rc1`,
+  funktionaler RC `349a172bc724fb165b308ab85b09be4a29f7c2d9`.
+- Git-/Source-Stand, installierte App, Home-Assistant-Deploymentdateien und
+  persistente Daten unter `/share/guardian_battery` sind getrennte Zustände.
+- YAML-definierte Lovelace-Ressourcen verwenden in dieser Installation
+  `lovelace.resource_mode: yaml`; ohne diesen wirksamen Modus wurde die unter
+  `lovelace.resources` eingetragene Custom Card real nicht automatisch geladen.
+- `/config/www/guardian-collapsible-card.js` wird über
+  `/local/guardian-collapsible-card.js` ausgeliefert; Cache-Busting für den RC
+  erfolgt mit `?v=2`.
+- Die reale HA-Abnahme der Collapsible Card ist PASS. Die reale Abnahme der
+  Mitternachtsmarker bleibt bis zur regulären Installation von 0.7.7 offen.
+- `guardian_battery/app/history_ui.py` ist Add-on-Code; Git-Änderungen allein
+  verändern den laufenden Container nicht. Der lokale `/addons`-Umweg bleibt
+  ausdrücklich ausgeschlossen.
+
 ## Guardian Battery 0.7.4 – Compact MQTT projection
 
 Guardian Battery und das Add-on tragen im Release die Version `0.7.4`. Die bestehende statuswirksame Vier-Phasen-Engine bleibt fachlich und versionstechnisch auf `0.4.12`.
@@ -609,7 +631,7 @@ Vor jeder weiteren Entwicklung mit Codex gilt:
 -   Guardian Home Andreas verwendet deshalb direkte Funktionskacheln ohne
     Portal-Zwischenstufe.
 
-## 18. Aktueller Arbeitsstand Guardian Battery 0.6.6
+## 18. Historischer Arbeitsstand Guardian Battery 0.6.6
 
 ### 18.1 Verifizierter Release-Stand
 

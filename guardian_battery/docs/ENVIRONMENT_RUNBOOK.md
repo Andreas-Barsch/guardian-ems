@@ -1,6 +1,36 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-08-19
+Stand: 2026-08-31
+
+## Aktueller verifizierter Release- und RC-Stand
+
+- Vor dieser Release-Runde veröffentlichter Stand: Guardian Battery / Add-on
+  `0.7.6`, `main` auf
+  `c5c0ae63aaaf79929acd4b364a95b3708a415fc9`.
+- Diagnostic Engine: unverändert `0.4.12`.
+- Verifizierter 0.7.7-Release-Kandidat: Branch `guardian-0.7.7-rc1`,
+  funktionaler RC `349a172bc724fb165b308ab85b09be4a29f7c2d9`.
+- Git-/Source-Stand, installierte App, Home-Assistant-Deploymentdateien und
+  persistente Daten unter `/share/guardian_battery` sind getrennte Zustände.
+
+### Bestätigte Home-Assistant-Resource- und Deploymentfakten für 0.7.7
+
+- YAML-definierte Lovelace-Ressourcen werden in dieser Installation mit
+  `lovelace.resource_mode: yaml` und dem einmaligen `resources`-Eintrag
+  `/local/guardian-collapsible-card.js?v=2` geladen.
+- Ein `lovelace.resources`-Eintrag ohne wirksamen YAML-Resource-Modus führte
+  real dazu, dass die Custom Card nicht automatisch registriert wurde.
+- `/config/www/guardian-collapsible-card.js` wird über
+  `/local/guardian-collapsible-card.js` ausgeliefert.
+- Die reale Home-Assistant-Abnahme der korrigierten Collapsible Card ist PASS:
+  automatische Registrierung, initial geschlossene unabhängige Bereiche,
+  Auf-/Zuklappen und Child-Inhalt funktionieren.
+- `guardian_battery/app/history_ui.py` ist Add-on-Code. Eine Änderung im
+  Git-Arbeitsbaum allein verändert den laufenden Add-on-Container nicht.
+- Der lokale `/addons`-Umweg bleibt ausgeschlossen. Installation und Abnahme
+  erfolgen ausschließlich über den regulären Repository-/App-Workflow.
+- Die reale HA-Abnahme der lokalen Mitternachtsmarker bleibt bis zur regulären
+  Installation von Guardian Battery 0.7.7 offen.
 
 ## Zweck
 
@@ -32,8 +62,8 @@ Dieses Dokument hält bestätigte Eigenschaften, Ausnahmen, Fehlversuche und Arb
 - App-Name: `Guardian Battery`
 - App-Slug: `guardian_battery`
 - Installierte App-ID: `3195b09a_guardian_battery`
-- Aktueller Feature-Release-Vorbereitungsstand: Guardian/Add-on `0.6.2`,
-  Diagnostic Engine unverändert `0.4.12`.
+- Historischer Feature-Release-Vorbereitungsstand dieses Abschnitts:
+  Guardian/Add-on `0.6.2`, Diagnostic Engine damals unverändert `0.4.12`.
 - Entwicklungscheckpoint vor der Release-Vorbereitung: `54ca42a`
   (`Add Home Assistant maintenance event integration`).
 - Auf dem HA-System real verifizierte vorherige Produktions- und
@@ -205,7 +235,7 @@ Weitere Regeln:
 - Historische Rohdaten werden durch Parameteränderungen nicht umgeschrieben.
 - Maintenance-Logbuch bleibt ein separater Bereich.
 
-## 10. Aktuelle 0.4.9-Defaults
+## 10. Historische 0.4.9-Defaults
 
 Bestätigte Defaults aus `config.yaml`:
 
