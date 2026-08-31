@@ -23,6 +23,9 @@ def test_rs485_management_is_compact_adr_based_and_noncausal():
     assert "keine bestätigte Ursache" in html
     assert "CCL" in html and "DCL" in html
     assert "STOP REQUEST" in html and "ENABLED" in html
+    assert "Aktualität:" in html and "AKTUELL" in html and "VERALTET" in html
+    assert "management_freshness_seconds||600" in html
+    assert "stale?'nicht verfügbar'" not in html
 
 
 def test_current_assignment_and_history_use_physical_top_to_bottom_order():

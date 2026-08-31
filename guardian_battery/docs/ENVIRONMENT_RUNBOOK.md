@@ -37,6 +37,12 @@ Stand: 2026-08-31
 - Der Source-Audit bestätigte die erwartete Verdrahtung: Writer und Pipeline werden bei aktiviertem Sniffer erzeugt, `writer.start()` läuft vor `reader.start()`, und die Verzeichniserzeugung erfolgt synchron. Die Ursache der realen Source-/Runtime-Abweichung ist nicht abschließend bestimmt.
 - 0.7.10 ergänzt ausschließlich Start-, First-Record- und Fehlerlogging, `last_error` sowie einen Integrationstest des Runtime-Lifecycles. Die Instrumentierung dient der eindeutigen realen Abnahme; sie bestätigt noch keine produktive Persistenzfunktion.
 
+### Reale 0x92-Pollkadenz und Freshness in 0.7.11
+
+- **Real auf Home Assistant verifiziert:** Hycube fragt 0x92 blockweise für die erreichbaren ADRs ab. Beobachtete Abstände zwischen solchen Blöcken waren variabel und lagen unter anderem bei ungefähr 286 und 333 Sekunden; daraus wird keine allgemeingültige Pollperiode abgeleitet.
+- Die frühere 120-Sekunden-Grenze war deshalb als Availability-Kriterium ungeeignet. Ab 0.7.11 ist der bestehende Optionswert `rs485_sniffer_stale_seconds` ausschließlich die Schwelle für `management_freshness=current|stale`; der konservative Default beträgt 600 Sekunden.
+- Management-Entities bleiben bei einem lebenden Reader im Zustand `listening` verfügbar und behalten den letzten gültigen Wert. `sample_age_seconds` und `management_freshness` machen dessen Aktualität transparent. Erst ein nicht verfügbarer Reader-/Buszustand setzt die Entity offline; ein noch nie beobachteter 0x92-Wert wird nicht erfunden.
+
 ## Aktueller verifizierter Release- und RC-Stand
 
 - Vor dieser Release-Runde veröffentlichter Stand: Guardian Battery / Add-on

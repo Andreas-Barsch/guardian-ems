@@ -6,7 +6,7 @@ import time
 
 
 class Rs485MqttProjection:
-    def __init__(self, mqtt_publisher, *, stale_seconds=120, wall_clock=time.time):
+    def __init__(self, mqtt_publisher, *, stale_seconds=600, wall_clock=time.time):
         self.mqtt = mqtt_publisher
         self.stale_seconds = int(stale_seconds)
         self.wall_clock = wall_clock
@@ -46,6 +46,7 @@ class Rs485MqttProjection:
                             "history_dropped_records": writer_status.get("dropped_records")})
         self.mqtt.attributes("rs485_status", compact)
         now = self.wall_clock()
+        communication_available = status.get("state") == "listening"
         definitions = (
             ("ccl", "RS485 Charge Current Limit", "charge_current_limit_a", "A", "current"),
             ("dcl", "RS485 Discharge Current Limit", "discharge_current_limit_a", "A", "current"),
@@ -59,13 +60,14 @@ class Rs485MqttProjection:
             ("last_update", "RS485 Last Update", "timestamp", None, "timestamp"),
         )
         for adr, values in sorted(latest.items()):
-            stale = now - float(values.get("timestamp", 0)) > self.stale_seconds
+            sample_age = max(0, now - float(values.get("timestamp", 0)))
+            freshness = "stale" if sample_age > self.stale_seconds else "current"
             for suffix, label, field, unit, device_class in definitions:
                 key = f"rs485_adr_{adr:02x}_{suffix}"
                 self._discovery(key, f"Guardian Battery ADR {adr:02X} {label}", unit, device_class)
                 self.mqtt._publish(f"{self.mqtt.prefix}/battery/{key}/availability",
-                                   "offline" if stale else "online", retain=True)
-                if not stale and field in values:
+                                   "online" if communication_available else "offline", retain=True)
+                if field in values:
                     value = values[field]
                     if isinstance(value, bool):
                         value = "ENABLED" if value else "STOP REQUEST"
@@ -74,6 +76,7 @@ class Rs485MqttProjection:
                     self.mqtt.state(key, value)
                     self.mqtt.attributes(key, {
                         "adr": f"{adr:02X}", "identity_resolved": False,
-                        "sample_age_seconds": round(max(0, now - values["timestamp"]), 1),
+                        "sample_age_seconds": round(sample_age, 1),
+                        "management_freshness": freshness,
                         "evidence_level": "observation", "causality": "not_determined",
                     })

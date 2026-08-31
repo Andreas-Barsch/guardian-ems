@@ -1,5 +1,12 @@
 # Guardian Battery Changelog
 
+## 0.7.11 – RS485 Management Freshness
+
+- Trennt den RS485-Reader-/Busstatus von der Aktualität der zuletzt gültig beobachteten 0x92-Managementwerte. Ein älterer Wert bleibt mit `management_freshness=stale` und `sample_age_seconds` erhalten und wird bei einem weiterhin `listening` meldenden Bus nicht allein wegen seines Alters `unavailable`.
+- Verwendet die bestehende konfigurierbare Freshness-Schwelle mit einem konservativen Default von 600 Sekunden. Sie klassifiziert ausschließlich `current`/`stale` und berücksichtigt die real beobachteten variablen 0x92-Blockabstände von mehr als 300 Sekunden.
+- Erhält CCL/DCL einschließlich Vorzeichen sowie Enable als letzten beobachteten Zustand `ENABLED`/`STOP REQUEST`; es entstehen keine Nullwerte, künstlichen History-Samples, Diagnose- oder Kausalitätsaussagen.
+- Guardian Battery und Add-on sind `0.7.11`; die Diagnostic Engine bleibt fachlich unverändert `0.4.12`.
+
 ## 0.7.10 – RS485 Evidence Runtime Instrumentation
 
 - Protokolliert den Start des RS485 Evidence Writers mit Zielpfad, den ersten erfolgreich persistierten Evidence Record ohne Raw Frame sowie Writerfehler mit Pfadkontext.

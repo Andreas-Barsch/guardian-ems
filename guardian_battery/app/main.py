@@ -1095,12 +1095,12 @@ def main() -> None:
     rs485_reader = create_rs485_reader(options, port, rs485_pipeline)
     publisher = Mqtt(options)
     rs485_mqtt = Rs485MqttProjection(
-        publisher, stale_seconds=int(options.get("rs485_sniffer_stale_seconds", 120)))
+        publisher, stale_seconds=int(options.get("rs485_sniffer_stale_seconds", 600)))
     publisher.discovery(int(options["module_count"]))
     configure_maintenance_live_publisher(publisher.maintenance_events)
     configure_rs485_status_provider(
-        (lambda: {"status": {**rs485_reader.status(), "stale_seconds": int(
-                                  options.get("rs485_sniffer_stale_seconds", 120))},
+        (lambda: {"status": {**rs485_reader.status(), "management_freshness_seconds": int(
+                                  options.get("rs485_sniffer_stale_seconds", 600))},
                   "management": rs485_reader.management(),
                   "history": rs485_writer.status() if rs485_writer else {}})
         if rs485_reader else None)

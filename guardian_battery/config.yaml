@@ -1,5 +1,5 @@
 name: Guardian Battery
-version: 0.7.10
+version: 0.7.11
 slug: guardian_battery
 description: Pylontech-US2000C-Monitoring mit Health Engine, MQTT und Dashboard-Unterstützung.
 
@@ -30,7 +30,7 @@ options:
   rs485_sniffer_enabled: false
   rs485_sniffer_port: auto
   rs485_sniffer_baudrate: 115200
-  rs485_sniffer_stale_seconds: 120
+  rs485_sniffer_stale_seconds: 600
   poll_interval_seconds: 10
   module_count: 6
   command: pwr
