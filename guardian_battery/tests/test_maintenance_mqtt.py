@@ -108,7 +108,7 @@ def test_live_api_create_publishes_exactly_once_with_compact_payload(tmp_path):
         "created_at": "2026-08-20T10:00:00+00:00",
         "affected_system": "Pylontech Stack", "revision": 1,
         "deep_link": f"maintenance?event_id={created['maintenance_event_id']}",
-        "guardian_version": "0.7.8", "module_number": 3, "cell_number": 7,
+        "guardian_version": "0.7.9", "module_number": 3, "cell_number": 7,
     }
 
 

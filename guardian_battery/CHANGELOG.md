@@ -1,5 +1,15 @@
 # Guardian Battery Changelog
 
+## 0.7.9 – RS485 Evidence Persistence & Projection
+
+- Persistiert passive RS485-Evidenz append-only in `rs485_history/YYYY-MM-DD.jsonl`: vollständige 0x92-Managementevidenz, 0x44 Raw Evidence und gedrosselte 0x42-Samples zur Cross-Validation. Eine begrenzte Writer-Queue mit Drop-Metrik schützt die Acquisition vor blockierendem I/O.
+- Erfasst deterministische RS485-Zustandsänderungen als Beobachtungen mit old/new, ADR, Frame-Provenienz und Data-Quality-Feldern. Daraus folgt ausdrücklich keine bestätigte Kausalität oder Diagnosewirkung.
+- Projiziert Busstatus sowie CCL, DCL, CVL, DVL, Charge/Discharge Enable und weitere Managementwerte kompakt über MQTT/Home Assistant. Das DCL-Vorzeichen bleibt erhalten; Enable wird als `STOP REQUEST` beziehungsweise `ENABLED` dargestellt.
+- Erweitert History API, Guardian-Zeitverlauf und die RS485-/BMS-Managementansicht um ADR-basierte Einzel-/Gemeinsam-Verläufe und eine zustandserhaltende Enable-Step-Darstellung. ADR wird nicht als Modulposition oder physische Identität interpretiert.
+- Guardian sendet weiterhin keine RS485-Kommandos. Cell Diagnostics, Evidence Diagnostics, Maintenance Risk, Status, Confidence und Phasenklassifikation bleiben isoliert; die Diagnostic Engine bleibt unverändert `0.4.12`.
+- Offen für die reale Home-Assistant-/Hardware-Abnahme bleiben Phase-C-Persistenz, MQTT-/History-/UI-Verhalten, physischer Disconnect/Reconnect, ein möglicher Open-Pegelimpuls, die reale Langzeitdatenmenge und ADR↔physische Identität. 0x44 bleibt Raw-only, soweit keine eindeutige Dekodierung belegt ist.
+- Guardian Battery und Add-on sind `0.7.9`.
+
 ## 0.7.8 – Passive RS485 Evidence Acquisition – Runtime Foundation
 
 - Trennt Pylontech Console und passiven RS485-Sniffer in sichere serielle Rollen. Waveshare `1A86:55D3` wird erkannt und von Console-auto ausgeschlossen; Mehrdeutigkeit schlägt kontrolliert fehl statt einen zufälligen Port zu wählen.

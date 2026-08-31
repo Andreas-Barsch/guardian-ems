@@ -22,6 +22,14 @@ Stand: 2026-08-31
 - Noch **nicht produktiv verifiziert** sind der physische Waveshare-Disconnect/Reconnect und ein möglicher hardware-/treiberbedingter Pegelimpuls beim Öffnen.
 - 0.7.8 enthält keine RS485-Persistenz, MQTT-/HA-Projektion, UI-Integration oder Diagnosekopplung. `/share/guardian_battery` bleibt außerhalb dieses Release-Arbeitspakets.
 
+## Guardian Battery 0.7.9 – RS485 Evidence Release
+
+- Release-Basis ist der geprüfte Phase-C-Checkpoint `54eecf3108c2864c8b93fb2bbfb862ea82b6959e` auf `guardian-0.7.8-rs485`. Guardian/Add-on werden auf `0.7.9` angehoben; die Diagnostic Engine bleibt `0.4.12`.
+- Der Source enthält append-only RS485-Evidenz, kompakte MQTT-/HA-Projektion, ADR-basierte History sowie Guardian-Zeitverlauf und Managementdarstellung. RS485 bleibt diagnoseisoliert und besitzt keinen aktiven Sendepfad.
+- Die oben dokumentierten realen Phase-B-Fakten bleiben gültig. Phase-C-Persistenz, MQTT-, History- und UI-Verhalten wurden noch nicht real auf Home Assistant abgenommen.
+- Weiterhin offen sind physischer Waveshare-Disconnect/Reconnect, ein möglicher Pegelimpuls beim Port-Open, reale Langzeitdatenmenge, ADR↔physische Identität und weitergehende eindeutige 0x44-Dekodierung.
+- Git-/Source-Release, installierte Add-on-Version und persistente Daten unter `/share/guardian_battery` bleiben strikt getrennte Zustände. Ein Deployment darf bestehende Runtime-Daten weder migrieren noch überschreiben.
+
 ## Aktueller verifizierter Release- und RC-Stand
 
 - Vor dieser Release-Runde veröffentlichter Stand: Guardian Battery / Add-on
