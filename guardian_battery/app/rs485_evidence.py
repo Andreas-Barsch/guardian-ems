@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import queue
 import threading
 import time
@@ -12,6 +13,7 @@ from pathlib import Path
 from rs485_sniffer import Correlation, ParsedFrame, decode_0x92
 
 
+LOG = logging.getLogger("guardian_battery.rs485_evidence")
 DEFAULT_RS485_HISTORY_DIR = Path("/share/guardian_battery/rs485_history")
 RS485_SCHEMA_VERSION = 1
 RS485_SERIES_METRICS = frozenset({
@@ -49,14 +51,21 @@ class Rs485EvidenceWriter:
         self.records_written = 0
         self.bytes_written = 0
         self.dropped_records = 0
+        self.last_error = None
+        self._first_record_logged = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
             return False
-        self.directory.mkdir(parents=True, exist_ok=True)
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            LOG.exception("RS485 evidence writer error: path=%s", self.directory)
+            raise
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="guardian-rs485-evidence", daemon=True)
         self._thread.start()
+        LOG.info("RS485 evidence writer started: path=%s", self.directory)
         return True
 
     def append(self, record: dict) -> bool:
@@ -70,7 +79,7 @@ class Rs485EvidenceWriter:
     def status(self):
         return {"queue_depth": self._queue.qsize(), "queue_capacity": self._queue.maxsize,
                 "records_written": self.records_written, "bytes_written": self.bytes_written,
-                "dropped_records": self.dropped_records}
+                "dropped_records": self.dropped_records, "last_error": self.last_error}
 
     def stop(self, timeout=5.0):
         self._stop.set()
@@ -92,6 +101,10 @@ class Rs485EvidenceWriter:
                     self.records_written += 1
                     self.bytes_written += len(line.encode("utf-8"))
                 handle.flush()
+                if records and not self._first_record_logged:
+                    LOG.info("RS485 evidence first record persisted: path=%s type=%s",
+                             path, records[0].get("record_type", "unknown"))
+                    self._first_record_logged = True
 
     def _run(self):
         batch = []
@@ -104,7 +117,12 @@ class Rs485EvidenceWriter:
                 pass
             if batch and (len(batch) >= self.batch_size or time.monotonic() >= deadline
                           or (self._stop.is_set() and self._queue.empty())):
-                self._write_batch(batch)
+                try:
+                    self._write_batch(batch)
+                except Exception as exc:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    LOG.exception("RS485 evidence writer error: path=%s", self.directory)
+                    break
                 batch.clear()
                 deadline = time.monotonic() + self.flush_interval_seconds
 

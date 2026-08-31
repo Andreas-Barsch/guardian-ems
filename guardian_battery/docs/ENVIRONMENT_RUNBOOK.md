@@ -30,6 +30,13 @@ Stand: 2026-08-31
 - Weiterhin offen sind physischer Waveshare-Disconnect/Reconnect, ein möglicher Pegelimpuls beim Port-Open, reale Langzeitdatenmenge, ADR↔physische Identität und weitergehende eindeutige 0x44-Dekodierung.
 - Git-/Source-Release, installierte Add-on-Version und persistente Daten unter `/share/guardian_battery` bleiben strikt getrennte Zustände. Ein Deployment darf bestehende Runtime-Daten weder migrieren noch überschreiben.
 
+### Reale 0.7.9-Abweichung und Instrumentierung in 0.7.10
+
+- **Real auf Home Assistant verifiziert:** Reader `listening`, gültige 0x42- und 0x92-Frames sowie korrekte Managementdekodierung; die bestehende Console lief parallel weiter.
+- **Real auf Home Assistant beobachtet:** Das erwartete Verzeichnis `rs485_history` war nach dem 0.7.9-Start unerwartet nicht vorhanden.
+- Der Source-Audit bestätigte die erwartete Verdrahtung: Writer und Pipeline werden bei aktiviertem Sniffer erzeugt, `writer.start()` läuft vor `reader.start()`, und die Verzeichniserzeugung erfolgt synchron. Die Ursache der realen Source-/Runtime-Abweichung ist nicht abschließend bestimmt.
+- 0.7.10 ergänzt ausschließlich Start-, First-Record- und Fehlerlogging, `last_error` sowie einen Integrationstest des Runtime-Lifecycles. Die Instrumentierung dient der eindeutigen realen Abnahme; sie bestätigt noch keine produktive Persistenzfunktion.
+
 ## Aktueller verifizierter Release- und RC-Stand
 
 - Vor dieser Release-Runde veröffentlichter Stand: Guardian Battery / Add-on

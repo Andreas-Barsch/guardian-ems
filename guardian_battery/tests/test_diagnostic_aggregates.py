@@ -27,7 +27,7 @@ def test_aggregates_survive_restart_with_versions_config_and_identity(tmp_path):
     discharge = [item for item in records if item["phase"] == "discharge" and item["cell"] == 1]
     assert len(discharge) == 3
     assert all(item["physical_module_serial"] == "SN-A" for item in discharge)
-    assert all(item["guardian_version"] == "0.7.9" for item in discharge)
+    assert all(item["guardian_version"] == "0.7.10" for item in discharge)
     assert all(item["diagnostic_engine_version"] == "0.4.12" for item in discharge)
     assert all(item["config_id"] == config_id(diagnostic_parameters(DEFAULTS)) for item in discharge)
     assert [item["median_deviation_mv"] for item in discharge] == [2, 5, 9]

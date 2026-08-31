@@ -1,4 +1,6 @@
+import ast
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -113,3 +115,56 @@ def test_writer_restart_appends_without_rewriting(tmp_path):
         writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
         writer.start(); writer.append(record); writer.stop()
     assert len(read_records(tmp_path / "2026-08-31.jsonl")) == 2
+
+
+def test_main_lifecycle_enabled_reader_persists_0x92_and_logs(tmp_path, caplog):
+    """Exercise the production main.py callback wiring, not only the writer."""
+    main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
+    source = main_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(main_path))
+    create_node = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                       and node.name == "create_rs485_reader")
+    request, response = pair()
+
+    class Device:
+        @staticmethod
+        def preferred_path(): return "/dev/serial/by-id/waveshare-test"
+
+    class FakeReader:
+        def __init__(self, _resolver, _baudrate, frame_callback=None):
+            self.frame_callback = frame_callback
+        def start(self):
+            self.frame_callback(request, Correlation(request, 0x92, False, 1.0))
+            self.frame_callback(response.frame, response)
+
+    namespace = {
+        "LOG": logging.getLogger("guardian-main-lifecycle-test"),
+        "PassiveRs485Reader": FakeReader,
+        "discover_serial_devices": lambda: (),
+        "resolve_rs485_port": lambda *_: Device(),
+        "ensure_distinct_roles": lambda *_: None,
+    }
+    exec(compile(ast.Module(body=[create_node], type_ignores=[]), str(main_path), "exec"), namespace)
+    history_dir = tmp_path / "rs485_history"
+    writer = Rs485EvidenceWriter(history_dir, batch_size=1, flush_interval_seconds=.01)
+    pipeline = Rs485EvidencePipeline(writer, wall_clock=lambda: 1_786_147_200.0)
+    reader = namespace["create_rs485_reader"]({
+        "rs485_sniffer_enabled": True, "rs485_sniffer_port": "auto",
+        "rs485_sniffer_baudrate": 115200,
+    }, "/dev/ttyUSB0", pipeline)
+
+    caplog.set_level(logging.INFO, logger="guardian_battery.rs485_evidence")
+    writer.start()
+    reader.start()
+    writer.stop()
+
+    path = history_dir / "2026-08-08.jsonl"
+    assert path.exists()
+    records = read_records(path)
+    assert any(item.get("paired_command") == 0x92 for item in records)
+    assert "rs485_pipeline = Rs485EvidencePipeline(rs485_writer)" in source
+    assert "create_rs485_reader(options, port, rs485_pipeline)" in source
+    assert source.index("rs485_writer.start()") < source.index("rs485_reader.start()")
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("RS485 evidence writer started" in message for message in messages)
+    assert any("RS485 evidence first record persisted" in message for message in messages)

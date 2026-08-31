@@ -1,5 +1,12 @@
 # Guardian Battery Changelog
 
+## 0.7.10 – RS485 Evidence Runtime Instrumentation
+
+- Protokolliert den Start des RS485 Evidence Writers mit Zielpfad, den ersten erfolgreich persistierten Evidence Record ohne Raw Frame sowie Writerfehler mit Pfadkontext.
+- Ergänzt `last_error` im Writerstatus und einen Integrationstest der tatsächlichen `main.py`-Verdrahtung von aktiviertem Reader, 0x92-Callback, Writerstart, automatischer Verzeichniserzeugung und append-only Tagesdatei.
+- Evidence-Store-Pfade, RS485-Decoder und Acquisition, MQTT, History, UI, Diagnosemethoden und Diagnostic Engine bleiben fachlich unverändert. Die Diagnostic Engine bleibt `0.4.12`.
+- Guardian Battery und Add-on sind `0.7.10`.
+
 ## 0.7.9 – RS485 Evidence Persistence & Projection
 
 - Persistiert passive RS485-Evidenz append-only in `rs485_history/YYYY-MM-DD.jsonl`: vollständige 0x92-Managementevidenz, 0x44 Raw Evidence und gedrosselte 0x42-Samples zur Cross-Validation. Eine begrenzte Writer-Queue mit Drop-Metrik schützt die Acquisition vor blockierendem I/O.
