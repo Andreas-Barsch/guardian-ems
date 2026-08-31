@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import glob
 import json
 import logging
 import os
@@ -30,6 +29,8 @@ from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
                               resolve_maintenance_event_identities, update_observed_stack)
 from stack_soc import current_stack_soc
+from serial_devices import discover_serial_devices, resolve_console_port, resolve_rs485_port, ensure_distinct_roles
+from rs485_sniffer import PassiveRs485Reader
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -196,18 +197,37 @@ def update_incident_state(status: str, alarms: list[dict], options: dict) -> dic
 
 
 def find_port(configured: str) -> str:
-    if configured and configured.lower() != "auto":
-        return configured
+    device = resolve_console_port(configured, discover_serial_devices())
+    port = device.preferred_path()
+    source = ("explicit" if configured and configured.lower() != "auto"
+              else "prolific_identity" if device.is_prolific()
+              else "single_non_waveshare_uart")
+    LOG.info("Console serial resolved: port=%s identity_source=%s", port, source)
+    return port
 
-    candidates = sorted(glob.glob("/dev/serial/by-id/*"))
-    if candidates:
-        return candidates[0]
 
-    candidates = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
-    if candidates:
-        return candidates[0]
+def create_rs485_reader(options: dict, console_port: str):
+    if not bool(options.get("rs485_sniffer_enabled", False)):
+        LOG.info("RS485 passive sniffer disabled")
+        return None
 
-    raise RuntimeError("Kein serieller Adapter gefunden.")
+    LOG.info(
+        "RS485 passive sniffer enabled: port_config=%s baud=%s",
+        options.get("rs485_sniffer_port", "auto"),
+        int(options.get("rs485_sniffer_baudrate", 115200)),
+    )
+
+    def resolve_port() -> str:
+        device = resolve_rs485_port(
+            str(options.get("rs485_sniffer_port", "auto")), discover_serial_devices()
+        )
+        selected = device.preferred_path()
+        ensure_distinct_roles(console_port, selected)
+        return selected
+
+    return PassiveRs485Reader(
+        resolve_port, int(options.get("rs485_sniffer_baudrate", 115200))
+    )
 
 
 class PylontechConsole:
@@ -1064,6 +1084,7 @@ def main() -> None:
         int(options["baudrate"]),
         float(options["command_timeout_seconds"]),
     )
+    rs485_reader = create_rs485_reader(options, port)
     publisher = Mqtt(options)
     publisher.discovery(int(options["module_count"]))
     configure_maintenance_live_publisher(publisher.maintenance_events)
@@ -1113,6 +1134,8 @@ def main() -> None:
     bms_stat = {}
     module_infos: dict[int, dict] = {}
 
+    if rs485_reader is not None:
+        rs485_reader.start()
     try:
         while RUNNING:
             started = time.monotonic()
@@ -1235,6 +1258,8 @@ def main() -> None:
             elapsed = time.monotonic() - started
             time.sleep(max(1, int(options["poll_interval_seconds"]) - elapsed))
     finally:
+        if rs485_reader is not None:
+            rs485_reader.stop()
         console.close()
         publisher.close()
 

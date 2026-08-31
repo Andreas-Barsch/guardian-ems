@@ -27,6 +27,9 @@ map:
 options:
   serial_port: auto
   baudrate: 115200
+  rs485_sniffer_enabled: false
+  rs485_sniffer_port: auto
+  rs485_sniffer_baudrate: 115200
   poll_interval_seconds: 10
   module_count: 6
   command: pwr
@@ -116,6 +119,9 @@ options:
 schema:
   serial_port: str
   baudrate: int
+  rs485_sniffer_enabled: bool
+  rs485_sniffer_port: str
+  rs485_sniffer_baudrate: int(1200,1000000)
   poll_interval_seconds: int(5,3600)
   module_count: int(1,6)
   command: str
