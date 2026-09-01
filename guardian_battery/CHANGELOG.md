@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.16 – RS485 Management Timestamp Contract Hotfix
+
+- Korrigiert den RS485-Management-Timestamp-Vertrag: `management[ADR]["timestamp"]` bleibt ausschließlich der direkte numerische Zeitpunkt des 0x92-Samples und wird nicht mehr durch den `datetime` des Identity Resolvers überschrieben.
+- Behebt dadurch den real beobachteten MQTT-/Freshness-Fehler `float() argument must be a string or a real number, not 'datetime.datetime'` sowie den JSON-Fehler `Object of type datetime is not JSON serializable` in `/api/rs485/status`.
+- Ersetzt den pauschalen Management-/Resolver-Dict-Merge durch eine explizite Identity-Feldprojektion. Resolver-Timestamp und Resolver-Quality gelangen nicht in das Management-DTO; direkte ADR, 0x92-Quality und Messwert-Provenienz bleiben erhalten.
+- Entfernt Rawframes ausschließlich aus dem MQTT-/API-Management-DTO. Reader und Evidence Writer bleiben unverändert und behalten die Raw Evidence.
+- RS485-Decodierung, Entity-IDs, Topics, Discovery, Availability und Diagnosemethodik bleiben unverändert. RS485 bleibt passiv; die Diagnostic Engine bleibt `0.4.12`.
+- Guardian Battery und Add-on sind `0.7.16`.
+
 ## 0.7.15 – Position History Integrity + Diagnostic Topology UI
 
 - Schützt die Position History vor partiellen Startup- und Poll-Zuständen: Erst ein vollständig erfolgreicher, gesunder Poll darf History-Kandidaten bestätigen. Poll-Exceptions und Reconnects bestätigen keine Änderung und setzen Guard beziehungsweise Kandidaten kontrolliert zurück.

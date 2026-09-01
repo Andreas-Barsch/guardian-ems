@@ -2,6 +2,28 @@
 
 Stand: 2026-08-31
 
+## Guardian Battery 0.7.16 – RS485 Management Timestamp Contract Hotfix
+
+### Realer Fehler in 0.7.15
+
+- Die passive RS485-Acquisition und der Evidence Writer liefen weiter; produktiv wuchs die RS485 Evidence auf rund 31 MB beziehungsweise etwa 28.990 Records.
+- `project_current_management()` überschrieb jedoch den direkten numerischen 0x92-Sample-Zeitstempel beim pauschalen Dict-Merge mit dem aktuellen `datetime` des Identity Resolvers. Die MQTT-Freshness scheiterte dadurch an `float(datetime)`, und `/api/rs485/status` konnte denselben Management-Payload nicht als JSON serialisieren.
+- Als Folge konnten RS485-/BMS-Managementzeilen leer bleiben und der Poll-Zyklus vor der nachgelagerten Position-History-Confirmation abbrechen, obwohl Reader und Evidence-Erfassung weiter funktionierten.
+
+### Vertrag ab 0.7.16
+
+- `management[ADR]["timestamp"]` ist der direkte numerische 0x92-Sample-Zeitpunkt (`int` oder `float`). Identity Resolution darf diesen Messwert-Zeitpunkt nicht überschreiben.
+- Identity-Felder werden explizit projiziert. Resolver-Timestamp und Resolver-Quality werden nicht in das Management-DTO übernommen; ADR und 0x92-Frame-/Decoder-Quality bleiben direkte Management-Provenienz.
+- Das MQTT-/API-Management-DTO enthält weder `datetime` noch Rawbytes und ist vollständig JSON-serialisierbar. Rawframes bleiben unverändert im Reader-/Evidence-Layer.
+- MQTT-IDs, Topics, Discovery, Availability, RS485-Decodierung und Passivität bleiben unverändert. Diagnosemethodik und Diagnostic Engine bleiben `0.4.12`.
+
+### Nach Installation von 0.7.16 noch real abzunehmen
+
+- RS485-Status bleibt `listening` und die Managementzeilen sind wieder sichtbar.
+- Modul-/Seriennummerauflösung, DCL/CCL, Enable-Zustände, CVL/DVL, Freshness und Last Update werden korrekt projiziert.
+- Es treten weder `float(datetime)` noch ein datetime-bezogener JSON-Serialisierungsfehler auf.
+- Nach einem vollständig erfolgreichen Poll wird die Position-History-Confirmation weiterhin erreicht; die Integritätsregeln aus 0.7.15 bleiben wirksam.
+
 ## Guardian Battery 0.7.15 – Position History Integrity + Diagnostic Topology UI
 
 ### Reale Ursache des fehlerhaften Snapshots vom 01.09.2026 um 18:29
