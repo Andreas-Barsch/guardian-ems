@@ -183,6 +183,45 @@ def test_six_module_ninety_cell_worst_case_all_mqtt_packets_are_bounded_and_reta
     assert discovery and all(call["retain"] for call in discovery)
 
 
+def test_live_topology_projects_four_of_five_and_invalidates_retained_live_values():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"
+    publisher.client = client
+    publisher.discovery_enabled = True
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    publisher.discovery(5)
+    topology = {
+        position: {"position": position, "expected": position <= 5,
+                   "status": "present" if position <= 4 else
+                             "absent" if position == 5 else "not_expected"}
+        for position in range(1, 7)
+    }
+    publisher.publish(
+        modules()[:4], "critical", [{"message": "Modul 5 liefert keine Daten"}],
+        DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"}, {}, {}, {}, topology)
+
+    states = {call["topic"]: call["payload"] for call in client.calls}
+    assert states["guardian/battery/sensor/modules_present/state"] == "4 / 5"
+    assert states["guardian/battery/sensor/stack_status_reason/state"] == \
+        "Modul 5 liefert keine Daten"
+    assert states["guardian/battery/module_5/availability"] == "offline"
+    assert states["guardian/battery/module_6/availability"] == "offline"
+    assert states["guardian/battery/sensor/module_5_presence/state"] == "absent"
+    assert states["guardian/battery/sensor/module_6_presence/state"] == "not_expected"
+    configs = [json.loads(call["payload"]) for call in client.calls
+               if call["topic"].endswith("/config")]
+    module_five_soc = next(item for item in configs
+                           if item["unique_id"] == "guardian_battery_module_5_soc")
+    assert module_five_soc["availability_topic"] == "guardian/battery/module_5/availability"
+    module_five_info = next(item for item in configs
+                            if item["unique_id"] == "guardian_battery_module_5_info")
+    assert module_five_info["availability_topic"] == "guardian/battery/availability"
+    assert len({item["unique_id"] for item in configs}) == len(configs)
+    assert not any(call["payload"] is None for call in client.calls)
+
+
 def test_hard_payload_guards_fail_before_client_publish():
     publisher = Mqtt.__new__(Mqtt)
     publisher.prefix = "guardian"

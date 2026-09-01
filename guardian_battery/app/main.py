@@ -28,13 +28,14 @@ from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_text)
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
-                              missing_expected_positions,
+                              current_presence, missing_expected_positions,
                               resolve_maintenance_event_identities, update_observed_stack,
                               update_rs485_observations)
 from stack_soc import current_stack_soc
 from serial_devices import discover_serial_devices, resolve_console_port, resolve_rs485_port, ensure_distinct_roles
 from rs485_sniffer import PassiveRs485Reader
-from rs485_evidence import DEFAULT_RS485_HISTORY_DIR, Rs485EvidencePipeline, Rs485EvidenceWriter
+from rs485_evidence import (DEFAULT_RS485_HISTORY_DIR, Rs485EvidencePipeline,
+                            Rs485EvidenceWriter, restore_latest_identities)
 from rs485_mqtt import Rs485MqttProjection
 from rs485_identity import project_current_management, resolve_rs485_identity
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
@@ -643,6 +644,7 @@ class Mqtt:
             ("stack_status", "Guardian Batteriestatus", None, None, "mdi:shield-battery"),
             ("stack_health_score", "Guardian Health Score", "%", None, "mdi:heart-pulse"),
             ("stack_recommendation", "Guardian Empfehlung", None, None, "mdi:lightbulb-alert"),
+            ("stack_status_reason", "Guardian Statusursache", None, None, "mdi:alert-circle-check"),
             ("critical_module", "Guardian auffälligstes Modul", None, None, "mdi:battery-alert"),
             ("modules_present", "Guardian erkannte Module", None, None, "mdi:battery-multiple"),
             ("active_alarms", "Guardian aktive Batteriealarme", None, None, "mdi:alert-circle"),
@@ -656,8 +658,11 @@ class Mqtt:
             ("stack_soc_median", "Guardian SOC-Modulmedian", "%", "battery", "mdi:chart-bell-curve"),
         ]
 
-        for module in range(1, module_count + 1):
+        # All six inventory positions retain their technical entity IDs. Current
+        # topology is expressed through presence and per-position availability.
+        for module in range(1, 7):
             sensors.extend([
+                (f"module_{module}_presence", f"Modul {module} Topologiestatus", None, None, "mdi:battery-check"),
                 (f"module_{module}_info", f"Modul {module} BMS-Info", None, None, "mdi:information-outline"),
                 (f"module_{module}_health_score", f"Modul {module} Health Score", "%", None, "mdi:heart-pulse"),
                 (f"module_{module}_health", f"Modul {module} Gesundheit", None, None, "mdi:shield-check"),
@@ -713,11 +718,17 @@ class Mqtt:
                 ])
 
         for object_id, name, unit, device_class, icon in sensors:
+            match = re.match(r"module_([1-6])_", object_id)
+            is_presence_or_inventory = (object_id.endswith("_presence")
+                                        or object_id.endswith("_info"))
+            availability_topic = f"{self.prefix}/battery/availability"
+            if match and not is_presence_or_inventory:
+                availability_topic = f"{self.prefix}/battery/module_{match.group(1)}/availability"
             payload = {
                 "name": name,
                 "unique_id": f"guardian_battery_{object_id}",
                 "state_topic": f"{self.prefix}/battery/sensor/{object_id}/state",
-                "availability_topic": f"{self.prefix}/battery/availability",
+                "availability_topic": availability_topic,
                 "device": device,
                 "icon": icon,
                 "json_attributes_topic": f"{self.prefix}/battery/sensor/{object_id}/attributes",
@@ -789,12 +800,19 @@ class Mqtt:
         cell_results: dict[int, dict] | None = None,
         bms_stat: dict | None = None,
         module_infos: dict[int, dict] | None = None,
+        live_topology: dict[int, dict] | None = None,
     ) -> None:
         soc_peers = current_stack_soc(modules)
         median_soc = soc_peers["median"] if soc_peers["median"] is not None else 0
         cell_results = cell_results or {}
         bms_stat = bms_stat or {}
         module_infos = module_infos or {}
+        live_topology = live_topology or {
+            position: {"position": position, "expected": position <= int(options["module_count"]),
+                       "status": "present" if position in {item.module for item in modules}
+                       else "not_expected" if position > int(options["module_count"]) else "unknown"}
+            for position in range(1, 7)
+        }
         assessments = {}
 
         for module in modules:
@@ -804,13 +822,24 @@ class Mqtt:
         stack_score = round(statistics.mean([a["score"] for a in assessments.values()])) if assessments else 0
         critical_module = min(assessments, key=lambda n: assessments[n]["score"]) if assessments else "-"
         critical_assessment = assessments.get(critical_module, {})
-        stack_recommendation = critical_assessment.get("recommendation", "Keine Maßnahme erforderlich.")
+        diagnostic_recommendation = critical_assessment.get("recommendation", "Keine Maßnahme erforderlich.")
+        primary_alarm = alarms[0]["message"] if alarms else None
+        stack_recommendation = primary_alarm or diagnostic_recommendation
+        status_reason = primary_alarm or "Kein aktiver System-/Verfügbarkeitsalarm"
+        present_expected = sum(
+            1 for value in live_topology.values()
+            if value.get("expected")
+            and value.get("status", value.get("presence_status")) == "present")
+        expected_count = sum(1 for value in live_topology.values() if value.get("expected"))
 
         self.state("stack_status", status)
         self.state("stack_health_score", stack_score)
         self.state("stack_recommendation", stack_recommendation)
-        self.state("critical_module", f"Modul {critical_module}" if critical_module != "-" else "-")
-        self.state("modules_present", len(modules))
+        self.state("stack_status_reason", status_reason)
+        self.state("critical_module", f"Diagnostischer Hinweis: Modul {critical_module}" if critical_module != "-" else "-")
+        self.state("modules_present", f"{present_expected} / {expected_count}")
+        self.attributes("modules_present", {"present_expected": present_expected,
+                                             "expected_module_count": expected_count})
         self.state("active_alarms", len(alarms))
         self.state("last_alarm", alarms[0]["message"] if alarms else "kein Alarm")
         self.state("last_update", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
@@ -875,15 +904,31 @@ class Mqtt:
             "health_score": stack_score,
             "critical_module": critical_module,
             "recommendation": stack_recommendation,
+            "status_reason": status_reason,
             "incident": incident,
             "alarms": alarms,
             "modules": payload_modules,
             "cell_diagnostics": compact_battery_diagnostics(cell_results, module_infos),
             "bms_stat": bms_stat,
             "module_info": module_infos,
+            "live_topology": live_topology,
         }
         self._publish(f"{self.prefix}/battery/state", json.dumps(payload, ensure_ascii=False), retain=True)
         self._publish(f"{self.prefix}/battery/alarms", json.dumps(alarms, ensure_ascii=False), retain=True)
+
+        for position, topology in sorted(live_topology.items()):
+            presence_status = topology.get("status", topology.get("presence_status", "unknown"))
+            self._publish(f"{self.prefix}/battery/module_{position}/availability",
+                          "online" if presence_status == "present" else "offline", retain=True)
+            self.state(f"module_{position}_presence", presence_status)
+            self.attributes(f"module_{position}_presence", {
+                "position": position, "expected": bool(topology.get("expected")),
+                "physical_serial": topology.get("physical_serial"),
+                "currently_observed_serial": topology.get(
+                    "observed_serial", topology.get("currently_observed_serial")),
+                "last_seen": topology.get("last_observed_at", topology.get("last_seen")),
+                "source": topology.get("sources", topology.get("source", [])),
+            })
 
         for module in modules:
             assessment = assessments[module.module]
@@ -1154,8 +1199,11 @@ def main() -> None:
     last_info_poll = 0.0
     bms_stat = {}
     module_infos: dict[int, dict] = {}
+    identity_resolution_log: dict[int, tuple[str, int | None]] = {}
 
     if rs485_reader is not None:
+        restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
+        rs485_reader.restore_identities(restored_identities)
         rs485_writer.start()
         rs485_reader.start()
     try:
@@ -1216,11 +1264,21 @@ def main() -> None:
                     for adr, identity in rs485_reader.identities().items():
                         resolved = resolve_rs485_identity(
                             int(adr), identity["serial_string"], identity["serial_raw"],
-                            datetime.fromtimestamp(identity["timestamp"], timezone.utc),
+                            datetime.fromtimestamp(now_wall, timezone.utc),
                             decode_source=identity.get("decode_source", "stored_decoded"),
                             position_history_path=DEFAULT_POSITION_HISTORY_FILE,
                         )
-                        if resolved.get("identity_resolved"):
+                        log_key = (identity["serial_string"], resolved.get("position"))
+                        if identity_resolution_log.get(int(adr)) != log_key:
+                            if resolved.get("identity_resolved"):
+                                LOG.info("RS485 identity resolved: adr=%02X serial=%s position=%s",
+                                         int(adr), identity["serial_string"], resolved["position"])
+                            else:
+                                LOG.warning("RS485 identity unresolved: adr=%02X serial=%s reason=no_current_position",
+                                            int(adr), identity["serial_string"])
+                            identity_resolution_log[int(adr)] = log_key
+                        if (resolved.get("identity_resolved")
+                                and identity.get("identity_currently_confirmed") is True):
                             resolved_identities[int(adr)] = {**identity, **resolved}
                     update_rs485_observations(resolved_identities, observed_at=now_wall)
                 try:
@@ -1283,7 +1341,8 @@ def main() -> None:
                     }
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
-                    cell_results, bms_stat, module_infos
+                    cell_results, bms_stat, module_infos,
+                    current_presence(expected_module_count=int(options["module_count"])),
                 )
                 if rs485_reader is not None:
                     rs485_management = project_current_management(

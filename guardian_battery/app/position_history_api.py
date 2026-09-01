@@ -7,7 +7,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from maintenance_api import ApiResponse, error_json
 from position_history import (PositionHistoryConflictError, PositionHistoryError,
-                              PositionHistoryValidationError, current_presence)
+                              PositionHistoryValidationError, current_presence,
+                              project_live_topology)
 
 POSITION_HISTORY_API_ROUTE = "/api/position-history"
 
@@ -51,6 +52,8 @@ class PositionHistoryApi:
             module_count = (int(self.module_count_provider())
                             if self.module_count_provider else None)
             presence = current_presence(expected_module_count=module_count)
+            live_topology = project_live_topology(
+                self.service.last_documented_serials(), expected_module_count=module_count)
             observed = {str(position): value["observed_serial"]
                         for position, value in presence.items()
                         if value["status"] == "present"}
@@ -58,6 +61,7 @@ class PositionHistoryApi:
                                      "documented": self.service.last_documented_serials(),
                                      "observed": observed,
                                      "presence": {str(k): v for k, v in presence.items()},
+                                     "live_topology": {str(k): v for k, v in live_topology.items()},
                                      "expected_module_count": sum(
                                          1 for value in presence.values() if value["expected"]),
                                      "divergence": self.service.divergence(observed)})

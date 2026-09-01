@@ -29,6 +29,7 @@ def resolve_rs485_identity(adr: int, serial_string: str, serial_raw: str,
     return {
         "adr": int(adr), "serial_string": serial_string, "serial_raw": serial_raw,
         "timestamp": timestamp, "decode_source": decode_source,
+        "identity_source": decode_source,
         "identity_resolved": position is not None,
         "physical_serial": serial_string,
         "position": position,
@@ -54,10 +55,15 @@ def project_current_management(management: dict[int, dict], identities: dict[int
                 int(adr), identity["serial_string"], identity["serial_raw"], target,
                 decode_source=identity.get("decode_source", "stored_decoded"),
                 position_history_path=position_history_path)
+            resolved["identity_known"] = bool(identity.get("identity_known", True))
+            resolved["identity_currently_confirmed"] = bool(
+                identity.get("identity_currently_confirmed", False))
         else:
             resolved = {
                 "adr": int(adr), "serial_string": None, "serial_raw": None,
                 "decode_source": None, "identity_resolved": False,
+                "identity_source": None, "identity_known": False,
+                "identity_currently_confirmed": False,
                 "physical_serial": None, "position": None,
                 "position_history_id": None,
                 "quality": {"evidence_level": "observation",

@@ -53,6 +53,9 @@ def test_unknown_serial_and_missing_position_remain_unresolved(tmp_path):
         position_history_path=positions, at="2026-08-31T12:00:00+00:00")
     assert result[6]["serial_string"] == "UNKNOWN" and not result[6]["identity_resolved"]
     assert result[7]["serial_string"] is None and not result[7]["identity_resolved"]
+    assert result[6]["identity_known"] is True
+    assert result[6]["identity_currently_confirmed"] is False
+    assert result[7]["identity_known"] is False
 
 
 def write_record(directory, timestamp, adr, command, decoded, info_raw=""):

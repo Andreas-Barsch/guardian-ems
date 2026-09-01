@@ -4,7 +4,8 @@ from unittest.mock import patch
 import position_history
 from position_history import (current_presence, stable_observed_changes,
                               missing_expected_positions,
-                              update_observed_stack, update_rs485_observations)
+                              project_live_topology, update_observed_stack,
+                              update_rs485_observations)
 
 
 @pytest.fixture(autouse=True)
@@ -118,3 +119,22 @@ def test_position_above_configured_topology_is_not_expected():
     presence = current_presence(now=100, expected_module_count=5)
     assert presence[6]["status"] == "not_expected"
     assert presence[6]["expected"] is False
+
+
+def test_real_five_position_live_projection_keeps_inventory_identity():
+    infos = {position: {"barcode": f"SN-{position}"} for position in range(1, 7)}
+    update_observed_stack(infos, present_positions=set(range(1, 6)),
+                          expected_module_count=5, observed_at=0)
+    for timestamp in (100, 115, 131):
+        update_observed_stack(infos, present_positions=set(range(1, 5)),
+                              expected_module_count=5, observed_at=timestamp)
+    documented = {str(position): f"SN-{position}" for position in range(1, 7)}
+    topology = project_live_topology(
+        documented, now=131, expected_module_count=5)
+    assert [topology[position]["presence_status"] for position in range(1, 7)] == [
+        "present", "present", "present", "present", "absent", "not_expected"]
+    assert sum(1 for value in topology.values()
+               if value["expected"] and value["presence_status"] == "present") == 4
+    assert topology[5]["physical_serial"] == "SN-5"
+    assert topology[6]["physical_serial"] == "SN-6"
+    assert topology[6]["expected"] is False

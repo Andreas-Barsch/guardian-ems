@@ -495,6 +495,28 @@ def test_runtime_0x93_identity_state_is_direct_and_bounded():
     assert identities[6]["serial_string"] == "Y225004C32250226"
     assert identities[6]["adr"] == 6
     assert "position" not in identities[6]
+    assert identities[6]["identity_currently_confirmed"] is True
+    status = reader.status()
+    assert status["requests_0x93"] == 3
+    assert status["responses_0x93"] == status["matched_0x93"] == 3
+    assert status["decoded_valid_0x93"] == 3
+    assert status["decode_errors_0x93"] == 0
+    assert status["identity_state_entries"] == 2
+
+
+def test_restored_identity_becomes_current_and_live_change_wins():
+    reader = PassiveRs485Reader(lambda: "unused")
+    reader.restore_identities({2: {"serial_string": "H221005E22212581",
+                                   "serial_raw": b"H221005E22212581".hex(),
+                                   "timestamp": 1, "decode_source": "historical_raw_redecode"}})
+    assert reader.identities()[2]["identity_currently_confirmed"] is False
+    reader._process(synthetic_frame(adr=2, cid2_or_rtn=0x93, info=b"\x02"))
+    reader._process(synthetic_frame(adr=2, cid2_or_rtn=0,
+                                    info=b"\x02H221005E22212536"))
+    identity = reader.identities()[2]
+    assert identity["serial_string"] == "H221005E22212536"
+    assert identity["decode_source"] == "live_0x93"
+    assert identity["identity_currently_confirmed"] is True
 
 
 def test_reader_handles_fragmented_and_multiple_frames():

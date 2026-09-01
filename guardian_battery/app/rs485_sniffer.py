@@ -468,12 +468,17 @@ class PassiveRs485Reader:
             "valid_frames": 0, "checksum_errors": 0, "frame_errors": 0,
             "requests_0x92": 0, "responses_0x92": 0, "unmatched_responses": 0,
             "requests_0x44": 0, "responses_0x44": 0,
+            "requests_0x93": 0, "responses_0x93": 0,
+            "matched_0x93": 0, "decoded_valid_0x93": 0,
+            "decode_errors_0x93": 0,
             "last_error": None,
         }
 
     def status(self) -> dict:
         with self._lock:
-            return {**self._status, "latest_management_adrs": sorted(self.latest_management_by_adr)}
+            return {**self._status,
+                    "latest_management_adrs": sorted(self.latest_management_by_adr),
+                    "identity_state_entries": len(self.latest_identity_by_adr)}
 
     def management(self) -> dict[int, dict]:
         with self._lock:
@@ -482,6 +487,23 @@ class PassiveRs485Reader:
     def identities(self) -> dict[int, dict]:
         with self._lock:
             return {adr: dict(value) for adr, value in self.latest_identity_by_adr.items()}
+
+    def restore_identities(self, identities: dict[int, dict]) -> int:
+        """Seed bounded known identity without claiming a live confirmation."""
+        restored = 0
+        with self._lock:
+            for adr, identity in sorted(identities.items(),
+                                        key=lambda item: str(item[1].get("timestamp", "")),
+                                        reverse=True):
+                if len(self.latest_identity_by_adr) >= self.max_adr_states:
+                    break
+                value = {**identity, "adr": int(adr), "identity_known": True,
+                         "identity_currently_confirmed": False}
+                self.latest_identity_by_adr[int(adr)] = value
+                restored += 1
+                LOG.info("RS485 identity restored: adr=%02X serial=%s source=%s",
+                         int(adr), value.get("serial_string"), value.get("decode_source"))
+        return restored
 
     def _set(self, **values) -> None:
         with self._lock:
@@ -537,6 +559,8 @@ class PassiveRs485Reader:
                 self._set(requests_0x92=self.status()["requests_0x92"] + 1)
             elif frame.is_request and frame.command == 0x44:
                 self._set(requests_0x44=self.status()["requests_0x44"] + 1)
+            elif frame.is_request and frame.command == 0x93:
+                self._set(requests_0x93=self.status()["requests_0x93"] + 1)
             elif not frame.is_request:
                 if not correlation.request_matched:
                     self._set(unmatched_responses=self.status()["unmatched_responses"] + 1)
@@ -565,23 +589,39 @@ class PassiveRs485Reader:
                 elif correlation.paired_command == 0x44:
                     self._set(responses_0x44=self.status()["responses_0x44"] + 1)
                 elif correlation.paired_command == 0x93:
+                    current_status = self.status()
+                    self._set(responses_0x93=current_status["responses_0x93"] + 1,
+                              matched_0x93=current_status["matched_0x93"] + 1)
                     decoded = decode_0x93(correlation)
                     if decoded.get("decoder_supported"):
+                        self._set(decoded_valid_0x93=self.status()["decoded_valid_0x93"] + 1)
                         value = {
                             "adr": frame.adr, "serial_string": decoded["serial_string"],
                             "serial_raw": decoded["serial_raw"], "timestamp": now,
-                            "decode_source": "stored_decoded",
+                            "decode_source": "live_0x93", "identity_known": True,
+                            "identity_currently_confirmed": True,
                             "quality": {"evidence_level": "observation",
                                         "identity_source": "direct_0x93",
                                         "causality": "not_determined"},
                         }
                         with self._lock:
+                            previous = self.latest_identity_by_adr.get(frame.adr)
                             if frame.adr not in self.latest_identity_by_adr \
                                     and len(self.latest_identity_by_adr) >= self.max_adr_states:
                                 oldest = min(self.latest_identity_by_adr,
                                              key=lambda adr: self.latest_identity_by_adr[adr]["timestamp"])
                                 del self.latest_identity_by_adr[oldest]
                             self.latest_identity_by_adr[frame.adr] = value
+                        if previous is None or previous.get("serial_string") != value["serial_string"]:
+                            if previous is None:
+                                LOG.info("RS485 identity observed: adr=%02X serial=%s",
+                                         frame.adr, value["serial_string"])
+                            else:
+                                LOG.warning("RS485 identity changed: adr=%02X old_serial=%s new_serial=%s",
+                                            frame.adr, previous.get("serial_string"),
+                                            value["serial_string"])
+                    else:
+                        self._set(decode_errors_0x93=self.status()["decode_errors_0x93"] + 1)
             if self.frame_callback:
                 self.frame_callback(frame, correlation)
 

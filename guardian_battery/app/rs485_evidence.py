@@ -34,10 +34,73 @@ _METRIC_FIELDS = {
 _CHANGE_FIELDS = tuple(dict.fromkeys(_METRIC_FIELDS.values())) + (
     "charge_immediately_1", "charge_immediately_2", "full_charge_request",
 )
+IDENTITY_RESTORE_MAX_FILES = 31
+IDENTITY_RESTORE_MAX_RECORDS = 100_000
 
 
 def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def decode_identity_record(record: dict) -> dict | None:
+    """Decode one valid stored 0x93 response with today's central decoder."""
+    if not (record.get("record_type") == "frame"
+            and record.get("direction") == "response"
+            and record.get("paired_command") == 0x93
+            and record.get("checksum_valid") is True
+            and record.get("frame_complete") is True
+            and record.get("request_matched") is True):
+        return None
+    try:
+        adr = int(record["adr"])
+        decoded = decode_0x93_info(adr, bytes.fromhex(record["info_raw"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not decoded.get("decoder_supported"):
+        return None
+    stored = record.get("decoded")
+    source = ("last_confirmed_0x93" if record.get("decoder_supported") is True
+              and isinstance(stored, dict) else "historical_raw_redecode")
+    return {
+        "adr": adr, "serial_string": decoded["serial_string"],
+        "serial_raw": decoded["serial_raw"], "timestamp": record.get("timestamp"),
+        "decode_source": source, "identity_known": True,
+        "identity_currently_confirmed": False,
+    }
+
+
+def restore_latest_identities(directory=DEFAULT_RS485_HISTORY_DIR, *, max_entries=256,
+                              max_files=IDENTITY_RESTORE_MAX_FILES,
+                              max_records=IDENTITY_RESTORE_MAX_RECORDS) -> dict[int, dict]:
+    """Boundedly restore the newest valid 0x93 identity per ADR, read-only."""
+    directory = Path(directory)
+    result: dict[int, dict] = {}
+    records_seen = 0
+    paths = sorted(directory.glob("*.jsonl"), reverse=True)[:int(max_files)]
+    for path in paths:
+        newest_in_file: dict[int, dict] = {}
+        limit_reached = False
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    records_seen += 1
+                    if records_seen > int(max_records):
+                        limit_reached = True
+                        break
+                    try:
+                        identity = decode_identity_record(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                    if identity is not None:
+                        newest_in_file[identity["adr"]] = identity
+        except OSError:
+            continue
+        for adr, identity in newest_in_file.items():
+            if adr not in result and len(result) < int(max_entries):
+                result[adr] = identity
+        if limit_reached or len(result) >= int(max_entries):
+            break
+    return result
 
 
 class Rs485EvidenceWriter:
@@ -240,23 +303,12 @@ class Rs485HistorySeries:
 
     @staticmethod
     def _serial_decode(record):
-        if not (record.get("record_type") == "frame"
-                and record.get("direction") == "response"
-                and record.get("paired_command") == 0x93
-                and record.get("checksum_valid") is True
-                and record.get("frame_complete") is True
-                and record.get("request_matched") is True):
+        identity = decode_identity_record(record)
+        if identity is None:
             return None
-        try:
-            decoded = decode_0x93_info(int(record["adr"]), bytes.fromhex(record["info_raw"]))
-        except (KeyError, TypeError, ValueError):
-            return None
-        if not decoded.get("decoder_supported"):
-            return None
-        stored = record.get("decoded")
-        source = ("stored_decoded" if record.get("decoder_supported") is True
-                  and isinstance(stored, dict) else "historical_raw_redecode")
-        return {**decoded, "decode_source": source}
+        source = ("stored_decoded" if identity["decode_source"] == "last_confirmed_0x93"
+                  else identity["decode_source"])
+        return {**identity, "decode_source": source}
 
     @staticmethod
     def _position_at(snapshots, serial, timestamp):

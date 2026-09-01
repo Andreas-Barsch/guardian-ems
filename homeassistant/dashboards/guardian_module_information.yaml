@@ -9,6 +9,21 @@ views:
   - type: grid
     column_span: 3
     cards:
+    - type: entities
+      title: Aktuelle Topologie (Inventarstatus)
+      entities:
+      - entity: sensor.guardian_battery_modul_1_topologiestatus
+        name: Modul 1
+      - entity: sensor.guardian_battery_modul_2_topologiestatus
+        name: Modul 2
+      - entity: sensor.guardian_battery_modul_3_topologiestatus
+        name: Modul 3
+      - entity: sensor.guardian_battery_modul_4_topologiestatus
+        name: Modul 4
+      - entity: sensor.guardian_battery_modul_5_topologiestatus
+        name: Modul 5
+      - entity: sensor.guardian_battery_modul_6_topologiestatus
+        name: Modul 6
     - type: markdown
       title: Modul 1
       content: "{% set e = 'sensor.guardian_battery_modul_1_bms_info' %}\n**Modell:** {{ state_attr(e, 'device_name') or '–' }}  \n**Hersteller:** {{ state_attr(e, 'manufacturer') or '–' }}  \n**Board:** {{ state_attr(e, 'board_version') or '–' }}  \n**Software:** {{ state_attr(e, 'main_soft_version') or '–' }}  \n**Kommunikation:** {{ state_attr(e, 'comm_version') or '–' }}  \n**Release:** {{ state_attr(e, 'release_date') or '–' }}  \n**Spezifikation:** {{ state_attr(e, 'specification') or '–' }}  \n**Barcode:** {{ state_attr(e, 'barcode') or '–' }}  \n**Zellen:** {{ state_attr(e, 'cell_number') or '–' }}"

@@ -28,9 +28,15 @@ def test_rs485_management_is_module_and_serial_based_and_noncausal():
     assert "STOP REQUEST" in html and "ENABLED" in html
     assert "Aktualität:" in html and "AKTUELL" in html and "VERALTET" in html
     assert "management_freshness_seconds||600" in html
+    assert "Identität aus Evidence wiederhergestellt" in html
     assert "stale?'nicht verfügbar'" not in html
     assert "item.discharge_current_limit_a" in html
     assert "enabled(item.discharge_enable)" in html
+
+
+def test_position_history_headers_include_local_time():
+    html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
+    assert "hour:'2-digit'" in html and "minute:'2-digit'" in html
 
 
 def test_current_assignment_and_history_use_physical_top_to_bottom_order():

@@ -40,7 +40,9 @@ class Rs485MqttProjection:
         self.mqtt.state("rs485_status", status.get("state", "unavailable"))
         compact = {key: status.get(key) for key in (
             "resolved_port", "baudrate", "last_valid_frame_at", "last_0x92_at",
-            "frames_total", "valid_frames", "checksum_errors", "frame_errors", "last_error")}
+            "frames_total", "valid_frames", "checksum_errors", "frame_errors", "last_error",
+            "requests_0x93", "responses_0x93", "matched_0x93", "decoded_valid_0x93",
+            "decode_errors_0x93", "identity_state_entries")}
         if writer_status:
             compact.update({"history_queue_depth": writer_status.get("queue_depth"),
                             "history_dropped_records": writer_status.get("dropped_records")})
@@ -82,6 +84,10 @@ class Rs485MqttProjection:
                         "identity_resolved": bool(values.get("identity_resolved")),
                         "module_position": values.get("position"),
                         "physical_serial": values.get("physical_serial"),
+                        "identity_known": bool(values.get("identity_known")),
+                        "identity_currently_confirmed": bool(
+                            values.get("identity_currently_confirmed")),
+                        "identity_source": values.get("identity_source"),
                         "sample_age_seconds": round(sample_age, 1),
                         "management_freshness": freshness,
                         "evidence_level": "observation", "causality": "not_determined",

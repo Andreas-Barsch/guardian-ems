@@ -6,7 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from rs485_evidence import Rs485EvidencePipeline, Rs485EvidenceWriter, Rs485HistorySeries
+from rs485_evidence import (Rs485EvidencePipeline, Rs485EvidenceWriter,
+                            Rs485HistorySeries, restore_latest_identities)
 from rs485_sniffer import (Correlation, ResponseCorrelator, calculate_checksum,
                            calculate_lchksum, parse_frame)
 
@@ -136,6 +137,42 @@ def test_writer_restart_appends_without_rewriting(tmp_path):
         writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
         writer.start(); writer.append(record); writer.stop()
     assert len(read_records(tmp_path / "2026-08-31.jsonl")) == 2
+
+
+def test_startup_restore_redecodes_latest_valid_identity_read_only(tmp_path):
+    path = tmp_path / "2026-08-31.jsonl"
+    record = {"record_type": "frame", "timestamp": "2026-08-31T20:24:42+00:00",
+              "adr": 2, "direction": "response", "paired_command": 0x93,
+              "checksum_valid": True, "frame_complete": True, "request_matched": True,
+              "info_raw": "0248323231303035453232323132353831",
+              "decoder_supported": False, "decoded": None}
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+    restored = restore_latest_identities(tmp_path)
+    assert restored[2]["serial_string"] == "H221005E22212581"
+    assert restored[2]["decode_source"] == "historical_raw_redecode"
+    assert restored[2]["identity_known"] is True
+    assert restored[2]["identity_currently_confirmed"] is False
+    assert path.read_bytes() == before
+
+
+def test_startup_restore_rejects_invalid_records_and_uses_newest_day(tmp_path):
+    base = {"record_type": "frame", "direction": "response", "paired_command": 0x93,
+            "checksum_valid": True, "frame_complete": True, "request_matched": True,
+            "decoder_supported": True, "decoded": {"serial_string": "stored"}}
+    old = {**base, "timestamp": "2026-08-30T10:00:00+00:00", "adr": 2,
+           "info_raw": "02" + b"H221005E22212581".hex()}
+    new = {**base, "timestamp": "2026-08-31T10:00:00+00:00", "adr": 2,
+           "info_raw": "02" + b"H221005E22212536".hex()}
+    invalid = {**base, "timestamp": "2026-08-31T11:00:00+00:00", "adr": 3,
+               "checksum_valid": False, "info_raw": "03" + b"H221005E22212571".hex()}
+    (tmp_path / "2026-08-30.jsonl").write_text(json.dumps(old) + "\n")
+    (tmp_path / "2026-08-31.jsonl").write_text(
+        json.dumps(new) + "\n" + json.dumps(invalid) + "\n")
+    restored = restore_latest_identities(tmp_path)
+    assert restored[2]["serial_string"] == "H221005E22212536"
+    assert restored[2]["decode_source"] == "last_confirmed_0x93"
+    assert 3 not in restored
 
 
 def test_main_lifecycle_enabled_reader_persists_0x92_and_logs(tmp_path, caplog):

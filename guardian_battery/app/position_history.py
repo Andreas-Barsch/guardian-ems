@@ -435,6 +435,23 @@ def current_presence(*, now: float | None = None,
     return result
 
 
+def project_live_topology(documented: Mapping[str, str | None] | None = None, **kwargs) -> dict[int, dict[str, Any]]:
+    """Combine documentary identity with the single current-presence truth."""
+    serials = documented or {}
+    return {
+        position: {
+            "position": position,
+            "expected": value["expected"],
+            "presence_status": value["status"],
+            "physical_serial": serials.get(str(position)),
+            "currently_observed_serial": value["observed_serial"],
+            "last_seen": value["last_observed_at"],
+            "source": value["sources"],
+        }
+        for position, value in current_presence(**kwargs).items()
+    }
+
+
 def stable_observed_changes(documented: Mapping[str, str | None] | None) -> dict[int, str | None]:
     """Return only confirmed additions, replacements, and removals."""
     expected = documented or {str(position): None for position in STACK_POSITIONS}
