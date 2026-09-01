@@ -2,6 +2,29 @@
 
 Stand: 2026-08-31
 
+## Guardian Battery 0.7.14 – Runtime Identity / Discovery Hotfix
+
+### Reale Befunde vor dem Fix am 01.09.2026
+
+- Die Hycube-App meldete sechs physisch eingebaute Module, während Guardian mit `module_count=5` nur die Sollpositionen verarbeitete. Der Source-Audit bestätigte, dass `parse_pwr()` alle Modulnummern oberhalb von `module_count` verwarf. Damit war M6 von Console-Folgeabfragen, Presence, Zellwerten und nachgelagerten Projektionen ausgeschlossen.
+- Zusätzlich trat real `TypeError: float() argument must be a string or a real number, not 'datetime.datetime'` auf. `resolve_rs485_identity()` lieferte den Zeitpunkt der Positionsauflösung als `datetime`; beim Merge überschrieb dieser Wert den numerischen direkten 0x93-Frame-Timestamp. Der Fehler trat nach PWR-Auswertung, Stat-/Info-Verarbeitung und Console-Presence auf und brach den späteren Identity-/History-/Diagnose-/MQTT-Teil des Poll-Zyklus ab. Der Source belegt nicht, dass dauerhaft nur Modul 1 abgefragt wurde.
+- Die Seite „Aktuelle Zuordnung“ zeigte für Position 1–5 passende dokumentierte und beobachtete Seriennummern, gleichzeitig aber vier Abweichungen. Die Tabelle verwendete `last_documented_serials()`, der Banner dagegen den jüngsten vollständigen Snapshot `current().positions`; dadurch konnten Position 1–4 sichtbar übereinstimmen und intern dennoch als abweichend zählen.
+
+### Semantik und Sicherheitsgrenzen ab 0.7.14
+
+- Discovery/Acquisition verarbeitet alle vom Console-`pwr` tatsächlich gemeldeten Module. `module_count` bleibt ausschließlich Solltopologie und Missing-Grenze. Bei Soll=5 und physisch sechs Modulen sind M1–M5 `expected=true, present`, M6 ist `expected=false, present` und wird als „vorhanden, aber nicht erwartet“ dargestellt.
+- M6 bleibt für Console-, Zell-, RS485-Identitäts-, MQTT- und History-Daten verfügbar, erzeugt aber keinen Missing-Alarm. Home projiziert primär `5 / 5` und kennzeichnet ein zusätzlich erkanntes Modul separat.
+- Direkte numerische 0x93-Zeitstempel bleiben beim Identity-Merge erhalten. Numerische, ISO- und `datetime`-Werte werden kontrolliert normalisiert; ein fehlerhafter Identitätseintrag wird isoliert und beendet nicht den gesamten Poll-Zyklus.
+- Tabelle und Abweichungsbanner vergleichen dieselbe zuletzt dokumentierte Seriennummernprojektion. Nicht beobachtete Module werden über Presence/Availability beschrieben und nicht allein deshalb als Identitätsabweichung gezählt.
+- Ein stabil bestätigter Wiedereinbau kann nach den bestehenden konservativen Regeln genau einen vollständigen Positionssnapshot erzeugen; `expected=false` bleibt davon unabhängig, solange `module_count=5` gilt. Es werden keine historischen Ereignisse manuell erzeugt.
+- Diagnosemethodik und Diagnostic Engine bleiben `0.4.12`. Der RS485-Pfad bleibt ohne Schreib-, Sende- oder Pollinglogik.
+
+### Nach Installation von 0.7.14 noch real abzunehmen
+
+- Guardian erkennt und verarbeitet alle sechs Module; Home zeigt `5 / 5` plus ein zusätzliches Modul; M6 erscheint present/not expected, bleibt messbar und erzeugt keinen Missing-Alarm.
+- RS485-Management ist nach vollständigem Poll-Zyklus verfügbar, ein stabiler Wiedereinbau erzeugt genau einen passenden Position-History-Snapshot und der Abweichungsbanner stimmt mit der sichtbaren Zuordnungstabelle überein.
+- Weiter offen bleiben der physische Waveshare-Disconnect/Reconnect und ein möglicher hardware- oder treiberbedingter Open-Pegelimpuls. Source-Release, installierte Add-on-Version, produktive `/config`-Dateien und Browserzustand bleiben getrennte Zustände.
+
 ## Guardian Battery 0.7.13 – Unified Live Topology & RS485 Identity Restore
 
 - Ausgangspunkt der realen Abnahme war 0.7.12. Die zentrale Presence-Projektion „Aktuelle Zuordnung“ stellte die erwartete Topologie bereits korrekt dar; andere Live-Projektionen verwendeten teilweise noch abweichende Nenner-, Availability- und Diagnose-Semantik.

@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.14 – Runtime Identity / Discovery Hotfix
+
+- Behebt den Runtime-Fehler, bei dem ein Resolver-`datetime` den numerischen direkten `0x93`-Frame-Timestamp überschrieb und `update_rs485_observations()` anschließend an `float(timestamp)` scheiterte. Numerische, ISO- und `datetime`-Zeitstempel werden kontrolliert verarbeitet; ungültige Identitäten bleiben pro Eintrag isoliert und beenden nicht den gesamten Poll-Zyklus.
+- Trennt Discovery/Acquisition von der Solltopologie: `parse_pwr()` erfasst alle tatsächlich gemeldeten Module; `module_count` begrenzt nur erwartete Positionen und Missing-Alarme. Console-, Zell-, Identitäts- und History-Daten zusätzlicher Module werden nicht verworfen.
+- Stellt bei Soll=5 und sechs physisch beobachteten Modulen M1–M5 als `expected=true, present` und M6 als `expected=false, present` beziehungsweise „vorhanden, aber nicht erwartet“ dar. Home meldet `5 / 5 (+1 nicht erwartet)` statt eines missverständlichen `6 / 5`; M6 bleibt verfügbar und erzeugt keinen Missing-Alarm.
+- Vereinheitlicht den Dokumentationsvergleich von sichtbarer Tabelle und Abweichungsbanner auf `last_documented_serials()`. Nichtbeobachtung bleibt eine Presence-/Availability-Frage und wird nicht automatisch als Identitätsabweichung gezählt.
+- Eine stabil bestätigte Reintegration eines zusätzlichen Moduls kann weiterhin genau einen vollständigen Position-History-Snapshot erzeugen, unabhängig davon, ob seine Position zur Solltopologie gehört.
+- Diagnoseberechnung und Diagnostic Engine bleiben unverändert `0.4.12`; RS485 bleibt vollständig passiv.
+- Real abzunehmen bleiben sechs von Guardian erkannte Module, Home `5 / 5` plus Zusatzhinweis, M6 present/not expected ohne Missing, RS485-Management, der Reintegration-Snapshot und ein konsistenter Abweichungsbanner.
+- Guardian Battery und Add-on sind `0.7.14`.
+
 ## 0.7.13 – Unified Live Topology & RS485 Identity Restore
 
 - Vereinheitlicht aktuelle Projektionen auf der zentralen Solltopologie und Presence mit den getrennten Zuständen `present`, `stale`, `absent`, `unknown` und `not_expected`. `module_count` bestimmt den Nenner und die alarmwirksamen Positionen; historisch bekannte höhere Positionen bleiben ausschließlich Inventar und Historie.
