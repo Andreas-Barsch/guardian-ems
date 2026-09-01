@@ -286,16 +286,22 @@ class PositionHistoryService:
             result.append({"serial": serial, "intervals": intervals})
         return result
 
-    def divergence(self, observed: Mapping[int | str, str | None]) -> list[dict[str, Any]]:
-        current = self.current()
-        documented = current.positions if current else {str(item): None for item in STACK_POSITIONS}
+    def divergence(self, observed: Mapping[int | str, str | None], *,
+                   documented: Mapping[int | str, str | None] | None = None
+                   ) -> list[dict[str, Any]]:
+        if documented is None:
+            current = self.current()
+            comparison = (current.positions if current else
+                          {str(item): None for item in STACK_POSITIONS})
+        else:
+            comparison = documented
         result = []
         for position in STACK_POSITIONS:
             if position not in observed and str(position) not in observed:
                 continue
             actual = observed.get(position, observed.get(str(position)))
             actual = actual.strip() if isinstance(actual, str) and actual.strip() else None
-            expected = documented[str(position)]
+            expected = comparison.get(str(position), comparison.get(position))
             if actual != expected:
                 result.append({"module_number": position, "documented_serial": expected, "observed_serial": actual})
         return result
@@ -371,20 +377,30 @@ def update_rs485_observations(observations: Mapping[int, Mapping[str, Any]], *,
     for value in observations.values():
         position = value.get("position")
         serial = value.get("serial_string")
-        timestamp = value.get("timestamp", now)
         if position not in STACK_POSITIONS or not isinstance(serial, str) or not serial:
+            continue
+        try:
+            timestamp_value = value.get("timestamp", now)
+            if isinstance(timestamp_value, datetime):
+                timestamp = timestamp_value.timestamp()
+            elif isinstance(timestamp_value, str):
+                timestamp = datetime.fromisoformat(
+                    timestamp_value.replace("Z", "+00:00")).timestamp()
+            else:
+                timestamp = float(timestamp_value)
+        except (TypeError, ValueError, OverflowError):
             continue
         sources = _PRESENCE_SOURCES.setdefault(int(position), {})
         previous = sources.get("rs485_0x93")
         sample_is_new = (previous is None
-                         or float(timestamp) > float(previous["timestamp"])
+                         or timestamp > float(previous["timestamp"])
                          or serial != previous["identity"])
-        if previous is not None and float(timestamp) < float(previous["timestamp"]):
+        if previous is not None and timestamp < float(previous["timestamp"]):
             continue
         sources["rs485_0x93"] = {
-            "identity": serial, "timestamp": float(timestamp), "source": "rs485_0x93"
+            "identity": serial, "timestamp": timestamp, "source": "rs485_0x93"
         }
-        if now - float(timestamp) <= PRESENCE_FRESHNESS_SECONDS:
+        if now - timestamp <= PRESENCE_FRESHNESS_SECONDS:
             _MISSING_CANDIDATES.pop(int(position), None)
             if not sample_is_new:
                 continue

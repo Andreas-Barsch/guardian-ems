@@ -130,7 +130,8 @@ def test_current_api_keeps_historical_position_six_outside_expected_topology(
     monkeypatch.setattr(position_history, "_OBSERVED_STACK",
                         {1: "A", 2: "B", 3: "C", 4: "D", 5: None})
     monkeypatch.setattr(position_history, "_PRESENCE_SOURCES", {
-        position: {"console": {"identity": serial, "timestamp": 100,
+        position: {"console": {"identity": serial,
+                                "timestamp": position_history.time.time(),
                                 "source": "console"}}
         for position, serial in ((1, "A"), (2, "B"), (3, "C"), (4, "D"))
     })
@@ -144,6 +145,38 @@ def test_current_api_keeps_historical_position_six_outside_expected_topology(
     assert response.body["snapshot"]["positions"]["6"] is None
     assert response.body["documented"]["5"] == "E"
     assert response.body["documented"]["6"] == "HISTORICAL"
+
+
+def test_current_banner_compares_same_documented_mapping_as_visible_table(
+        tmp_path, monkeypatch):
+    import position_history
+    event, service = env(tmp_path)
+    first = service.record(
+        effective_at="2026-08-19T10:00:00Z",
+        maintenance_event_id=event.maintenance_event_id,
+        positions=state(**{"1": "A", "2": "B", "3": "C", "4": "D",
+                           "5": "E", "6": "F"}),
+        expected_latest_snapshot_id=None)
+    service.record(
+        effective_at="2026-08-19T11:00:00Z",
+        maintenance_event_id=event.maintenance_event_id,
+        positions=state(**{"5": "E"}),
+        expected_latest_snapshot_id=first.position_history_id)
+    monkeypatch.setattr(position_history, "_PRESENCE_SOURCES", {
+        position: {"console": {"identity": serial,
+                                "timestamp": position_history.time.time(),
+                                "source": "console"}}
+        for position, serial in ((1, "A"), (2, "B"), (3, "C"),
+                                 (4, "D"), (5, "E"))
+    })
+    monkeypatch.setattr(position_history, "_COMMUNICATION_HEALTHY", True)
+    response = PositionHistoryApi(service, module_count_provider=lambda: 5).handle(
+        "GET", "/api/position-history/current")
+    assert response.body["documented"] == {
+        "1": "A", "2": "B", "3": "C", "4": "D", "5": "E", "6": "F"}
+    assert response.body["observed"] == {
+        "1": "A", "2": "B", "3": "C", "4": "D", "5": "E"}
+    assert response.body["divergence"] == []
 
 
 def test_initial_snapshot_cannot_invent_retrospective_identity(tmp_path):

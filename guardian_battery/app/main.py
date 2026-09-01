@@ -344,10 +344,6 @@ def parse_pwr(text: str, expected_modules: int) -> list[Module]:
             continue
 
         module_no = int(match.group("module"))
-        if module_no > expected_modules:
-            idx += 1
-            continue
-
         continuation = continuation_pattern.match(lines[idx + 1]) if idx + 1 < len(lines) else None
 
         module = Module(
@@ -647,6 +643,7 @@ class Mqtt:
             ("stack_status_reason", "Guardian Statusursache", None, None, "mdi:alert-circle-check"),
             ("critical_module", "Guardian auffälligstes Modul", None, None, "mdi:battery-alert"),
             ("modules_present", "Guardian erkannte Module", None, None, "mdi:battery-multiple"),
+            ("unexpected_modules_present", "Guardian zusätzliche Module", None, None, "mdi:battery-plus"),
             ("active_alarms", "Guardian aktive Batteriealarme", None, None, "mdi:alert-circle"),
             ("last_alarm", "Guardian letzter Batteriealarm", None, None, "mdi:message-alert"),
             ("last_update", "Guardian letzte Aktualisierung", None, "timestamp", "mdi:clock-check"),
@@ -831,15 +828,24 @@ class Mqtt:
             if value.get("expected")
             and value.get("status", value.get("presence_status")) == "present")
         expected_count = sum(1 for value in live_topology.values() if value.get("expected"))
+        unexpected_present = sum(
+            1 for value in live_topology.values()
+            if not value.get("expected")
+            and value.get("status", value.get("presence_status")) == "present")
 
         self.state("stack_status", status)
         self.state("stack_health_score", stack_score)
         self.state("stack_recommendation", stack_recommendation)
         self.state("stack_status_reason", status_reason)
         self.state("critical_module", f"Diagnostischer Hinweis: Modul {critical_module}" if critical_module != "-" else "-")
-        self.state("modules_present", f"{present_expected} / {expected_count}")
+        modules_summary = f"{present_expected} / {expected_count}"
+        if unexpected_present:
+            modules_summary += f" (+{unexpected_present} nicht erwartet)"
+        self.state("modules_present", modules_summary)
+        self.state("unexpected_modules_present", unexpected_present)
         self.attributes("modules_present", {"present_expected": present_expected,
-                                             "expected_module_count": expected_count})
+                                             "expected_module_count": expected_count,
+                                             "unexpected_present": unexpected_present})
         self.state("active_alarms", len(alarms))
         self.state("last_alarm", alarms[0]["message"] if alarms else "kein Alarm")
         self.state("last_update", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
@@ -1262,12 +1268,17 @@ def main() -> None:
                 if rs485_reader is not None:
                     resolved_identities = {}
                     for adr, identity in rs485_reader.identities().items():
-                        resolved = resolve_rs485_identity(
-                            int(adr), identity["serial_string"], identity["serial_raw"],
-                            datetime.fromtimestamp(now_wall, timezone.utc),
-                            decode_source=identity.get("decode_source", "stored_decoded"),
-                            position_history_path=DEFAULT_POSITION_HISTORY_FILE,
-                        )
+                        try:
+                            resolved = resolve_rs485_identity(
+                                int(adr), identity["serial_string"], identity["serial_raw"],
+                                datetime.fromtimestamp(now_wall, timezone.utc),
+                                decode_source=identity.get("decode_source", "stored_decoded"),
+                                position_history_path=DEFAULT_POSITION_HISTORY_FILE,
+                            )
+                        except (KeyError, TypeError, ValueError, OSError) as exc:
+                            LOG.warning("RS485 identity projection skipped: adr=%02X error=%s",
+                                        int(adr), exc)
+                            continue
                         log_key = (identity["serial_string"], resolved.get("position"))
                         if identity_resolution_log.get(int(adr)) != log_key:
                             if resolved.get("identity_resolved"):
@@ -1279,7 +1290,10 @@ def main() -> None:
                             identity_resolution_log[int(adr)] = log_key
                         if (resolved.get("identity_resolved")
                                 and identity.get("identity_currently_confirmed") is True):
-                            resolved_identities[int(adr)] = {**identity, **resolved}
+                            # Preserve the direct frame timestamp. The resolver's
+                            # datetime is the position-resolution time, not a new
+                            # RS485 observation.
+                            resolved_identities[int(adr)] = {**resolved, **identity}
                     update_rs485_observations(resolved_identities, observed_at=now_wall)
                 try:
                     record_stable_observed_positions()

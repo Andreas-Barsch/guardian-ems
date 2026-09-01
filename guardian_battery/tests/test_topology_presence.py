@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import position_history
@@ -138,3 +139,49 @@ def test_real_five_position_live_projection_keeps_inventory_identity():
     assert topology[5]["physical_serial"] == "SN-5"
     assert topology[6]["physical_serial"] == "SN-6"
     assert topology[6]["expected"] is False
+
+
+def test_six_console_modules_survive_datetime_identity_projection_with_expected_five():
+    with patch("pathlib.Path.mkdir"):
+        from main import parse_pwr
+    raw = "\n".join(
+        line
+        for module in range(1, 7)
+        for line in (
+            f"{module} 48000 0 25000 24000 26000 3300 3310 Idle Normal Normal Normal 50%",
+            "01-09-26 12:00:00 Normal Normal 25000 Normal",
+        )
+    )
+    modules = parse_pwr(raw, expected_modules=5)
+    assert [module.module for module in modules] == [1, 2, 3, 4, 5, 6]
+
+    infos = {module.module: {"barcode": f"SN-{module.module}"} for module in modules}
+    update_observed_stack(infos, present_positions={module.module for module in modules},
+                          expected_module_count=5, observed_at=100)
+    update_rs485_observations({
+        2: {"position": 1, "serial_string": "SN-1",
+            "timestamp": datetime.fromtimestamp(100, timezone.utc)},
+        3: {"position": 2, "serial_string": "SN-2", "timestamp": 100},
+    }, observed_at=100)
+    presence = current_presence(now=100, expected_module_count=5)
+    assert all(presence[position]["status"] == "present" for position in range(1, 7))
+    assert all(presence[position]["expected"] for position in range(1, 6))
+    assert presence[6]["expected"] is False
+
+
+def test_bad_identity_timestamp_isolated_and_reinsert_can_trigger_history_change():
+    observations = {
+        1: {"position": 1, "serial_string": "SN-1", "timestamp": object()},
+        2: {"position": 6, "serial_string": "SN-6", "timestamp": 100},
+    }
+    for timestamp in (100, 110, 120):
+        observations[2]["timestamp"] = timestamp
+        update_rs485_observations(observations, observed_at=timestamp)
+    assert current_presence(now=120, expected_module_count=5)[6] == {
+        "position": 6, "expected": False, "status": "present",
+        "observed_serial": "SN-6", "last_observed_at": 120.0,
+        "sources": ["rs485_0x93"],
+    }
+    assert stable_observed_changes({"1": "SN-1", "2": "SN-2", "3": "SN-3",
+                                    "4": "SN-4", "5": "SN-5", "6": None}) == {
+        6: "SN-6"}

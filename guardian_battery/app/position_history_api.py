@@ -52,19 +52,21 @@ class PositionHistoryApi:
             module_count = (int(self.module_count_provider())
                             if self.module_count_provider else None)
             presence = current_presence(expected_module_count=module_count)
+            documented = self.service.last_documented_serials()
             live_topology = project_live_topology(
-                self.service.last_documented_serials(), expected_module_count=module_count)
+                documented, expected_module_count=module_count)
             observed = {str(position): value["observed_serial"]
                         for position, value in presence.items()
                         if value["status"] == "present"}
             return ApiResponse(200, {"snapshot": item.to_dict() if item else None,
-                                     "documented": self.service.last_documented_serials(),
+                                     "documented": documented,
                                      "observed": observed,
                                      "presence": {str(k): v for k, v in presence.items()},
                                      "live_topology": {str(k): v for k, v in live_topology.items()},
                                      "expected_module_count": sum(
                                          1 for value in presence.values() if value["expected"]),
-                                     "divergence": self.service.divergence(observed)})
+                                     "divergence": self.service.divergence(
+                                         observed, documented=documented)})
         if suffix == "resolve":
             timestamp = values.get("at")
             if not timestamp:

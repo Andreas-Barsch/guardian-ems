@@ -170,3 +170,38 @@ def test_confirmed_removal_and_readd_each_create_one_full_snapshot(tmp_path, mon
         {'1': 'SN-A', '2': None, '3': None, '4': None, '5': None, '6': None},
         {'1': 'SN-A', '2': 'SN-B', '3': None, '4': None, '5': None, '6': None},
     ]
+
+
+def test_confirmed_unexpected_sixth_module_creates_snapshot_with_expected_five(tmp_path, monkeypatch):
+    import position_history
+    monkeypatch.setattr(config_ui, 'DEFAULT_MAINTENANCE_EVENT_FILE',
+                        tmp_path / 'maintenance.jsonl')
+    monkeypatch.setattr(config_ui, 'DEFAULT_POSITION_HISTORY_FILE',
+                        tmp_path / 'positions.jsonl')
+    monkeypatch.setattr(config_ui, '_MAINTENANCE_API', None)
+    monkeypatch.setattr(config_ui, '_POSITION_HISTORY_API', None)
+    monkeypatch.setattr(position_history, '_OBSERVED_STACK', {})
+    monkeypatch.setattr(position_history, '_OBSERVATION_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_PRESENCE_SOURCES', {})
+    monkeypatch.setattr(position_history, '_MISSING_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_COMMUNICATION_HEALTHY', None)
+
+    five = {position: {'barcode': f'SN-{position}'} for position in range(1, 6)}
+    for timestamp in (0, 1, 2):
+        position_history.update_observed_stack(
+            five, present_positions=set(five), expected_module_count=5,
+            observed_at=timestamp)
+    assert config_ui.record_stable_observed_positions() is True
+
+    six = {**five, 6: {'barcode': 'SN-6'}}
+    for timestamp in (10, 11, 12):
+        position_history.update_observed_stack(
+            six, present_positions=set(six), expected_module_count=5,
+            observed_at=timestamp)
+    assert position_history.current_presence(
+        now=12, expected_module_count=5)[6]['status'] == 'present'
+    assert config_ui.record_stable_observed_positions() is True
+    assert config_ui.record_stable_observed_positions() is False
+    snapshots = config_ui._get_position_history_api().service.list()
+    assert len(snapshots) == 2
+    assert snapshots[-1].positions['6'] == 'SN-6'

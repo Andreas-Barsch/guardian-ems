@@ -46,6 +46,7 @@ def test_current_assignment_and_history_use_physical_top_to_bottom_order():
     assert "Status / Aktualität" in html
     assert "fehlt / entfernt" in html
     assert "nicht erwartet" in html
+    assert "vorhanden, aber nicht erwartet" in html
     assert "current.documented?.[number]||'Seriennummer unbekannt'" in html
     assert "presence.observed_serial||'nicht verfügbar'" in html
 

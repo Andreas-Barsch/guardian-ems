@@ -222,6 +222,31 @@ def test_live_topology_projects_four_of_five_and_invalidates_retained_live_value
     assert not any(call["payload"] is None for call in client.calls)
 
 
+def test_unexpected_present_module_is_online_but_not_counted_as_expected():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"
+    publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    topology = {
+        position: {"position": position, "expected": position <= 5,
+                   "status": "present"}
+        for position in range(1, 7)
+    }
+    publisher.publish(
+        modules(), "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"}, {}, {}, {}, topology)
+    states = {call["topic"]: call["payload"] for call in client.calls}
+    assert states["guardian/battery/sensor/modules_present/state"] == \
+        "5 / 5 (+1 nicht erwartet)"
+    assert states["guardian/battery/sensor/unexpected_modules_present/state"] == "1"
+    assert states["guardian/battery/module_6/availability"] == "online"
+    attrs = json.loads(states["guardian/battery/sensor/modules_present/attributes"])
+    assert attrs == {"present_expected": 5, "expected_module_count": 5,
+                     "unexpected_present": 1}
+
+
 def test_hard_payload_guards_fail_before_client_publish():
     publisher = Mqtt.__new__(Mqtt)
     publisher.prefix = "guardian"
