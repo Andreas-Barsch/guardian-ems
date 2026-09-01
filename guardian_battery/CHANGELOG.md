@@ -1,5 +1,17 @@
 # Guardian Battery Changelog
 
+## 0.7.12 – RS485 Identity & Topology Presence
+
+- Dekodiert passive Pylontech-V3.3-Responses für Kommando `0x93` als Command plus exakt 16 unveränderte ASCII-Bytes und erhält die Rawbytes. Historische gültige Raw Evidence kann deterministisch mit Provenienz `historical_raw_redecode` erneut dekodiert werden; bereits gespeicherte Dekodierung bleibt als `stored_decoded` kenntlich.
+- Verwendet die direkt beobachtete Zuordnung ADR → physische Seriennummer. Eine Position wird ausschließlich über die zum Beobachtungszeitpunkt wirksame Positionshistorie aufgelöst; es gibt keine ADR→Position-Formel und unbekannte Identität bleibt `unresolved`.
+- Entfernt die ADR-Auswahl aus normalen Zeitverlaufsansichten. Modul und Seriennummer bilden die Benutzeridentität im Zeitverlauf und in der RS485-/BMS-Managementansicht; ADR bleibt technische Provenienz- und API-Dimension.
+- Trennt Solltopologie, aktuelle Presence und Positionshistorie. Console und aktuelle `0x93`-Evidenz speisen die Zustände `present`, `stale`, `absent`, `unknown` und `not_expected`; alte Console-Caches und identische alte `0x93`-Beobachtungen erneuern beziehungsweise vervielfachen Presence-Bestätigungen nicht.
+- Erzeugt vollständige Positionssnapshots nur nach bestätigten Topologieänderungen. Neustarts, kurze Kommunikationsausfälle, globale Ausfälle und identische Zustände erzeugen keinen Snapshot; die letzte dokumentierte Seriennummer bleibt nach einem Removal historisch sichtbar.
+- Begrenzt Missing-Alarme auf die konfigurierte Solltopologie `1..module_count`. Historisch dokumentierte höhere Positionen bleiben erhalten und werden aktuell als `not_expected` statt fehlend behandelt.
+- Erhält die bestehenden ADR-basierten MQTT-Entity-IDs und Topics. Friendly Names und Attribute können nach sicherer Identitätsauflösung unter demselben Discovery-Key aktualisiert werden, ohne Registry-Migration oder Entity-Duplikate.
+- RS485 bleibt vollständig passiv. CCL/DCL und Enable-Zustände werden unverändert und ohne Kausalitätsbehauptung dargestellt; Cell Diagnostics, Gesamtbewertung, Confidence, Evidence Diagnostics, Maintenance Risk und Phasenklassifikation bleiben isoliert.
+- Guardian Battery und Add-on sind `0.7.12`; die Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.11 – RS485 Management Freshness
 
 - Trennt den RS485-Reader-/Busstatus von der Aktualität der zuletzt gültig beobachteten 0x92-Managementwerte. Ein älterer Wert bleibt mit `management_freshness=stale` und `sample_age_seconds` erhalten und wird bei einem weiterhin `listening` meldenden Bus nicht allein wegen seines Alters `unavailable`.

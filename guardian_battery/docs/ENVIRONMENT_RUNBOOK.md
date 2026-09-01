@@ -43,6 +43,26 @@ Stand: 2026-08-31
 - Die frühere 120-Sekunden-Grenze war deshalb als Availability-Kriterium ungeeignet. Ab 0.7.11 ist der bestehende Optionswert `rs485_sniffer_stale_seconds` ausschließlich die Schwelle für `management_freshness=current|stale`; der konservative Default beträgt 600 Sekunden.
 - Management-Entities bleiben bei einem lebenden Reader im Zustand `listening` verfügbar und behalten den letzten gültigen Wert. `sample_age_seconds` und `management_freshness` machen dessen Aktualität transparent. Erst ein nicht verfügbarer Reader-/Buszustand setzt die Entity offline; ein noch nie beobachteter 0x92-Wert wird nicht erfunden.
 
+## Guardian Battery 0.7.12 – RS485 Identity & Topology Presence
+
+- Source-Basis ist der gemeinsam geprüfte Identity-/Topology-Checkpoint `a98b8a6eacd8cec83c005a21534345a18922166d` auf `codex/guardian-0.7.11-freshness`. Guardian Battery und Add-on werden auf `0.7.12` angehoben; die Diagnostic Engine bleibt `0.4.12`.
+- `0x93` wird passiv nach der dokumentierten Pylontech-V3.3-Struktur als Command und exakt 16 ASCII-Bytes Seriennummer dekodiert. Rawbytes bleiben erhalten. Historische gültige Raw Evidence kann deterministisch re-dekodiert werden und unterscheidet `stored_decoded` von `historical_raw_redecode`.
+- Die physische Identitätskette lautet ADR → direkt beobachtete Seriennummer → zum Zeitpunkt wirksame dokumentierte Position. Es existiert keine ADR-minus-1- oder andere ADR→Position-Formel; unbekannte Identitäten bleiben unaufgelöst.
+- Aktuelle Presence trennt `present`, `stale`, `absent`, `unknown` und `not_expected`. Console- und frische `0x93`-Beobachtungen dürfen Presence bestätigen; ein alter Console-Cache oder dieselbe alte `0x93`-Beobachtung zählt nicht erneut als Bestätigung.
+- Nur Positionen `1..module_count` gehören zur aktuellen Solltopologie und können Missing-Alarme erzeugen. Höhere historische Positionen und deren letzte dokumentierte Seriennummer bleiben sichtbar, sind aber `not_expected`.
+- Bestehende ADR-basierte MQTT-Entity-IDs und Topics bleiben kompatibel. Modul/Seriennummer verändern nur Friendly Names und Attribute unter demselben Discovery-Key. RS485 bleibt ohne Sendepfad und ohne Diagnose- oder Kausalitätswirkung.
+
+### Reale Identitätsevidenz vor dem 0.7.12-Release
+
+- Real beobachtet wurden: ADR `02` → `H221005E22212581`, ADR `03` → `H221005E22212536`, ADR `04` → `H221005E22212571`, ADR `05` → `H221005E22212538` und ADR `06` → `Y225004C32250226`. Dies ist Beobachtungs- und Regressionsevidenz, keine hardcodierte Produktivzuordnung.
+- Für ADR `06` / `Y225004C32250226` wurde DCL wiederholt mit `-25 A` ↔ `0 A` bei weiterhin `ENABLED` meldendem Discharge Enable beobachtet. Daraus wird keine Ursache abgeleitet.
+- Fehlende historische Positionsereignisse vom 31.08./01.09 wurden mangels vollständiger damaliger Evidenz bewusst nicht rückwirkend erfunden.
+
+### Nach Source-Release weiterhin offene reale Abnahme
+
+- Noch nicht als produktiv bestanden gelten die aktuelle Presence-Darstellung mit nur M1–M4, Position 5 als `absent`, die historische Position 6 als `not_expected`, automatische zukünftige Position-History-Snapshots sowie Removal und Reintegration im realen Betrieb.
+- Ebenfalls offen bleiben der physische Waveshare-Disconnect/Reconnect und ein möglicher hardware- oder treiberbedingter Pegelimpuls beim Öffnen. Source-Release, installierte Add-on-Version und produktive Laufzeit sind getrennte Zustände.
+
 ## Aktueller verifizierter Release- und RC-Stand
 
 - Vor dieser Release-Runde veröffentlichter Stand: Guardian Battery / Add-on
