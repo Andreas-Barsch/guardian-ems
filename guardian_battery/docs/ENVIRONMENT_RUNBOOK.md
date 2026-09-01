@@ -2,6 +2,21 @@
 
 Stand: 2026-08-31
 
+## Guardian Battery 0.7.13 – Unified Live Topology & RS485 Identity Restore
+
+- Ausgangspunkt der realen Abnahme war 0.7.12. Die zentrale Presence-Projektion „Aktuelle Zuordnung“ stellte die erwartete Topologie bereits korrekt dar; andere Live-Projektionen verwendeten teilweise noch abweichende Nenner-, Availability- und Diagnose-Semantik.
+- Ab 0.7.13 verwenden Home-Zusammenfassung, Live-Messwerte, Cell-Diagnostics und Inventarstatus dieselbe zentrale Solltopologie/Presence. `module_count` bestimmt die erwarteten und alarmwirksamen Positionen. Historisch bekannte Module oberhalb davon bleiben Inventar beziehungsweise History und sind `not_expected`.
+- Retained numerische und diagnostische Zustände werden nicht gelöscht oder durch Nullwerte ersetzt. Presence steuert ihre aktuelle Availability, sodass `stale`, `absent` und `not_expected` nicht als frische Livewerte erscheinen. Stammdaten und Recorder-Historie bleiben erhalten.
+- Der 0x93-Reader-State war in 0.7.12 prozesslokal und nach einem Add-on-Neustart leer. 0.7.13 liest beim aktivierten Sniffer einmalig und begrenzt vorhandene append-only `rs485_history`-Evidence und rekonstruiert daraus mit dem zentralen Decoder die jüngste gültige bekannte Identität je ADR. Die Evidence-Dateien werden dabei nicht verändert.
+- Eine restaurierte Identität bedeutet `identity_known=true`, aber `identity_currently_confirmed=false`; sie erzeugt keine frische Presence. Erst ein neues gültiges direktes `0x93` bestätigt die Identität für den laufenden Prozess oder ersetzt sie. Positionen werden weiterhin ausschließlich über die dokumentierte Positionshistorie und niemals aus ADR-Arithmetik aufgelöst.
+- Die Source-Dashboarddatei `homeassistant/dashboards/guardian_module_information.yaml` gehört zu 0.7.13. Ein Add-on-Update kopiert sie nicht automatisch in die produktive Home-Assistant-Konfiguration. Nach Installation sind deshalb getrennt zu prüfen: Git-/Source-Stand, Add-on-Version, produktive Dashboarddatei unter `/config` und die tatsächliche Browserdarstellung. Dieses Source-Release deployt keine Datei nach `/config`.
+
+### Nach dem 0.7.13-Source-Release weiterhin offene reale Abnahme
+
+- Real zu prüfen bleiben Home `4 / 5`, Availability von M5/M6, Cell-Diagnostics-Liveprojektion, Inventory-Presence, Startup-Restore der bekannten 0x93-Identität, deren anschließende Live-Bestätigung durch ein neues `0x93`, lokale Uhrzeit in der Positionshistorie und die Aktualisierung bestehender MQTT-Discovery-Entities.
+- Ebenfalls offen bleiben der physische Waveshare-Disconnect/Reconnect und ein möglicher hardware- oder treiberbedingter Open-Pegelimpuls.
+- Source-Stand, installierte Add-on-Version, produktive Dashboarddateien und Browserzustand sind getrennte Zustände. Eine reale Abnahme darf erst nach dem jeweiligen kontrollierten Deployment als bestanden dokumentiert werden.
+
 ## Guardian Battery 0.7.8 – Passive RS485 Runtime Foundation
 
 ### Verifizierte Hardware- und Protokollfakten

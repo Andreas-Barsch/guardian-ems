@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.13 – Unified Live Topology & RS485 Identity Restore
+
+- Vereinheitlicht aktuelle Projektionen auf der zentralen Solltopologie und Presence mit den getrennten Zuständen `present`, `stale`, `absent`, `unknown` und `not_expected`. `module_count` bestimmt den Nenner und die alarmwirksamen Positionen; historisch bekannte höhere Positionen bleiben ausschließlich Inventar und Historie.
+- Trennt Availability-/Missing-Ursachen vom unabhängig diagnostisch auffälligsten Modul. Bei Solltopologie 5 und vier aktuell vorhandenen Modulen lautet die Home-Zusammenfassung `4 / 5`; Position 6 erweitert weder Nenner noch Missing-Semantik.
+- Schaltet Presence vor Live-Messwerte und Cell-Diagnostics-Projektionen. Retained Werte von entfernten, veralteten oder nicht erwarteten Modulen bleiben historisch erhalten, werden aber nicht als aktuelle Livewerte angeboten; es entstehen keine Nullwerte und keine neue Diagnoseberechnung.
+- Erhält alle bekannten physischen Module als Inventar und ergänzt deren aktuellen Topologiestatus. Die Positionshistorie zeigt lokale Zeit als `DD.MM.YY HH:MM`, ohne Snapshots zu verändern oder fehlende Ereignisse zu synthetisieren.
+- Rekonstruiert beim Start bekannte ADR↔Seriennummer-Identitäten begrenzt und read-only aus append-only RS485-Evidence mit der zentralen `0x93`-Decoderlogik. `identity_known` bleibt von `identity_currently_confirmed` getrennt; historische Identität erzeugt keine frische Presence, während ein neues direktes `0x93` bestätigt oder ersetzt.
+- Ergänzt kompakte `0x93`-Zähler und änderungsbezogene Identity-Logs ohne Rawframes. Bestehende ADR-basierte MQTT-IDs, Topics und Discovery Keys bleiben kompatibel; Live-Availability wird positionsbezogen aktualisiert, ohne Registry-Migration oder Entity-Duplikate.
+- Nach Installation real zu prüfen bleiben Home `4 / 5`, Availability von M5/M6, Cell-Diagnostics-Liveprojektion, Inventory-Presence, Startup-Restore und anschließende Live-Bestätigung durch ein neues `0x93`, Position-History-Uhrzeit sowie die Discovery-Aktualisierung bestehender MQTT-Entities.
+- Guardian Battery und Add-on sind `0.7.13`; RS485 bleibt passiv und diagnoseisoliert, die Diagnostic Engine bleibt unverändert `0.4.12`.
+
 ## 0.7.12 – RS485 Identity & Topology Presence
 
 - Dekodiert passive Pylontech-V3.3-Responses für Kommando `0x93` als Command plus exakt 16 unveränderte ASCII-Bytes und erhält die Rawbytes. Historische gültige Raw Evidence kann deterministisch mit Provenienz `historical_raw_redecode` erneut dekodiert werden; bereits gespeicherte Dekodierung bleibt als `stored_decoded` kenntlich.
