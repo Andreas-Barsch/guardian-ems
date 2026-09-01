@@ -28,12 +28,15 @@ from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_text)
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
-                              resolve_maintenance_event_identities, update_observed_stack)
+                              missing_expected_positions,
+                              resolve_maintenance_event_identities, update_observed_stack,
+                              update_rs485_observations)
 from stack_soc import current_stack_soc
 from serial_devices import discover_serial_devices, resolve_console_port, resolve_rs485_port, ensure_distinct_roles
 from rs485_sniffer import PassiveRs485Reader
 from rs485_evidence import DEFAULT_RS485_HISTORY_DIR, Rs485EvidencePipeline, Rs485EvidenceWriter
 from rs485_mqtt import Rs485MqttProjection
+from rs485_identity import project_current_management, resolve_rs485_identity
 from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION
 
 import paho.mqtt.client as mqtt
@@ -520,11 +523,10 @@ def health_assessment(module: Module, median_soc: float, options: dict, alarm_co
 
 def evaluate(modules: list[Module], options: dict) -> tuple[str, list[dict]]:
     alarms: list[dict] = []
-    present = {module.module for module in modules}
-    expected = set(range(1, int(options["module_count"]) + 1))
     median_soc = statistics.median([m.soc_percent for m in modules]) if modules else 0
 
-    for missing in sorted(expected - present):
+    for missing in missing_expected_positions(
+            int(options["module_count"]), (module.module for module in modules)):
         alarms.append({
             "level": "critical" if options["missing_module_is_critical"] else "warning",
             "code": "module_missing",
@@ -1101,7 +1103,10 @@ def main() -> None:
     configure_rs485_status_provider(
         (lambda: {"status": {**rs485_reader.status(), "management_freshness_seconds": int(
                                   options.get("rs485_sniffer_stale_seconds", 600))},
-                  "management": rs485_reader.management(),
+                  "management": project_current_management(
+                      rs485_reader.management(), rs485_reader.identities(),
+                      position_history_path=DEFAULT_POSITION_HISTORY_FILE),
+                  "identities": rs485_reader.identities(),
                   "history": rs485_writer.status() if rs485_writer else {}})
         if rs485_reader else None)
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
@@ -1201,7 +1206,23 @@ def main() -> None:
                             LOG.warning("BMS info Modul %s: %s", module.module, exc)
                     last_info_poll = now_wall
 
-                update_observed_stack(module_infos)
+                update_observed_stack(
+                    module_infos, present_positions={module.module for module in modules},
+                    communication_healthy=bool(modules),
+                    expected_module_count=int(options["module_count"]), observed_at=now_wall,
+                )
+                if rs485_reader is not None:
+                    resolved_identities = {}
+                    for adr, identity in rs485_reader.identities().items():
+                        resolved = resolve_rs485_identity(
+                            int(adr), identity["serial_string"], identity["serial_raw"],
+                            datetime.fromtimestamp(identity["timestamp"], timezone.utc),
+                            decode_source=identity.get("decode_source", "stored_decoded"),
+                            position_history_path=DEFAULT_POSITION_HISTORY_FILE,
+                        )
+                        if resolved.get("identity_resolved"):
+                            resolved_identities[int(adr)] = {**identity, **resolved}
+                    update_rs485_observations(resolved_identities, observed_at=now_wall)
                 try:
                     record_stable_observed_positions()
                 except Exception as exc:
@@ -1265,12 +1286,19 @@ def main() -> None:
                     cell_results, bms_stat, module_infos
                 )
                 if rs485_reader is not None:
+                    rs485_management = project_current_management(
+                        rs485_reader.management(), rs485_reader.identities(),
+                        position_history_path=DEFAULT_POSITION_HISTORY_FILE)
                     rs485_mqtt.publish(rs485_reader.status(),
-                                       rs485_reader.management(),
+                                       rs485_management,
                                        rs485_writer.status())
 
             except Exception as exc:
                 LOG.exception("Abfrage fehlgeschlagen: %s", exc)
+                update_observed_stack(
+                    {}, present_positions=set(), communication_healthy=False,
+                    expected_module_count=int(options["module_count"]),
+                )
                 try:
                     console.close()
                 except Exception:

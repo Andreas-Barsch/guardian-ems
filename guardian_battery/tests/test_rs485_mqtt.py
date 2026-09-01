@@ -46,6 +46,53 @@ def test_discovery_topics_match_guardian_state_and_attribute_publishers():
     assert ("rs485_adr_02_charge_enable/state", "ENABLED", True) in mqtt.messages
 
 
+def test_identity_changes_friendly_name_without_changing_entity_ids():
+    mqtt = FakeMqtt()
+    values = management()
+    values[2].update({"identity_resolved": True, "position": 5,
+                      "physical_serial": "Y225004C32250226",
+                      "serial_string": "Y225004C32250226"})
+    Rs485MqttProjection(mqtt, wall_clock=lambda: 110).publish(
+        {"state": "listening"}, values)
+    topic, payload, _ = next(item for item in mqtt.messages
+                             if item[0].endswith("rs485_adr_02_dcl/config"))
+    discovery = json.loads(payload)
+    assert topic == "homeassistant/sensor/guardian_battery/rs485_adr_02_dcl/config"
+    assert discovery["unique_id"] == "guardian_battery_rs485_adr_02_dcl"
+    assert "Modul 5" in discovery["name"] and "ADR" not in discovery["name"]
+    attrs = attributes(mqtt, "dcl")
+    assert attrs["module_position"] == 5
+    assert attrs["physical_serial"] == "Y225004C32250226"
+
+
+def test_late_identity_republishes_same_discovery_identity_without_registry_duplicate():
+    mqtt = FakeMqtt()
+    projection = Rs485MqttProjection(mqtt, wall_clock=lambda: 110)
+    projection.publish({"state": "listening"}, management())
+    resolved = management()
+    resolved[2].update({"identity_resolved": True, "position": 5,
+                        "physical_serial": "Y225004C32250226",
+                        "serial_string": "Y225004C32250226"})
+    projection.publish({"state": "listening"}, resolved)
+    payloads = [json.loads(payload) for topic, payload, _ in mqtt.messages
+                if topic.endswith("rs485_adr_02_dcl/config")]
+    assert len(payloads) == 2
+    assert {item["unique_id"] for item in payloads} == {
+        "guardian_battery_rs485_adr_02_dcl"}
+    assert payloads[-1]["state_topic"] == payloads[0]["state_topic"]
+
+
+def test_dcl_zero_is_preserved_independently_from_discharge_enable():
+    mqtt = FakeMqtt()
+    values = management()
+    values[2]["discharge_current_limit_a"] = 0.0
+    values[2]["discharge_enable"] = True
+    Rs485MqttProjection(mqtt, wall_clock=lambda: 110).publish(
+        {"state": "listening"}, values)
+    assert ("rs485_adr_02_dcl/state", 0.0, True) in mqtt.messages
+    assert ("rs485_adr_02_discharge_enable/state", "ENABLED", True) in mqtt.messages
+
+
 def management(timestamp=100):
     return {2: {
         "timestamp": timestamp, "charge_current_limit_a": -25.0,

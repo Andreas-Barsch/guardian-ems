@@ -114,6 +114,38 @@ def test_api_exposes_history_resolution_and_requires_maintenance(tmp_path):
     assert known.body["known_serials"] == ["SER-5"]
 
 
+def test_current_api_keeps_historical_position_six_outside_expected_topology(
+        tmp_path, monkeypatch):
+    import position_history
+    event, service = env(tmp_path)
+    first = service.record(effective_at="2026-08-19T10:00:00Z",
+                           maintenance_event_id=event.maintenance_event_id,
+                           positions=state(**{"1": "A", "2": "B", "3": "C", "4": "D",
+                                                   "5": "E", "6": "HISTORICAL"}),
+                           expected_latest_snapshot_id=None)
+    service.record(effective_at="2026-08-19T11:00:00Z",
+                   maintenance_event_id=event.maintenance_event_id,
+                   positions=state(**{"1": "A", "2": "B", "3": "C", "4": "D"}),
+                   expected_latest_snapshot_id=first.position_history_id)
+    monkeypatch.setattr(position_history, "_OBSERVED_STACK",
+                        {1: "A", 2: "B", 3: "C", 4: "D", 5: None})
+    monkeypatch.setattr(position_history, "_PRESENCE_SOURCES", {
+        position: {"console": {"identity": serial, "timestamp": 100,
+                                "source": "console"}}
+        for position, serial in ((1, "A"), (2, "B"), (3, "C"), (4, "D"))
+    })
+    monkeypatch.setattr(position_history, "_COMMUNICATION_HEALTHY", True)
+    response = PositionHistoryApi(service, module_count_provider=lambda: 5).handle(
+        "GET", "/api/position-history/current")
+    assert response.body["expected_module_count"] == 5
+    assert response.body["presence"]["5"]["status"] == "absent"
+    assert response.body["presence"]["6"]["status"] == "not_expected"
+    assert response.body["snapshot"]["positions"]["5"] is None
+    assert response.body["snapshot"]["positions"]["6"] is None
+    assert response.body["documented"]["5"] == "E"
+    assert response.body["documented"]["6"] == "HISTORICAL"
+
+
 def test_initial_snapshot_cannot_invent_retrospective_identity(tmp_path):
     event, service = env(tmp_path)
     with pytest.raises(PositionHistoryValidationError, match="capture time"):
@@ -181,6 +213,9 @@ def test_observed_identity_requires_repeated_stable_bms_reads(monkeypatch):
     import position_history
     monkeypatch.setattr(position_history,"_OBSERVED_STACK",{})
     monkeypatch.setattr(position_history,"_OBSERVATION_CANDIDATES",{})
+    monkeypatch.setattr(position_history,"_PRESENCE_SOURCES",{})
+    monkeypatch.setattr(position_history,"_MISSING_CANDIDATES",{})
+    monkeypatch.setattr(position_history,"_COMMUNICATION_HEALTHY",None)
     update_observed_stack({5:{"barcode":"SN-X"}}); update_observed_stack({5:{"barcode":"SN-Y"}})
     assert observed_stack().get(5) is None
     for _ in range(3): update_observed_stack({5:{"barcode":"SN-Y"}})

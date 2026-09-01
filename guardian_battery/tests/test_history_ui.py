@@ -79,7 +79,8 @@ def test_rs485_metrics_are_available_in_single_combined_and_boolean_step_views()
     for metric in ("rs485_ccl", "rs485_dcl", "rs485_charge_enable",
                    "rs485_discharge_enable", "rs485_cvl", "rs485_dvl"):
         assert metric in html
-    assert 'id="adr"' in html
+    assert 'id="adr"' not in html and "RS485 ADR<select" not in html
+    assert "result.set('adr'" not in html
     assert "STOP REQUEST" in html and "ENABLED" in html
     assert "applyBooleanSteps" in html and "MutationObserver" in html
     assert "Object.assign(METRIC_LABELS,{rs485_ccl" in html

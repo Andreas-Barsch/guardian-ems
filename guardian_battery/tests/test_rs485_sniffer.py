@@ -483,6 +483,20 @@ def test_runtime_0x92_latest_state_is_per_adr_and_bounded():
     assert reader.status()["last_0x92_at"] is not None
 
 
+def test_runtime_0x93_identity_state_is_direct_and_bounded():
+    reader = PassiveRs485Reader(lambda: "unused", max_adr_states=2)
+    for adr, serial in ((2, b"H221005E22212581"), (3, b"H221005E22212536"),
+                        (6, b"Y225004C32250226")):
+        reader._process(synthetic_frame(adr=adr, cid2_or_rtn=0x93, info=bytes([adr])))
+        reader._process(synthetic_frame(adr=adr, cid2_or_rtn=0,
+                                        info=bytes([adr]) + serial))
+    identities = reader.identities()
+    assert set(identities) == {3, 6}
+    assert identities[6]["serial_string"] == "Y225004C32250226"
+    assert identities[6]["adr"] == 6
+    assert "position" not in identities[6]
+
+
 def test_reader_handles_fragmented_and_multiple_frames():
     reader = PassiveRs485Reader(lambda: "unused")
     first, second = synthetic_frame(adr=2), synthetic_frame(adr=3)

@@ -115,8 +115,11 @@ def _get_position_history_api():
     if _POSITION_HISTORY_API is None:
         with _MAINTENANCE_API_LOCK:
             if _POSITION_HISTORY_API is None:
-                _POSITION_HISTORY_API = PositionHistoryApi(PositionHistoryService(
-                    PositionHistoryLog(DEFAULT_POSITION_HISTORY_FILE), maintenance))
+                _POSITION_HISTORY_API = PositionHistoryApi(
+                    PositionHistoryService(
+                        PositionHistoryLog(DEFAULT_POSITION_HISTORY_FILE), maintenance),
+                    module_count_provider=lambda: _read_options()["module_count"],
+                )
     return _POSITION_HISTORY_API
 
 
@@ -136,11 +139,14 @@ def record_stable_observed_positions() -> bool:
         previous = ", ".join(f"P{position}: {positions[str(position)] or 'unbekannt'}" for position in sorted(changes))
         for position, serial in changes.items():
             # A physical serial can occupy only one position in one snapshot.
-            for key, value in list(positions.items()):
-                if value == serial:
-                    positions[key] = None
+            if serial is not None:
+                for key, value in list(positions.items()):
+                    if value == serial:
+                        positions[key] = None
             positions[str(position)] = serial
-        semantics = classify_stack_change(current.positions if current else None, positions)
+        removed = {str(position) for position, serial in changes.items() if serial is None}
+        semantics = classify_stack_change(current.positions if current else None, positions,
+                                          confirmed_empty_positions=removed)
         now = datetime.now(timezone.utc)
         event = _get_maintenance_api().service.create(
             occurred_at=now, category=semantics["category"],
@@ -148,9 +154,10 @@ def record_stable_observed_positions() -> bool:
             affected_system="Pylontech Stack",
             description="Guardian hat eine wiederholt stabile Seriennummernzuordnung erkannt.",
             previous_state=previous,
-            result=", ".join(f"P{position}: {serial}" for position, serial in sorted(changes.items())),
+            result=", ".join(f"P{position}: {serial or 'leer'}"
+                             for position, serial in sorted(changes.items())),
             source={"kind": "guardian_bms_identity", "change_kind": semantics["kind"],
-                    "confirmation_reads": 3},
+                    "confirmation_reads": 3, "absence_min_seconds": 30},
         )
         position_service.record(
             effective_at=now.isoformat(), maintenance_event_id=event.maintenance_event_id,

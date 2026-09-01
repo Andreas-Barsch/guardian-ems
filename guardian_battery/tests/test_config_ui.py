@@ -104,6 +104,9 @@ def test_confirmed_bms_identity_creates_append_only_system_event_and_snapshot(tm
     monkeypatch.setattr(config_ui,'_POSITION_HISTORY_API',None)
     monkeypatch.setattr(position_history,'_OBSERVED_STACK',{})
     monkeypatch.setattr(position_history,'_OBSERVATION_CANDIDATES',{})
+    monkeypatch.setattr(position_history,'_PRESENCE_SOURCES',{})
+    monkeypatch.setattr(position_history,'_MISSING_CANDIDATES',{})
+    monkeypatch.setattr(position_history,'_COMMUNICATION_HEALTHY',None)
     for _ in range(3): position_history.update_observed_stack({2:{'barcode':'SN-A'}})
     assert config_ui.record_stable_observed_positions() is True
     assert config_ui.record_stable_observed_positions() is False
@@ -115,3 +118,55 @@ def test_confirmed_bms_identity_creates_append_only_system_event_and_snapshot(tm
     assert event.category=='module_identification'
     assert event.title=='Erstidentifikation der Stackbelegung'
     assert len(position_path.read_text().splitlines())==1
+
+
+def test_confirmed_removal_and_readd_each_create_one_full_snapshot(tmp_path, monkeypatch):
+    import position_history
+    maintenance_path = tmp_path / 'maintenance.jsonl'
+    position_path = tmp_path / 'positions.jsonl'
+    monkeypatch.setattr(config_ui, 'DEFAULT_MAINTENANCE_EVENT_FILE', maintenance_path)
+    monkeypatch.setattr(config_ui, 'DEFAULT_POSITION_HISTORY_FILE', position_path)
+    monkeypatch.setattr(config_ui, '_MAINTENANCE_API', None)
+    monkeypatch.setattr(config_ui, '_POSITION_HISTORY_API', None)
+    monkeypatch.setattr(position_history, '_OBSERVED_STACK', {})
+    monkeypatch.setattr(position_history, '_OBSERVATION_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_PRESENCE_SOURCES', {})
+    monkeypatch.setattr(position_history, '_MISSING_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_COMMUNICATION_HEALTHY', None)
+
+    infos = {1: {'barcode': 'SN-A'}, 2: {'barcode': 'SN-B'}}
+    for timestamp in (0, 1, 2):
+        position_history.update_observed_stack(
+            infos, present_positions={1, 2}, expected_module_count=2,
+            observed_at=timestamp)
+    assert config_ui.record_stable_observed_positions() is True
+    assert config_ui.record_stable_observed_positions() is False
+
+    # A short gap and a global outage are not topology transitions.
+    position_history.update_observed_stack(
+        infos, present_positions={1}, expected_module_count=2, observed_at=100)
+    position_history.update_observed_stack(
+        {}, present_positions=set(), communication_healthy=False,
+        expected_module_count=2, observed_at=120)
+    assert config_ui.record_stable_observed_positions() is False
+
+    for timestamp in (130, 145, 161):
+        position_history.update_observed_stack(
+            infos, present_positions={1}, expected_module_count=2,
+            observed_at=timestamp)
+    assert config_ui.record_stable_observed_positions() is True
+    assert config_ui.record_stable_observed_positions() is False
+
+    for timestamp in (170, 171, 172):
+        position_history.update_observed_stack(
+            infos, present_positions={1, 2}, expected_module_count=2,
+            observed_at=timestamp)
+    assert config_ui.record_stable_observed_positions() is True
+    assert config_ui.record_stable_observed_positions() is False
+
+    snapshots = config_ui._get_position_history_api().service.list()
+    assert [item.positions for item in snapshots] == [
+        {'1': 'SN-A', '2': 'SN-B', '3': None, '4': None, '5': None, '6': None},
+        {'1': 'SN-A', '2': None, '3': None, '4': None, '5': None, '6': None},
+        {'1': 'SN-A', '2': 'SN-B', '3': None, '4': None, '5': None, '6': None},
+    ]

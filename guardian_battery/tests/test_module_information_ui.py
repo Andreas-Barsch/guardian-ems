@@ -15,23 +15,33 @@ def test_module_information_exposes_stack_centred_change_matrix():
     assert "maintenance?event_id=" in html
 
 
-def test_rs485_management_is_compact_adr_based_and_noncausal():
+def test_rs485_management_is_module_and_serial_based_and_noncausal():
     html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
     assert "RS485 / BMS-Management" in html
     assert "api/rs485/status" in html
-    assert "Identität nicht zugeordnet" in html
+    assert "<th>Modul</th><th>Seriennummer</th>" in html
+    assert "Modul nicht zugeordnet" in html
+    assert "Seriennummer nicht verfügbar" in html
+    assert "<th>ADR</th>" not in html and "Identität nicht zugeordnet" not in html
     assert "keine bestätigte Ursache" in html
     assert "CCL" in html and "DCL" in html
     assert "STOP REQUEST" in html and "ENABLED" in html
     assert "Aktualität:" in html and "AKTUELL" in html and "VERALTET" in html
     assert "management_freshness_seconds||600" in html
     assert "stale?'nicht verfügbar'" not in html
+    assert "item.discharge_current_limit_a" in html
+    assert "enabled(item.discharge_enable)" in html
 
 
 def test_current_assignment_and_history_use_physical_top_to_bottom_order():
     html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
     assert "for(let number=6;number>=1;number--)" in html
     assert "for(let position=6;position>=1;position--)" in html
+    assert "Status / Aktualität" in html
+    assert "fehlt / entfernt" in html
+    assert "nicht erwartet" in html
+    assert "current.documented?.[number]||'Seriennummer unbekannt'" in html
+    assert "presence.observed_serial||'nicht verfügbar'" in html
 
 
 def test_history_matrix_is_structurally_scrollable_for_twenty_or_more_states():

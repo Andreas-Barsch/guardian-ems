@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -226,6 +227,15 @@ class PositionHistoryService:
             raise PositionHistoryValidationError("position must be between 1 and 6")
         return sorted({item.positions[str(position)] for item in self.list() if item.positions[str(position)] is not None})
 
+    def last_documented_serials(self) -> dict[str, str | None]:
+        """Retain documentary identity labels independently of current occupancy."""
+        result = {str(position): None for position in STACK_POSITIONS}
+        for snapshot in self.list():
+            for position, serial in snapshot.positions.items():
+                if serial is not None:
+                    result[position] = serial
+        return result
+
     def serial_options(self, position: int, timestamp: str) -> list[dict[str, str]]:
         """Classify unique documented serials relative to one event timestamp."""
         if position not in STACK_POSITIONS:
@@ -293,31 +303,143 @@ class PositionHistoryService:
 
 _OBSERVED_STACK: dict[int, str | None] = {}
 _OBSERVATION_CANDIDATES: dict[int, tuple[str, int]] = {}
+_PRESENCE_SOURCES: dict[int, dict[str, dict[str, Any]]] = {}
+_MISSING_CANDIDATES: dict[int, tuple[int, float]] = {}
+_COMMUNICATION_HEALTHY: bool | None = None
+_EXPECTED_MODULE_COUNT = 6
 OBSERVATION_CONFIRMATIONS = 3
+PRESENCE_FRESHNESS_SECONDS = 90.0
+ABSENCE_CONFIRMATIONS = 3
+ABSENCE_MIN_SECONDS = 30.0
 
 
-def update_observed_stack(module_infos: Mapping[int, Mapping[str, Any]]) -> None:
-    """Stabilise BMS identity observations; missing reads never imply removal."""
-    global _OBSERVED_STACK, _OBSERVATION_CANDIDATES
-    for position, info in module_infos.items():
-        if position not in STACK_POSITIONS: continue
+def missing_expected_positions(module_count: int, observed_positions) -> list[int]:
+    """Compare live module positions only with the configured expected topology."""
+    expected = set(range(1, max(1, min(6, int(module_count))) + 1))
+    observed = {int(position) for position in observed_positions}
+    return sorted(expected - observed)
+
+
+def update_observed_stack(module_infos: Mapping[int, Mapping[str, Any]], *,
+                          present_positions: set[int] | None = None,
+                          communication_healthy: bool = True,
+                          expected_module_count: int = 6,
+                          observed_at: float | None = None) -> None:
+    """Update current Console presence without treating cached INFO as live data."""
+    global _OBSERVED_STACK, _OBSERVATION_CANDIDATES, _PRESENCE_SOURCES
+    global _MISSING_CANDIDATES, _COMMUNICATION_HEALTHY, _EXPECTED_MODULE_COUNT
+    now = time.time() if observed_at is None else float(observed_at)
+    _COMMUNICATION_HEALTHY = bool(communication_healthy)
+    _EXPECTED_MODULE_COUNT = max(1, min(6, int(expected_module_count)))
+    if not communication_healthy:
+        return
+    positions = ({int(value) for value in present_positions}
+                 if present_positions is not None else {int(value) for value in module_infos})
+    observed_any = bool(positions)
+    for position in positions:
+        if position not in STACK_POSITIONS:
+            continue
+        info = module_infos.get(position, {})
         serial = str(info.get("barcode")).strip() if info.get("barcode") else None
-        if not serial: continue
+        if not serial:
+            continue
+        _PRESENCE_SOURCES.setdefault(position, {})["console"] = {
+            "identity": serial, "timestamp": now, "source": "console"
+        }
+        _MISSING_CANDIDATES.pop(position, None)
         candidate, count = _OBSERVATION_CANDIDATES.get(position, ("", 0))
         count = count + 1 if candidate == serial else 1
         _OBSERVATION_CANDIDATES[position] = (serial, count)
-        if count >= OBSERVATION_CONFIRMATIONS: _OBSERVED_STACK[position] = serial
+        if count >= OBSERVATION_CONFIRMATIONS:
+            _OBSERVED_STACK[position] = serial
+    if not observed_any:
+        return
+    for position in range(1, _EXPECTED_MODULE_COUNT + 1):
+        if position in positions:
+            continue
+        count, since = _MISSING_CANDIDATES.get(position, (0, now))
+        _MISSING_CANDIDATES[position] = (count + 1, since)
+        if count + 1 >= ABSENCE_CONFIRMATIONS and now - since >= ABSENCE_MIN_SECONDS:
+            _OBSERVED_STACK[position] = None
+
+
+def update_rs485_observations(observations: Mapping[int, Mapping[str, Any]], *,
+                              observed_at: float | None = None) -> None:
+    """Merge time-aware 0x93 identities already resolved through position history."""
+    global _OBSERVED_STACK, _OBSERVATION_CANDIDATES, _PRESENCE_SOURCES
+    now = time.time() if observed_at is None else float(observed_at)
+    for value in observations.values():
+        position = value.get("position")
+        serial = value.get("serial_string")
+        timestamp = value.get("timestamp", now)
+        if position not in STACK_POSITIONS or not isinstance(serial, str) or not serial:
+            continue
+        sources = _PRESENCE_SOURCES.setdefault(int(position), {})
+        previous = sources.get("rs485_0x93")
+        sample_is_new = (previous is None
+                         or float(timestamp) > float(previous["timestamp"])
+                         or serial != previous["identity"])
+        if previous is not None and float(timestamp) < float(previous["timestamp"]):
+            continue
+        sources["rs485_0x93"] = {
+            "identity": serial, "timestamp": float(timestamp), "source": "rs485_0x93"
+        }
+        if now - float(timestamp) <= PRESENCE_FRESHNESS_SECONDS:
+            _MISSING_CANDIDATES.pop(int(position), None)
+            if not sample_is_new:
+                continue
+            candidate, count = _OBSERVATION_CANDIDATES.get(int(position), ("", 0))
+            count = count + 1 if candidate == serial else 1
+            _OBSERVATION_CANDIDATES[int(position)] = (serial, count)
+            if count >= OBSERVATION_CONFIRMATIONS:
+                _OBSERVED_STACK[int(position)] = serial
 
 
 def observed_stack() -> dict[int, str | None]:
     return dict(_OBSERVED_STACK)
 
 
-def stable_observed_changes(documented: Mapping[str, str | None] | None) -> dict[int, str]:
-    """Return confirmed serial changes only; incomplete observations are ignored."""
+def current_presence(*, now: float | None = None,
+                     freshness_seconds: float = PRESENCE_FRESHNESS_SECONDS,
+                     expected_module_count: int | None = None) -> dict[int, dict[str, Any]]:
+    """Project expected topology and live observations without rewriting history."""
+    target = time.time() if now is None else float(now)
+    expected_count = (_EXPECTED_MODULE_COUNT if expected_module_count is None
+                      else max(1, min(6, int(expected_module_count))))
+    result = {}
+    for position in STACK_POSITIONS:
+        sources = list(_PRESENCE_SOURCES.get(position, {}).values())
+        fresh = [item for item in sources
+                 if target - float(item["timestamp"]) <= float(freshness_seconds)]
+        expected = position <= expected_count
+        confirmed_absent = _OBSERVED_STACK.get(position, object()) is None
+        if fresh:
+            latest = max(fresh, key=lambda item: float(item["timestamp"]))
+            status, serial = "present", latest["identity"]
+        elif not expected:
+            status, serial = "not_expected", None
+        elif _COMMUNICATION_HEALTHY is not True:
+            status, serial = "unknown", None
+        elif confirmed_absent:
+            status, serial = "absent", None
+        elif sources:
+            status, serial = "stale", None
+        else:
+            status, serial = "unknown", None
+        result[position] = {
+            "position": position, "expected": expected, "status": status,
+            "observed_serial": serial,
+            "last_observed_at": max((float(item["timestamp"]) for item in sources), default=None),
+            "sources": sorted({item["source"] for item in fresh}),
+        }
+    return result
+
+
+def stable_observed_changes(documented: Mapping[str, str | None] | None) -> dict[int, str | None]:
+    """Return only confirmed additions, replacements, and removals."""
     expected = documented or {str(position): None for position in STACK_POSITIONS}
     return {position: serial for position, serial in _OBSERVED_STACK.items()
-            if serial and expected.get(str(position)) != serial}
+            if expected.get(str(position)) != serial}
 
 
 def classify_stack_change(before: Mapping[str, str | None] | None,
@@ -361,6 +483,24 @@ def documented_identity_at(path: Path | str, position: int, timestamp: datetime 
     if not matches: return None, None
     snapshot = matches[-1]
     return snapshot.positions[str(position)], snapshot.position_history_id
+
+
+def documented_position_at(path: Path | str, serial: str,
+                           timestamp: datetime | str) -> tuple[int | None, str | None]:
+    """Resolve a physical serial only in the snapshot effective at timestamp."""
+    target = normalize_utc_timestamp(timestamp, "timestamp")
+    snapshots = sorted(PositionHistoryLog(path).read_all(),
+                       key=lambda item: (item.effective_at, item.created_at,
+                                         item.position_history_id))
+    matches = [item for item in snapshots if item.effective_at <= target]
+    if not matches:
+        return None, None
+    snapshot = matches[-1]
+    positions = [int(position) for position, value in snapshot.positions.items()
+                 if value == serial]
+    if len(positions) != 1:
+        return None, snapshot.position_history_id
+    return positions[0], snapshot.position_history_id
 
 
 def resolve_maintenance_event_identities(events, path: Path | str) -> list[dict[str, Any]]:

@@ -10,10 +10,10 @@ class Rs485MqttProjection:
         self.mqtt = mqtt_publisher
         self.stale_seconds = int(stale_seconds)
         self.wall_clock = wall_clock
-        self._discovered = set()
+        self._discovered = {}
 
     def _discovery(self, key, name, unit=None, device_class=None, icon=None):
-        if not self.mqtt.discovery_enabled or key in self._discovered:
+        if not self.mqtt.discovery_enabled or self._discovered.get(key) == name:
             return
         payload = {
             "name": name, "unique_id": f"guardian_battery_{key}",
@@ -31,7 +31,7 @@ class Rs485MqttProjection:
             payload["icon"] = icon
         self.mqtt._publish(f"homeassistant/sensor/guardian_battery/{key}/config",
                            json.dumps(payload, separators=(",", ":")), retain=True)
-        self._discovered.add(key)
+        self._discovered[key] = name
 
     def publish(self, status: dict, latest: dict[int, dict], writer_status=None):
         self._discovery("rs485_status", "Guardian Battery RS485 Status", icon="mdi:serial-port")
@@ -62,9 +62,12 @@ class Rs485MqttProjection:
         for adr, values in sorted(latest.items()):
             sample_age = max(0, now - float(values.get("timestamp", 0)))
             freshness = "stale" if sample_age > self.stale_seconds else "current"
+            identity_label = (f"Modul {values['position']}" if values.get("identity_resolved")
+                              else f"Seriennummer {values['serial_string']}"
+                              if values.get("serial_string") else "Modul nicht zugeordnet")
             for suffix, label, field, unit, device_class in definitions:
                 key = f"rs485_adr_{adr:02x}_{suffix}"
-                self._discovery(key, f"Guardian Battery ADR {adr:02X} {label}", unit, device_class)
+                self._discovery(key, f"Guardian Battery {identity_label} {label}", unit, device_class)
                 self.mqtt._publish(f"{self.mqtt.prefix}/battery/{key}/availability",
                                    "online" if communication_available else "offline", retain=True)
                 if field in values:
@@ -75,7 +78,10 @@ class Rs485MqttProjection:
                         value = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
                     self.mqtt.state(key, value)
                     self.mqtt.attributes(key, {
-                        "adr": f"{adr:02X}", "identity_resolved": False,
+                        "adr": f"{adr:02X}",
+                        "identity_resolved": bool(values.get("identity_resolved")),
+                        "module_position": values.get("position"),
+                        "physical_serial": values.get("physical_serial"),
                         "sample_age_seconds": round(sample_age, 1),
                         "management_freshness": freshness,
                         "evidence_level": "observation", "causality": "not_determined",

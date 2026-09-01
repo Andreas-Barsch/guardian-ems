@@ -7,14 +7,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from maintenance_api import ApiResponse, error_json
 from position_history import (PositionHistoryConflictError, PositionHistoryError,
-                              PositionHistoryValidationError, observed_stack)
+                              PositionHistoryValidationError, current_presence)
 
 POSITION_HISTORY_API_ROUTE = "/api/position-history"
 
 
 class PositionHistoryApi:
-    def __init__(self, service):
+    def __init__(self, service, module_count_provider=None):
         self.service = service
+        self.module_count_provider = module_count_provider
 
     def handle(self, method: str, target: str, headers=None, body: bytes = b"") -> ApiResponse:
         try:
@@ -47,9 +48,19 @@ class PositionHistoryApi:
                                      "serial_histories": self.service.serial_histories()})
         if suffix == "current":
             item = self.service.current()
+            module_count = (int(self.module_count_provider())
+                            if self.module_count_provider else None)
+            presence = current_presence(expected_module_count=module_count)
+            observed = {str(position): value["observed_serial"]
+                        for position, value in presence.items()
+                        if value["status"] == "present"}
             return ApiResponse(200, {"snapshot": item.to_dict() if item else None,
-                                     "observed": {str(k): v for k, v in observed_stack().items()},
-                                     "divergence": self.service.divergence(observed_stack())})
+                                     "documented": self.service.last_documented_serials(),
+                                     "observed": observed,
+                                     "presence": {str(k): v for k, v in presence.items()},
+                                     "expected_module_count": sum(
+                                         1 for value in presence.values() if value["expected"]),
+                                     "divergence": self.service.divergence(observed)})
         if suffix == "resolve":
             timestamp = values.get("at")
             if not timestamp:

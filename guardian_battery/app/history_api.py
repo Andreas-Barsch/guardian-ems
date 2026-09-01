@@ -23,7 +23,7 @@ HISTORY_API_ROUTE = "/api/history/series"
 HISTORY_FILTERS = frozenset(
     {"metric", "metrics", "from", "to", "module_number", "cell_number", "cell_numbers",
      "voltage_cell_numbers", "temperature_cell_numbers", "include_archived", "active",
-     "analysis_mode", "adr", "what_if_low_soc_percent", "what_if_high_soc_percent",
+     "analysis_mode", "what_if_low_soc_percent", "what_if_high_soc_percent",
      "what_if_charge_current_a", "what_if_discharge_current_a"}
 )
 
@@ -87,9 +87,6 @@ class HistoryApi:
         if timestamp_from > timestamp_to:
             raise HistoryApiProblem("from must not exceed to")
         module_number = self._integer(values["module_number"], "module_number", 1, 6)
-        adr = self._integer(values.get("adr"), "adr", 0, 255)
-        if any(metric in RS485_SERIES_METRICS for metric in metrics) and adr is None:
-            raise HistoryApiProblem("adr is required for RS485 metrics")
         cell_number = self._integer(values.get("cell_number"), "cell_number", 1, 15)
         cell_numbers = self._integers(values.get("cell_numbers"), "cell_numbers", 1, 15)
         voltage_cells = self._integers(values.get("voltage_cell_numbers"),
@@ -131,7 +128,8 @@ class HistoryApi:
                 raise HistoryApiProblem("RS485 history is unavailable")
             rs485_requests = [item for item in requests if item["metric"] in RS485_SERIES_METRICS]
             projected_series.extend(self.rs485_series.query_bundles(
-                rs485_requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to, adr=adr))
+                rs485_requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                module_number=module_number))
         by_metric = {item["metric"]: item for item in projected_series}
         projected_series = [by_metric[metric] for metric in metrics]
         marker_cells = (tuple(sorted(set((voltage_cells or ()) + (temperature_cells or ()))))

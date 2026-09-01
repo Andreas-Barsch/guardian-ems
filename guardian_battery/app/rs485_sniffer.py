@@ -460,6 +460,7 @@ class PassiveRs485Reader:
         self._first_valid_logged = False
         self._first_0x92_logged = False
         self.latest_management_by_adr: dict[int, dict] = {}
+        self.latest_identity_by_adr: dict[int, dict] = {}
         self._status = {
             "enabled": True, "state": "starting", "resolved_port": None,
             "baudrate": self.baudrate, "last_byte_at": None, "last_frame_at": None,
@@ -477,6 +478,10 @@ class PassiveRs485Reader:
     def management(self) -> dict[int, dict]:
         with self._lock:
             return {adr: dict(value) for adr, value in self.latest_management_by_adr.items()}
+
+    def identities(self) -> dict[int, dict]:
+        with self._lock:
+            return {adr: dict(value) for adr, value in self.latest_identity_by_adr.items()}
 
     def _set(self, **values) -> None:
         with self._lock:
@@ -559,6 +564,24 @@ class PassiveRs485Reader:
                             self._first_0x92_logged = True
                 elif correlation.paired_command == 0x44:
                     self._set(responses_0x44=self.status()["responses_0x44"] + 1)
+                elif correlation.paired_command == 0x93:
+                    decoded = decode_0x93(correlation)
+                    if decoded.get("decoder_supported"):
+                        value = {
+                            "adr": frame.adr, "serial_string": decoded["serial_string"],
+                            "serial_raw": decoded["serial_raw"], "timestamp": now,
+                            "decode_source": "stored_decoded",
+                            "quality": {"evidence_level": "observation",
+                                        "identity_source": "direct_0x93",
+                                        "causality": "not_determined"},
+                        }
+                        with self._lock:
+                            if frame.adr not in self.latest_identity_by_adr \
+                                    and len(self.latest_identity_by_adr) >= self.max_adr_states:
+                                oldest = min(self.latest_identity_by_adr,
+                                             key=lambda adr: self.latest_identity_by_adr[adr]["timestamp"])
+                                del self.latest_identity_by_adr[oldest]
+                            self.latest_identity_by_adr[frame.adr] = value
             if self.frame_callback:
                 self.frame_callback(frame, correlation)
 

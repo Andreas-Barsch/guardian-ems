@@ -53,6 +53,27 @@ def test_append_only_rotation_full_0x92_and_no_initial_fake_change(tmp_path):
     assert bytes.fromhex(records[-1]["raw_frame"]) == response.frame.raw_frame
 
 
+def test_pipeline_persists_and_decodes_every_valid_0x93_request_response(tmp_path):
+    writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
+    writer.start()
+    pipeline = Rs485EvidencePipeline(writer, wall_clock=lambda: 1_786_147_200.0,
+                                     position_history_path=tmp_path / "positions.jsonl")
+    correlator = ResponseCorrelator()
+    request = frame(adr=6, code=0x93, info=b"\x06")
+    request_correlation = correlator.observe(request, 1.0)
+    response = frame(adr=6, code=0, info=b"\x06Y225004C32250226")
+    response_correlation = correlator.observe(response, 1.1)
+    pipeline(request, request_correlation)
+    pipeline(response, response_correlation)
+    writer.stop()
+    records = read_records(next(tmp_path.glob("*.jsonl")))
+    assert len(records) == 2
+    assert records[0]["paired_command"] == records[1]["paired_command"] == 0x93
+    assert records[1]["decoded"]["serial_string"] == "Y225004C32250226"
+    assert records[1]["physical_serial"] == "Y225004C32250226"
+    assert records[1]["identity_resolved"] is False
+
+
 def test_management_change_events_are_observations_with_old_new(tmp_path):
     writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
     writer.start()

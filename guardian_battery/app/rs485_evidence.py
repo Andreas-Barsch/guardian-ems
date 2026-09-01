@@ -7,10 +7,13 @@ import logging
 import queue
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
-from rs485_sniffer import Correlation, ParsedFrame, decode_0x92
+from rs485_sniffer import Correlation, ParsedFrame, decode_0x92, decode_0x93, decode_0x93_info
+from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryError,
+                              PositionHistoryLog,
+                              documented_position_at)
 
 
 LOG = logging.getLogger("guardian_battery.rs485_evidence")
@@ -131,13 +134,20 @@ class Rs485EvidencePipeline:
     """Convert accepted passive frames into evidence without identity guesses."""
 
     def __init__(self, writer: Rs485EvidenceWriter, *, wall_clock=time.time,
-                 fast_frame_interval_seconds=300.0):
+                 fast_frame_interval_seconds=300.0,
+                 position_history_path=DEFAULT_POSITION_HISTORY_FILE,
+                 max_identity_states=256):
         self.writer = writer
         self.wall_clock = wall_clock
         self.fast_frame_interval_seconds = float(fast_frame_interval_seconds)
         self._last_fast = {}
         self._unknown_exemplars = set()
         self._latest_management = {}
+        self._latest_identity = {}
+        self.position_history_path = Path(position_history_path)
+        self.max_identity_states = int(max_identity_states)
+        if self.max_identity_states <= 0:
+            raise ValueError("max_identity_states must be positive")
 
     def __call__(self, frame: ParsedFrame, correlation: Correlation):
         now = float(self.wall_clock())
@@ -145,13 +155,13 @@ class Rs485EvidencePipeline:
         if frame.is_request:
             command = frame.command
         key = (frame.adr, "request" if frame.is_request else "response")
-        persist = command in {0x92, 0x44}
+        persist = command in {0x92, 0x44, 0x93}
         if command == 0x42:
             last = self._last_fast.get(key)
             persist = last is None or now - last >= self.fast_frame_interval_seconds
             if persist:
                 self._last_fast[key] = now
-        if command not in {0x42, 0x44, 0x92}:
+        if command not in {0x42, 0x44, 0x92, 0x93}:
             exemplar = (frame.adr, frame.cid2_or_rtn, command)
             persist = exemplar not in self._unknown_exemplars
             self._unknown_exemplars.add(exemplar)
@@ -160,6 +170,27 @@ class Rs485EvidencePipeline:
         decoded = None
         if command == 0x92 and not frame.is_request:
             decoded = decode_0x92(correlation)
+        elif command == 0x93 and not frame.is_request:
+            decoded = decode_0x93(correlation)
+        if command == 0x93 and decoded and decoded.get("decoder_supported"):
+            if (frame.adr not in self._latest_identity
+                    and len(self._latest_identity) >= self.max_identity_states):
+                oldest = min(self._latest_identity,
+                             key=lambda adr: self._latest_identity[adr]["timestamp"])
+                del self._latest_identity[oldest]
+            self._latest_identity[frame.adr] = {
+                "serial_string": decoded["serial_string"],
+                "serial_raw": decoded["serial_raw"],
+                "timestamp": now, "decode_source": "stored_decoded",
+            }
+        identity = self._latest_identity.get(frame.adr)
+        position = snapshot_id = None
+        if identity is not None:
+            try:
+                position, snapshot_id = documented_position_at(
+                    self.position_history_path, identity["serial_string"], _iso(now))
+            except Exception:
+                position = snapshot_id = None
         reference = hashlib.sha256(frame.raw_frame).hexdigest()
         record = {
             "schema_version": RS485_SCHEMA_VERSION, "record_type": "frame",
@@ -173,12 +204,16 @@ class Rs485EvidencePipeline:
             "cid2_or_rtn": frame.cid2_or_rtn, "direction": "request" if frame.is_request else "response",
             "paired_command": command, "request_matched": correlation.request_matched,
             "info_raw": frame.info_hex, "decoder_supported": bool(decoded and decoded.get("decoder_supported")),
-            "identity_resolved": False, "physical_serial": None, "position": None,
+            "identity_resolved": position is not None,
+            "physical_serial": identity["serial_string"] if identity else None,
+            "position": position, "position_history_id": snapshot_id,
+            "identity_decode_source": identity.get("decode_source") if identity else None,
             "decoded": decoded, "quality": {"evidence_level": "observation",
-                "causality": "not_determined", "identity_source": "unresolved"},
+                "causality": "not_determined",
+                "identity_source": "position_history" if position is not None else "unresolved"},
         }
         self.writer.append(record)
-        if decoded and decoded.get("decoder_supported"):
+        if command == 0x92 and decoded and decoded.get("decoder_supported"):
             previous = self._latest_management.get(frame.adr)
             if previous is not None:
                 for field in _CHANGE_FIELDS:
@@ -197,17 +232,60 @@ class Rs485EvidencePipeline:
 class Rs485HistorySeries:
     """Read projected management values from rotated evidence JSONL."""
 
-    def __init__(self, directory=DEFAULT_RS485_HISTORY_DIR, max_points=6000):
+    def __init__(self, directory=DEFAULT_RS485_HISTORY_DIR, max_points=6000, *,
+                 position_history_path=DEFAULT_POSITION_HISTORY_FILE):
         self.directory = Path(directory)
         self.max_points = int(max_points)
+        self.position_history_path = Path(position_history_path)
 
-    def query_bundles(self, requests, *, timestamp_from, timestamp_to, adr):
+    @staticmethod
+    def _serial_decode(record):
+        if not (record.get("record_type") == "frame"
+                and record.get("direction") == "response"
+                and record.get("paired_command") == 0x93
+                and record.get("checksum_valid") is True
+                and record.get("frame_complete") is True
+                and record.get("request_matched") is True):
+            return None
+        try:
+            decoded = decode_0x93_info(int(record["adr"]), bytes.fromhex(record["info_raw"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not decoded.get("decoder_supported"):
+            return None
+        stored = record.get("decoded")
+        source = ("stored_decoded" if record.get("decoder_supported") is True
+                  and isinstance(stored, dict) else "historical_raw_redecode")
+        return {**decoded, "decode_source": source}
+
+    @staticmethod
+    def _position_at(snapshots, serial, timestamp):
+        matches = [item for item in snapshots if item.effective_at <= timestamp]
+        if not matches:
+            return None, None
+        snapshot = matches[-1]
+        positions = [int(position) for position, value in snapshot.positions.items()
+                     if value == serial]
+        return ((positions[0] if len(positions) == 1 else None),
+                snapshot.position_history_id)
+
+    def query_bundles(self, requests, *, timestamp_from, timestamp_to,
+                      module_number=None, adr=None):
+        if (module_number is None) == (adr is None):
+            raise ValueError("exactly one of module_number or adr is required")
         start = datetime.fromisoformat(timestamp_from.replace("Z", "+00:00"))
         end = datetime.fromisoformat(timestamp_to.replace("Z", "+00:00"))
         points = {item["metric"]: [] for item in requests}
-        day = start.date()
-        while day <= end.date():
-            path = self.directory / f"{day.isoformat()}.jsonl"
+        identities = {}
+        try:
+            snapshots = sorted(PositionHistoryLog(self.position_history_path).read_all(),
+                               key=lambda item: (item.effective_at, item.created_at,
+                                                 item.position_history_id))
+        except PositionHistoryError:
+            snapshots = []
+        paths = sorted(path for path in self.directory.glob("*.jsonl")
+                       if path.stem <= end.date().isoformat())
+        for path in paths:
             if path.exists():
                 with path.open(encoding="utf-8") as handle:
                     for line in handle:
@@ -215,10 +293,29 @@ class Rs485HistorySeries:
                             record = json.loads(line)
                         except json.JSONDecodeError:
                             continue  # includes a crash-truncated final line
-                        if record.get("record_type") != "frame" or record.get("adr") != adr:
+                        if record.get("record_type") != "frame":
                             continue
                         timestamp = record.get("timestamp")
-                        if not timestamp or timestamp < timestamp_from or timestamp > timestamp_to:
+                        if not timestamp or timestamp > timestamp_to:
+                            continue
+                        serial = self._serial_decode(record)
+                        if serial is not None:
+                            identities[int(record["adr"])] = serial
+                            continue
+                        if (timestamp < timestamp_from
+                                or record.get("paired_command") not in (None, 0x92)):
+                            continue
+                        record_adr = int(record.get("adr", -1))
+                        identity = identities.get(record_adr)
+                        position = snapshot_id = None
+                        if module_number is not None:
+                            if identity is None:
+                                continue
+                            position, snapshot_id = self._position_at(
+                                snapshots, identity["serial_string"], timestamp)
+                            if position != module_number:
+                                continue
+                        elif adr != record_adr:
                             continue
                         decoded = record.get("decoded") or {}
                         for request in requests:
@@ -227,9 +324,15 @@ class Rs485HistorySeries:
                                 value = decoded[field]
                                 points[request["metric"]].append({"timestamp": timestamp,
                                     "value": int(value) if isinstance(value, bool) else value,
-                                    "adr": adr, "identity_resolved": bool(record.get("identity_resolved"))})
-            day += timedelta(days=1)
-        return [{"metric": request["metric"], "adr": adr,
+                                    "adr": record_adr,
+                                    "identity_resolved": position is not None,
+                                    "physical_serial": identity["serial_string"] if identity else None,
+                                    "position": position,
+                                    "position_history_id": snapshot_id,
+                                    "identity_decode_source": identity.get("decode_source")
+                                    if identity else None})
+        return [{"metric": request["metric"],
+                 **({"module_number": module_number} if module_number is not None else {"adr": adr}),
                  "state_semantics": {"0": "STOP REQUEST", "1": "ENABLED"}
                  if request["metric"].endswith("_enable") else None,
                  "points": self._downsample(
