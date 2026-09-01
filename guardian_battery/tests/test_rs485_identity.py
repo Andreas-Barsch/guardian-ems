@@ -1,6 +1,8 @@
 import json
 import sys
+import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
@@ -8,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from position_history import PositionHistoryLog, PositionSnapshot
 from rs485_evidence import Rs485HistorySeries
 from rs485_identity import project_current_management
+from rs485_mqtt import Rs485MqttProjection
 
 
 SERIALS = ["H221005E22212581", "H221005E22212536", "H221005E22212571",
@@ -56,6 +59,101 @@ def test_unknown_serial_and_missing_position_remain_unresolved(tmp_path):
     assert result[6]["identity_known"] is True
     assert result[6]["identity_currently_confirmed"] is False
     assert result[7]["identity_known"] is False
+
+
+def test_management_timestamp_and_frame_provenance_win_over_default_resolver_datetime(
+        tmp_path):
+    positions = tmp_path / "positions.jsonl"
+    serial = SERIALS[0]
+    snapshot(positions, "2026-08-31T00:00:00+00:00", {1: serial})
+    management_quality = {"decoder_supported": True, "source": "direct_0x92"}
+    result = project_current_management(
+        {2: {"adr": 2, "timestamp": 1725210000.0,
+             "discharge_current_limit_a": -25.0,
+             "charge_current_limit_a": 0.0,
+             "discharge_enable": True, "charge_enable": False,
+             "quality": management_quality, "raw_frame": b"raw-0x92"}},
+        {2: {"serial_string": serial, "serial_raw": serial.encode().hex().upper(),
+             "decode_source": "live_0x93", "identity_known": True,
+             "identity_currently_confirmed": True}},
+        position_history_path=positions,
+    )[2]
+
+    assert result["timestamp"] == 1725210000.0
+    assert isinstance(result["timestamp"], (int, float))
+    assert result["adr"] == 2
+    assert result["quality"] is management_quality
+    assert "raw_frame" not in result
+    assert result["physical_serial"] == serial
+    assert result["position"] == 1
+    assert result["identity_resolved"] is True
+    assert result["identity_source"] == "live_0x93"
+    assert not any(isinstance(value, datetime) for value in result.values())
+    json.dumps(result)
+
+
+def test_real_management_projection_reaches_mqtt_json_and_history_confirmation(
+        tmp_path, monkeypatch):
+    import position_history
+
+    positions = tmp_path / "positions.jsonl"
+    serial = SERIALS[0]
+    snapshot(positions, "2026-08-31T00:00:00+00:00", {1: serial})
+    projected = project_current_management(
+        {2: {"timestamp": 1725210000.0, "charge_current_limit_a": 0.0,
+             "discharge_current_limit_a": -25.0, "charge_enable": False,
+             "discharge_enable": True}},
+        {2: {"serial_string": serial, "serial_raw": serial.encode().hex().upper(),
+             "decode_source": "live_0x93", "identity_known": True,
+             "identity_currently_confirmed": True}},
+        position_history_path=positions,
+    )
+
+    class MqttCapture:
+        prefix = "guardian"
+        discovery_enabled = False
+
+        def __init__(self):
+            self.messages = []
+
+        def _publish(self, topic, payload, retain):
+            self.messages.append((topic, payload, retain))
+
+        def state(self, name, value):
+            self.messages.append((name + "/state", value, True))
+
+        def attributes(self, name, value):
+            self.messages.append((name + "/attributes", value, True))
+
+    mqtt = MqttCapture()
+    Rs485MqttProjection(
+        mqtt, wall_clock=lambda: 1725210010.0, stale_seconds=600,
+    ).publish({"state": "listening"}, projected)
+    attributes = next(value for topic, value, _ in mqtt.messages
+                      if topic == "rs485_adr_02_dcl/attributes")
+    assert attributes["sample_age_seconds"] == 10.0
+    assert attributes["management_freshness"] == "current"
+    assert attributes["module_position"] == 1
+    assert ("rs485_adr_02_dcl/state", -25.0, True) in mqtt.messages
+    assert ("rs485_adr_02_charge_enable/state", "STOP REQUEST", True) in mqtt.messages
+    assert ("rs485_adr_02_discharge_enable/state", "ENABLED", True) in mqtt.messages
+    assert ("rs485_adr_02_last_update/state",
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1725210000.0)),
+            True) in mqtt.messages
+    json.dumps({"status": {"state": "listening"}, "management": projected,
+                "identities": {}, "history": {}})
+
+    monkeypatch.setattr(position_history, "_HISTORY_READY", False)
+    monkeypatch.setattr(position_history, "_PRESENCE_SOURCES", {})
+    monkeypatch.setattr(position_history, "_OBSERVATION_CANDIDATES", {})
+    monkeypatch.setattr(position_history, "_MISSING_CANDIDATES", {})
+    monkeypatch.setattr(position_history, "_OBSERVED_STACK", {})
+    position_history.update_observed_stack(
+        {1: {"barcode": serial}}, present_positions={1},
+        expected_module_count=1, observed_at=1725210010.0,
+        confirm_history=True,
+    )
+    assert position_history.history_observation_ready() is True
 
 
 def write_record(directory, timestamp, adr, command, decoded, info_raw=""):

@@ -140,9 +140,10 @@ def test_poll_exception_resets_history_guard_and_removal_evidence():
 def test_main_confirms_durable_history_only_after_publish_succeeds():
     source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
     publish = source.index("                publisher.publish(")
+    rs485_publish = source.index("                    rs485_mqtt.publish(")
     confirmation = source.index("                # Durable topology confirmation")
     record = source.index("                if history_observation_ready():")
-    assert publish < confirmation < record
+    assert publish < rs485_publish < confirmation < record
     assert "confirm_history=False" in source[publish - 7000:publish]
 
 

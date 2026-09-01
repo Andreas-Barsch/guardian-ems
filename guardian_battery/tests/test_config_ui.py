@@ -1,4 +1,6 @@
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 import config_ui
@@ -66,6 +68,44 @@ def test_history_series_api_and_ui_routes_support_dynamic_ingress_prefix():
     handler.path = '/api/hassio_ingress/dynamic-token/history'
     assert handler._is_history_ui() is True
     assert handler._ingress_base() == '/api/hassio_ingress/dynamic-token'
+
+
+def test_rs485_status_endpoint_serializes_resolved_management_with_numeric_timestamp(
+        monkeypatch):
+    import rs485_identity
+
+    monkeypatch.setattr(rs485_identity, 'resolve_rs485_identity', lambda *args, **kwargs: {
+        'adr': 2, 'serial_string': 'H221005E22212581', 'serial_raw': '48',
+        'timestamp': datetime.now(timezone.utc), 'decode_source': 'live_0x93',
+        'identity_source': 'live_0x93', 'identity_resolved': True,
+        'physical_serial': 'H221005E22212581', 'position': 1,
+        'position_history_id': 'PHS-test', 'quality': {'identity': True},
+    })
+    management = rs485_identity.project_current_management(
+        {2: {'timestamp': 1725210000.0, 'discharge_current_limit_a': -25.0}},
+        {2: {'serial_string': 'H221005E22212581', 'serial_raw': '48',
+             'decode_source': 'live_0x93', 'identity_known': True,
+             'identity_currently_confirmed': True}},
+    )
+    monkeypatch.setattr(config_ui, '_RS485_STATUS_PROVIDER', lambda: {
+        'status': {'state': 'listening'}, 'management': management,
+        'identities': {}, 'history': {},
+    })
+    handler = object.__new__(Handler)
+    handler.path = '/api/rs485/status'
+    handler._ingress_allowed = lambda: True
+    captured = {}
+
+    def send(code, body, ctype='application/json', headers=None):
+        captured.update(code=code, body=body, encoded=json.dumps(body))
+
+    handler._send = send
+    handler.do_GET()
+
+    assert captured['code'] == 200
+    assert captured['body']['management']['2']['timestamp'] == 1725210000.0
+    assert captured['body']['management']['2']['position'] == 1
+    assert 'H221005E22212581' in captured['encoded']
 
 
 def test_maintenance_api_is_lazy_and_path_is_injectable_for_tests(tmp_path, monkeypatch):

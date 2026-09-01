@@ -8,6 +8,13 @@ from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryErro
                               documented_position_at)
 
 
+_MANAGEMENT_IDENTITY_FIELDS = (
+    "serial_string", "serial_raw", "decode_source", "identity_source",
+    "identity_resolved", "identity_known", "identity_currently_confirmed",
+    "physical_serial", "position", "position_history_id",
+)
+
+
 def _iso(timestamp: float | str | datetime) -> str:
     if isinstance(timestamp, datetime):
         return timestamp.astimezone(timezone.utc).isoformat()
@@ -70,5 +77,22 @@ def project_current_management(management: dict[int, dict], identities: dict[int
                             "identity_source": "unresolved",
                             "causality": "not_determined"},
             }
-        result[int(adr)] = {**values, **resolved}
+        # Raw frames remain in the reader/evidence layer. The management
+        # projection is an MQTT/API DTO and must be JSON-serializable.
+        projected = {key: value for key, value in values.items()
+                     if key != "raw_frame"}
+        timestamp = projected.get("timestamp")
+        if isinstance(timestamp, datetime):
+            projected["timestamp"] = timestamp.timestamp()
+        elif isinstance(timestamp, str):
+            try:
+                projected["timestamp"] = float(timestamp)
+            except ValueError:
+                projected["timestamp"] = datetime.fromisoformat(
+                    timestamp.replace("Z", "+00:00")).timestamp()
+        elif timestamp is not None and not isinstance(timestamp, (int, float)):
+            raise TypeError("management timestamp must be numeric, ISO string, or datetime")
+        projected.update({key: resolved.get(key)
+                          for key in _MANAGEMENT_IDENTITY_FIELDS})
+        result[int(adr)] = projected
     return result
