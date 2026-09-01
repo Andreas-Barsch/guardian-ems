@@ -2,6 +2,32 @@
 
 Stand: 2026-08-31
 
+## Guardian Battery 0.7.15 – Position History Integrity + Diagnostic Topology UI
+
+### Reale Ursache des fehlerhaften Snapshots vom 01.09.2026 um 18:29
+
+- Partielle Polls galten fälschlich als gesund und durften dadurch History-Kandidaten bestätigen. Positionen 2–5 wurden in diesem unvollständigen Zustand als Removal-Kandidaten behandelt.
+- Der bereits produktiv gespeicherte fehlerhafte Snapshot wird durch 0.7.15 weder verändert noch gelöscht. Die Korrektur verhindert künftig, dass partielle Startup-/Poll-Zustände oder ein Poll mit Exception als bestätigte vollständige Topologie in die Position History gelangen.
+- Ab 0.7.15 darf erst ein vollständig erfolgreicher Poll History-Kandidaten bestätigen. Reconnect und Poll-Exception setzen Guard beziehungsweise Kandidaten zurück. Removal erfordert weiterhin drei gesunde Einzelbeobachtungen über mindestens 30 Sekunden und genau eine erwartete fehlende Position; Addition und Reintegration bleiben nach denselben konservativen Bestätigungsregeln möglich.
+
+### Cell Diagnostics und Topologie
+
+- Ein aktuell beobachtetes Zusatzmodul bleibt vollständig diagnostizierbar. Bei `present + not_expected` bleiben Diagnosewert und Diagnosefarbe unverändert; `NICHT ERWARTET` wird als unabhängiger Topologiehinweis dargestellt.
+- `stale`, `absent`, `not_expected + absent` und `unknown` werden getrennt projiziert. Veraltete oder nicht aktuelle Zustände werden nicht als frische Diagnose ausgegeben. Für ein vorhandenes Zusatzmodul bleiben die 15-Zellen-Detailsicht, Topologiestatus und beobachtete Seriennummer verfügbar.
+- Diagnosemethodik und Diagnostic Engine bleiben `0.4.12`. RS485 bleibt passiv; Missing-Alarme richten sich weiterhin ausschließlich nach der Solltopologie.
+
+### Source-, Add-on- und Dashboard-Abnahme
+
+- Die beiden Source-Dashboards `guardian_battery/dashboards/guardian_cell_diagnostics.yaml` und `homeassistant/dashboards/guardian_cell_diagnostics.yaml` gehören zum Release. Ein Add-on-Update aktualisiert die produktive Home-Assistant-Dashboarddatei unter `/config` nicht automatisch.
+- Deshalb sind getrennt zu verifizieren: Git-/Source-Stand, installierte Add-on-Version und produktive Dashboarddatei unter `/config` einschließlich tatsächlicher Browserdarstellung. Dieses Release führt kein `/config`-Deployment aus.
+
+### Nach Installation von 0.7.15 noch real abzunehmen
+
+- Nach Restart entsteht kein neuer falscher partieller Position-History-Snapshot.
+- Eine stabil bestätigte Reintegration von M6 erzeugt genau einen vollständigen Snapshot.
+- M6 wird bei `present + not_expected` aktuell diagnostiziert, separat gekennzeichnet und seine 15-Zellen-Detailsicht bleibt erreichbar.
+- Die produktive Dashboarddatei wird kontrolliert und separat aus der passenden 0.7.15-Source aktualisiert; Source, Add-on und produktives Dashboard werden anschließend unabhängig verifiziert.
+
 ## Guardian Battery 0.7.14 – Runtime Identity / Discovery Hotfix
 
 ### Reale Befunde vor dem Fix am 01.09.2026

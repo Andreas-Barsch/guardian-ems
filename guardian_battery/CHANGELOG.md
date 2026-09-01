@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.15 – Position History Integrity + Diagnostic Topology UI
+
+- Schützt die Position History vor partiellen Startup- und Poll-Zuständen: Erst ein vollständig erfolgreicher, gesunder Poll darf History-Kandidaten bestätigen. Poll-Exceptions und Reconnects bestätigen keine Änderung und setzen Guard beziehungsweise Kandidaten kontrolliert zurück.
+- Verschärft die Removal-Bestätigung auf genau eine erwartete fehlende Position bei weiterhin gesunder Restkommunikation. Bestätigte Addition, Reintegration und Removal werden atomar auf den letzten vollständigen Snapshot angewendet; partielle Zustände erzeugen keine falschen Leereinträge.
+- Stellt physisch vorhandene, aber nicht zur Solltopologie gehörende Module weiterhin vollständig diagnostisch dar. `present + not_expected` behält seinen aktuellen Diagnosewert und seine Diagnosefarbe und erhält separat die Kennzeichnung `NICHT ERWARTET`.
+- Trennt die Live-Semantik für `stale`, `absent` und `unknown`: veraltete Befunde werden als `VERALTET` markiert, entfernte Module nicht als aktuell diagnostiziert und unbekannte Zustände nicht als sichere aktuelle Diagnose dargestellt. Die 15-Zellen-Detailsicht bleibt für vorhandene Zusatzmodule einschließlich Topologiehinweis und beobachteter Seriennummer erreichbar.
+- Diagnosealgorithmen, Grenzwerte und Farben bleiben unverändert; die Diagnostic Engine bleibt `0.4.12`. RS485 bleibt passiv.
+- Guardian Battery und Add-on sind `0.7.15`.
+
 ## 0.7.14 – Runtime Identity / Discovery Hotfix
 
 - Behebt den Runtime-Fehler, bei dem ein Resolver-`datetime` den numerischen direkten `0x93`-Frame-Timestamp überschrieb und `update_rs485_observations()` anschließend an `float(timestamp)` scheiterte. Numerische, ISO- und `datetime`-Zeitstempel werden kontrolliert verarbeitet; ungültige Identitäten bleiben pro Eintrag isoliert und beenden nicht den gesamten Poll-Zyklus.
