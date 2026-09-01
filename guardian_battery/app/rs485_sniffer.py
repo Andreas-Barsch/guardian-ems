@@ -316,6 +316,86 @@ def decode_0x92(correlation: Correlation) -> dict:
     }
 
 
+def _serial_quality(frame: ParsedFrame, request_matched: bool) -> dict:
+    return {
+        "adr": frame.adr,
+        "checksum_valid": frame.checksum_valid,
+        "frame_complete": frame.frame_complete,
+        "request_matched": request_matched,
+        "decoder_supported": False,
+        "source": frame.source,
+        "protocol_reference": frame.protocol_reference,
+        "decoder_version": frame.decoder_version,
+        "info_raw": frame.info_hex,
+    }
+
+
+def _serial_command_error(adr: int, command: int) -> str | None:
+    if not 0x01 <= command <= 0x08:
+        return "command_out_of_range"
+    if command != adr:
+        return "command_adr_mismatch"
+    return None
+
+
+def decode_0x93_request(frame: ParsedFrame) -> dict:
+    """Validate the documented one-byte 0x93 serial-number request INFO."""
+    if not frame.is_request or frame.command != 0x93:
+        raise ValueError("frame is not a 0x93 request")
+    result = _serial_quality(frame, False)
+    if len(frame.info) != 1:
+        return {**result, "decode_error": "invalid_info_length"}
+    command = frame.info[0]
+    error = _serial_command_error(frame.adr, command)
+    if error:
+        return {**result, "command": command, "decode_error": error}
+    return {**result, "command": command, "decoder_supported": True}
+
+
+def decode_0x93(correlation: Correlation) -> dict:
+    """Decode a V3.3 0x93 response without inferring a module position.
+
+    DATAI is exactly one command byte followed by exactly 16 ASCII serial
+    bytes. The serial bytes are retained as uppercase hexadecimal and decoded
+    byte-for-byte; no trimming, padding removal, or normalization is applied.
+    """
+    frame = correlation.frame
+    if frame.is_request:
+        raise ValueError("frame is not a 0x93 response")
+    result = _serial_quality(frame, correlation.request_matched)
+    if correlation.paired_command != 0x93 or not correlation.request_matched:
+        return {**result, "rtn": frame.rtn, "decode_error": "unmatched_response"}
+    if frame.rtn != 0:
+        return {**result, "rtn": frame.rtn, "decode_error": "nonzero_rtn"}
+    if len(frame.info) != 17:
+        return {**result, "rtn": frame.rtn, "decode_error": "invalid_info_length"}
+
+    command = frame.info[0]
+    error = _serial_command_error(frame.adr, command)
+    if error:
+        return {
+            **result, "rtn": frame.rtn, "command": command,
+            "decode_error": error,
+        }
+    serial_bytes = frame.info[1:]
+    try:
+        serial_string = serial_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        return {
+            **result, "rtn": frame.rtn, "command": command,
+            "serial_raw": serial_bytes.hex().upper(),
+            "decode_error": "serial_not_ascii",
+        }
+    return {
+        **result,
+        "rtn": frame.rtn,
+        "command": command,
+        "serial_raw": serial_bytes.hex().upper(),
+        "serial_string": serial_string,
+        "decoder_supported": True,
+    }
+
+
 LOG = logging.getLogger("guardian_battery.rs485")
 
 

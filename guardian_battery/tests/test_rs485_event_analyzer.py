@@ -34,6 +34,21 @@ def management(ccl=25.0, dcl=-25.0, charge=True, discharge=True, cvl=53.25, dvl=
     }
 
 
+def serial_frame(timestamp, serial, *, adr=2, **overrides):
+    command = adr
+    serial_raw = serial.encode("ascii").hex().upper()
+    overrides.setdefault("decoder_supported", True)
+    overrides.setdefault("decoded", {
+        "adr": adr, "command": command, "serial_raw": serial_raw,
+        "serial_string": serial,
+    })
+    return frame(
+        timestamp, adr=adr, command=0x93,
+        info=f"{command:02X}{serial_raw}",
+        **overrides,
+    )
+
+
 def write_jsonl(path, records, malformed=False):
     text = "\n".join(json.dumps(item) for item in records)
     if malformed:
@@ -176,6 +191,70 @@ def test_summary_contains_counts_and_last_management(tmp_path):
     assert "Valid 0x92 responses: 1" in text
     assert "ADRs observed: 03" in text
     assert "last CCL: +25.0 A" in text and "last DCL: -25.0 A" in text
+
+
+def test_analyzer_commands_0x93_multiple_adrs_and_exact_serial_output(tmp_path):
+    path = tmp_path / "history.jsonl"
+    write_jsonl(path, [
+        serial_frame("2026-08-31T19:01:00+00:00", "Y225004C32250226", adr=2),
+        serial_frame("2026-08-31T19:02:00+00:00", "Y225004C32250227", adr=3),
+        frame("2026-08-31T19:03:00+00:00", decoded=management()),
+    ])
+    result = analyze(path, commands={0x93})
+    assert result["adrs_observed"] == [2, 3]
+    assert result["totals"]["valid_0x93"] == 2
+    assert [event["marker"] for event in result["events"]] == ["BASELINE", "BASELINE"]
+    text = render_text(result)
+    assert "ADR 02 | 0x93 SERIAL BASELINE | Y225004C32250226" in text
+    assert "ADR 03 | 0x93 SERIAL BASELINE | Y225004C32250227" in text
+
+
+def test_0x93_changes_only_suppresses_repeat_and_reports_change(tmp_path):
+    path = tmp_path / "history.jsonl"
+    write_jsonl(path, [
+        serial_frame("2026-08-31T19:01:00+00:00", "Y225004C32250226"),
+        serial_frame("2026-08-31T19:02:00+00:00", "Y225004C32250226"),
+        serial_frame("2026-08-31T19:03:00+00:00", "Y225004C32250299"),
+    ])
+    result = analyze(path, commands={0x93}, changes_only=True)
+    assert [event["marker"] for event in result["events"]] == ["BASELINE", "CHANGE"]
+    assert result["totals"]["valid_0x93"] == 3
+    assert result["totals"]["changes_0x93"] == 1
+    text = render_text(result)
+    assert text.count("Y225004C32250226") == 2
+    assert ("0x93 SERIAL CHANGE | old=Y225004C32250226 -> "
+            "new=Y225004C32250299") in text
+
+
+@pytest.mark.parametrize("overrides", [
+    {"checksum_valid": False},
+    {"request_matched": False},
+    {"decoder_supported": False},
+    {"info_raw": "0159"},
+    {"decoded": {"command": 2, "serial_raw": "59", "serial_string": "Y"}},
+])
+def test_0x93_invalid_or_unmatched_evidence_is_rejected(tmp_path, overrides):
+    path = tmp_path / "history.jsonl"
+    write_jsonl(path, [serial_frame(
+        "2026-08-31T19:01:00+00:00", "Y225004C32250226", **overrides)])
+    result = analyze(path, commands={0x93})
+    assert result["totals"]["valid_0x93"] == 0
+    assert result["counters"]["invalid_evidence"] == 1
+
+
+def test_0x93_summary_reports_latest_serial_observations_and_changes(tmp_path):
+    path = tmp_path / "history.jsonl"
+    write_jsonl(path, [
+        serial_frame("2026-08-31T19:01:00+00:00", "Y225004C32250226", adr=6),
+        serial_frame("2026-08-31T19:02:00+00:00", "Y225004C32250227", adr=6),
+        frame("2026-08-31T19:03:00+00:00", adr=7, decoded=management()),
+    ])
+    text = render_text(analyze(path))
+    assert "ADR 06:" in text
+    assert "serial: Y225004C32250227" in text
+    assert "serial observations: 2" in text
+    assert "serial changes: 1" in text
+    assert "ADR 07:" in text and "serial: unknown" in text
 
 
 def test_cli_json_output(tmp_path, capsys):

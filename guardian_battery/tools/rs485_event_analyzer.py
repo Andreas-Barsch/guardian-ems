@@ -55,6 +55,26 @@ def _valid_0x44(record: dict) -> bool:
     return _valid_frame(record) and isinstance(record.get("info_raw"), str)
 
 
+def _valid_0x93(record: dict) -> bool:
+    decoded = record.get("decoded")
+    if not (_valid_frame(record) and record.get("request_matched") is True
+            and record.get("decoder_supported") is True and isinstance(decoded, dict)):
+        return False
+    try:
+        adr = int(record["adr"])
+        command = int(decoded["command"])
+        serial_raw = bytes.fromhex(decoded["serial_raw"])
+        info_raw = bytes.fromhex(record["info_raw"])
+        serial_string = decoded["serial_string"]
+        serial_encoded = serial_string.encode("ascii")
+    except (KeyError, TypeError, ValueError, UnicodeEncodeError, AttributeError):
+        return False
+    return (len(serial_raw) == 16 and len(info_raw) == 17
+            and info_raw == bytes([command]) + serial_raw
+            and 0x01 <= command <= 0x08 and command == adr
+            and isinstance(serial_string, str) and serial_encoded == serial_raw)
+
+
 def _management_state(record: dict) -> tuple:
     decoded = record["decoded"]
     return tuple(decoded.get(field) for field in MANAGEMENT_FIELDS)
@@ -118,6 +138,15 @@ def _byte_change_line(timestamp, adr, old, new, changes, output_timezone) -> str
             f" | info_length={len(new)} | changed_bytes={len(changes)} | {details}")
 
 
+def _serial_line(timestamp, adr, serial, output_timezone, marker=None, old=None) -> str:
+    head = f"{_local_time(timestamp, output_timezone)} | ADR {adr:02X} | 0x93 SERIAL"
+    if marker == "CHANGE":
+        return f"{head} CHANGE | old={old} -> new={serial}"
+    if marker:
+        head += f" {marker}"
+    return f"{head} | {serial}"
+
+
 def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None,
                  changes_only=False) -> dict:
     """Analyze one JSONL file without modifying it or any Guardian state."""
@@ -127,7 +156,7 @@ def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None
         raise ValueError("--from must be earlier than --to")
     output_timezone = (datetime.fromisoformat(timestamp_from.replace("Z", "+00:00")).tzinfo
                        if isinstance(timestamp_from, str) else start.tzinfo)
-    commands = {0x44, 0x92} if commands is None else set(commands)
+    commands = {0x44, 0x92, 0x93} if commands is None else set(commands)
     records = []
     counters = {"lines_examined": 0, "malformed_json": 0, "invalid_timestamp": 0,
                 "invalid_evidence": 0}
@@ -156,11 +185,14 @@ def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None
 
     events = []
     totals = {"valid_0x92": 0, "valid_0x44": 0, "changes_0x44": 0,
-              "state_changes": 0}
+              "valid_0x93": 0, "changes_0x93": 0, "state_changes": 0}
     per_adr = defaultdict(lambda: {"responses_0x92": 0, "responses_0x44": 0,
-                                   "changes_0x44": 0, "last_management": None})
+                                   "changes_0x44": 0, "serial": None,
+                                   "serial_observations": 0, "serial_changes": 0,
+                                   "last_management": None})
     last_44 = {}
     last_92 = {}
+    last_93 = {}
     visible_92 = set()
     observed = set()
 
@@ -226,6 +258,32 @@ def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None
                 events.append({"timestamp": timestamp, "line_number": line_number,
                                "type": "0x92", "adr": adr,
                                "decoded": record["decoded"], "marker": marker})
+            continue
+
+        if _is_response(record, 0x93) and 0x93 in commands:
+            if not _valid_0x93(record):
+                if in_window:
+                    counters["invalid_evidence"] += 1
+                continue
+            serial = record["decoded"]["serial_string"]
+            previous = last_93.get(adr)
+            last_93[adr] = serial
+            if not in_window:
+                continue
+            observed.add(adr)
+            totals["valid_0x93"] += 1
+            values = per_adr[adr]
+            values["serial"] = serial
+            values["serial_observations"] += 1
+            marker = "BASELINE" if previous is None else None
+            if previous is not None and previous != serial:
+                marker = "CHANGE"
+                totals["changes_0x93"] += 1
+                values["serial_changes"] += 1
+            if not changes_only or marker is not None:
+                events.append({"timestamp": timestamp, "line_number": line_number,
+                               "type": "0x93", "adr": adr, "serial": serial,
+                               "old": previous, "marker": marker})
 
     events.sort(key=lambda item: (item["timestamp"], item["line_number"], item["type"]))
     return {
@@ -245,6 +303,9 @@ def render_text(result: dict) -> str:
                                           timezone_used, event["marker"]))
         elif event["type"] == "state_change":
             lines.append(_state_change_line(event["timestamp"], event["record"], timezone_used))
+        elif event["type"] == "0x93":
+            lines.append(_serial_line(event["timestamp"], event["adr"], event["serial"],
+                                      timezone_used, event["marker"], event["old"]))
         else:
             lines.append(_byte_change_line(event["timestamp"], event["adr"], event["old"],
                                            event["new"], event["changes"], timezone_used))
@@ -258,6 +319,8 @@ def render_text(result: dict) -> str:
                   f"Valid 0x92 responses: {totals['valid_0x92']}",
                   f"Valid 0x44 responses: {totals['valid_0x44']}",
                   f"0x44 changes: {totals['changes_0x44']}",
+                  f"Valid 0x93 responses: {totals['valid_0x93']}",
+                  f"0x93 serial changes: {totals['changes_0x93']}",
                   f"State changes: {totals['state_changes']}",
                   "ADRs observed: " + (", ".join(f"{adr:02X}" for adr in result["adrs_observed"]) or "none")])
     for adr, values in result["per_adr"].items():
@@ -267,6 +330,9 @@ def render_text(result: dict) -> str:
                       f"  0x92 responses: {values['responses_0x92']}",
                       f"  0x44 responses: {values['responses_0x44']}",
                       f"  0x44 changes: {values['changes_0x44']}",
+                      f"  serial: {values['serial'] if values['serial'] is not None else 'unknown'}",
+                      f"  serial observations: {values['serial_observations']}",
+                      f"  serial changes: {values['serial_changes']}",
                       f"  last CCL: {_number(latest.get('charge_current_limit_a'), 'A', True)}",
                       f"  last DCL: {_number(latest.get('discharge_current_limit_a'), 'A', True)}",
                       f"  last CHG: {enabled(latest.get('charge_enable'))}",
@@ -298,7 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--to", dest="timestamp_to", required=True,
                         help="inclusive offset-aware ISO-8601 end")
     parser.add_argument("--adr", help="comma-separated ADRs, e.g. 2,3,4")
-    parser.add_argument("--commands", help="comma-separated commands, e.g. 0x44,0x92")
+    parser.add_argument("--commands", help="comma-separated commands, e.g. 0x44,0x92,0x93")
     parser.add_argument("--changes-only", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser

@@ -24,6 +24,8 @@ from rs485_sniffer import (  # noqa: E402
     calculate_checksum,
     calculate_lchksum,
     decode_0x92,
+    decode_0x93,
+    decode_0x93_request,
     open_passive_serial,
     parse_frame,
 )
@@ -76,6 +78,21 @@ def correlated_management(
         info=management_info() if info is None else info,
     ))
     return correlator.observe(response, 10.0 + delay)
+
+
+def correlated_serial(
+    serial: bytes = b"Y225004C32250226", *, adr: int = 2, command: int | None = None,
+    rtn: int = 0,
+):
+    command = adr if command is None else command
+    correlator = ResponseCorrelator(timeout_seconds=1)
+    request = parse_frame(synthetic_frame(adr=adr, cid2_or_rtn=0x93,
+                                          info=bytes([command])))
+    correlator.observe(request, 10.0)
+    response = parse_frame(synthetic_frame(
+        adr=adr, cid2_or_rtn=rtn, info=bytes([command]) + serial,
+    ))
+    return request, correlator.observe(response, 10.1)
 
 
 def test_stream_framer_accepts_complete_and_fragmented_frames():
@@ -238,6 +255,81 @@ def test_decode_rejects_unmatched_response():
     correlation = ResponseCorrelator().observe(frame, 1)
     with pytest.raises(ValueError, match="correlated 0x92"):
         decode_0x92(correlation)
+
+
+def test_decode_0x93_validates_documented_request():
+    request, _ = correlated_serial()
+    result = decode_0x93_request(request)
+    assert result["adr"] == 2
+    assert result["command"] == 2
+    assert result["decoder_supported"] is True
+    assert result["protocol_reference"] == (
+        "Pylontech Low Voltage RS485 Protocol V3.3, 2018-08-21")
+
+
+@pytest.mark.parametrize(("adr", "info", "error"), [
+    (2, b"", "invalid_info_length"),
+    (2, b"\x01\x02", "invalid_info_length"),
+    (2, b"\x00", "command_out_of_range"),
+    (2, b"\x03", "command_adr_mismatch"),
+])
+def test_decode_0x93_rejects_invalid_request_structure(adr, info, error):
+    request = parse_frame(synthetic_frame(adr=adr, cid2_or_rtn=0x93, info=info))
+    result = decode_0x93_request(request)
+    assert result["decoder_supported"] is False
+    assert result["decode_error"] == error
+
+
+@pytest.mark.parametrize("adr", [2, 3, 8])
+def test_decode_0x93_response_preserves_exact_ascii_and_raw_bytes(adr):
+    serial = b"Y225004C32250226"
+    _, correlation = correlated_serial(serial, adr=adr)
+    result = decode_0x93(correlation)
+    assert result["adr"] == adr
+    assert result["command"] == adr
+    assert result["serial_string"] == "Y225004C32250226"
+    assert bytes.fromhex(result["serial_raw"]) == serial
+    assert result["checksum_valid"] is True
+    assert result["request_matched"] is True
+    assert result["decoder_supported"] is True
+
+
+def test_decode_0x93_does_not_trim_or_normalize_ascii_bytes():
+    serial = b" A234567890123\x00 "
+    assert len(serial) == 16
+    result = decode_0x93(correlated_serial(serial)[1])
+    assert result["serial_string"].encode("ascii") == serial
+    assert bytes.fromhex(result["serial_raw"]) == serial
+
+
+@pytest.mark.parametrize("serial", [b"A" * 15, b"A" * 17])
+def test_decode_0x93_rejects_non_exact_serial_length(serial):
+    result = decode_0x93(correlated_serial(serial)[1])
+    assert result["decoder_supported"] is False
+    assert result["decode_error"] == "invalid_info_length"
+
+
+def test_decode_0x93_rejects_response_command_adr_mismatch():
+    result = decode_0x93(correlated_serial(command=3)[1])
+    assert result["decoder_supported"] is False
+    assert result["decode_error"] == "command_adr_mismatch"
+
+
+def test_decode_0x93_marks_unmatched_response_unsupported():
+    response = parse_frame(synthetic_frame(
+        adr=2, cid2_or_rtn=0, info=b"\x02Y225004C32250226"))
+    result = decode_0x93(ResponseCorrelator().observe(response, 1.0))
+    assert result["request_matched"] is False
+    assert result["decoder_supported"] is False
+    assert result["decode_error"] == "unmatched_response"
+
+
+def test_0x93_invalid_checksum_is_rejected_before_decode():
+    raw = bytearray(synthetic_frame(
+        adr=2, cid2_or_rtn=0, info=b"\x02Y225004C32250226"))
+    raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
+    with pytest.raises(FrameValidationError, match="invalid_checksum"):
+        parse_frame(bytes(raw))
 
 
 def test_runtime_module_has_no_transmission_path():
