@@ -25,6 +25,7 @@ from rs485_sniffer import (  # noqa: E402
     calculate_lchksum,
     decode_0x92,
     decode_0x93,
+    decode_0x93_info,
     decode_0x93_request,
     open_passive_serial,
     parse_frame,
@@ -292,6 +293,17 @@ def test_decode_0x93_response_preserves_exact_ascii_and_raw_bytes(adr):
     assert result["checksum_valid"] is True
     assert result["request_matched"] is True
     assert result["decoder_supported"] is True
+
+
+def test_decode_0x93_info_is_the_central_raw_decoder():
+    result = decode_0x93_info(2, bytes.fromhex(
+        "0248323231303035453232323132353831"))
+    assert result == {
+        "command": 2,
+        "serial_raw": "48323231303035453232323132353831",
+        "serial_string": "H221005E22212581",
+        "decoder_supported": True,
+    }
 
 
 def test_decode_0x93_does_not_trim_or_normalize_ascii_bytes():

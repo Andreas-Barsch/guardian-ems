@@ -9,6 +9,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+APP_DIR = Path(__file__).resolve().parents[1] / "app"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
+from rs485_sniffer import decode_0x93_info  # noqa: E402
+
 
 MANAGEMENT_FIELDS = (
     "charge_current_limit_a", "discharge_current_limit_a",
@@ -55,24 +61,26 @@ def _valid_0x44(record: dict) -> bool:
     return _valid_frame(record) and isinstance(record.get("info_raw"), str)
 
 
-def _valid_0x93(record: dict) -> bool:
-    decoded = record.get("decoded")
+def _decode_0x93_record(record: dict) -> tuple[dict, str] | None:
     if not (_valid_frame(record) and record.get("request_matched") is True
-            and record.get("decoder_supported") is True and isinstance(decoded, dict)):
-        return False
+            and isinstance(record.get("info_raw"), str)):
+        return None
     try:
         adr = int(record["adr"])
-        command = int(decoded["command"])
-        serial_raw = bytes.fromhex(decoded["serial_raw"])
         info_raw = bytes.fromhex(record["info_raw"])
-        serial_string = decoded["serial_string"]
-        serial_encoded = serial_string.encode("ascii")
-    except (KeyError, TypeError, ValueError, UnicodeEncodeError, AttributeError):
-        return False
-    return (len(serial_raw) == 16 and len(info_raw) == 17
-            and info_raw == bytes([command]) + serial_raw
-            and 0x01 <= command <= 0x08 and command == adr
-            and isinstance(serial_string, str) and serial_encoded == serial_raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+    decoded_now = decode_0x93_info(adr, info_raw)
+    if not decoded_now.get("decoder_supported"):
+        return None
+
+    stored = record.get("decoded")
+    if record.get("decoder_supported") is True and isinstance(stored, dict):
+        fields = ("command", "serial_raw", "serial_string")
+        if any(stored.get(field) != decoded_now[field] for field in fields):
+            return None
+        return decoded_now, "stored_decoded"
+    return decoded_now, "historical_raw_redecode"
 
 
 def _management_state(record: dict) -> tuple:
@@ -189,6 +197,7 @@ def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None
     per_adr = defaultdict(lambda: {"responses_0x92": 0, "responses_0x44": 0,
                                    "changes_0x44": 0, "serial": None,
                                    "serial_observations": 0, "serial_changes": 0,
+                                   "serial_decode_source": None,
                                    "last_management": None})
     last_44 = {}
     last_92 = {}
@@ -261,11 +270,13 @@ def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None
             continue
 
         if _is_response(record, 0x93) and 0x93 in commands:
-            if not _valid_0x93(record):
+            current_decode = _decode_0x93_record(record)
+            if current_decode is None:
                 if in_window:
                     counters["invalid_evidence"] += 1
                 continue
-            serial = record["decoded"]["serial_string"]
+            decoded, decode_source = current_decode
+            serial = decoded["serial_string"]
             previous = last_93.get(adr)
             last_93[adr] = serial
             if not in_window:
@@ -275,6 +286,7 @@ def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None
             values = per_adr[adr]
             values["serial"] = serial
             values["serial_observations"] += 1
+            values["serial_decode_source"] = decode_source
             marker = "BASELINE" if previous is None else None
             if previous is not None and previous != serial:
                 marker = "CHANGE"
@@ -283,7 +295,8 @@ def analyze_file(path, timestamp_from, timestamp_to, *, adrs=None, commands=None
             if not changes_only or marker is not None:
                 events.append({"timestamp": timestamp, "line_number": line_number,
                                "type": "0x93", "adr": adr, "serial": serial,
-                               "old": previous, "marker": marker})
+                               "old": previous, "marker": marker,
+                               "decode_source": decode_source})
 
     events.sort(key=lambda item: (item["timestamp"], item["line_number"], item["type"]))
     return {

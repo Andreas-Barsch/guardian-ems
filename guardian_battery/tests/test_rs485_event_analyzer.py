@@ -204,6 +204,7 @@ def test_analyzer_commands_0x93_multiple_adrs_and_exact_serial_output(tmp_path):
     assert result["adrs_observed"] == [2, 3]
     assert result["totals"]["valid_0x93"] == 2
     assert [event["marker"] for event in result["events"]] == ["BASELINE", "BASELINE"]
+    assert all(event["decode_source"] == "stored_decoded" for event in result["events"])
     text = render_text(result)
     assert "ADR 02 | 0x93 SERIAL BASELINE | Y225004C32250226" in text
     assert "ADR 03 | 0x93 SERIAL BASELINE | Y225004C32250227" in text
@@ -229,7 +230,6 @@ def test_0x93_changes_only_suppresses_repeat_and_reports_change(tmp_path):
 @pytest.mark.parametrize("overrides", [
     {"checksum_valid": False},
     {"request_matched": False},
-    {"decoder_supported": False},
     {"info_raw": "0159"},
     {"decoded": {"command": 2, "serial_raw": "59", "serial_string": "Y"}},
 ])
@@ -255,6 +255,72 @@ def test_0x93_summary_reports_latest_serial_observations_and_changes(tmp_path):
     assert "serial observations: 2" in text
     assert "serial changes: 1" in text
     assert "ADR 07:" in text and "serial: unknown" in text
+
+
+def historical_serial_frame(timestamp="2026-08-31T19:01:00+00:00", **overrides):
+    record = {
+        "record_type": "frame", "timestamp": timestamp, "adr": 2,
+        "direction": "response", "paired_command": 0x93,
+        "checksum_valid": True, "frame_complete": True, "request_matched": True,
+        "info_raw": "0248323231303035453232323132353831",
+        "decoder_supported": False, "decoded": None,
+    }
+    record.update(overrides)
+    return record
+
+
+def test_historical_0x93_real_evidence_is_redecoded_without_modifying_jsonl(tmp_path):
+    path = tmp_path / "2026-08-31.jsonl"
+    write_jsonl(path, [historical_serial_frame()])
+    before = path.read_bytes()
+    result = analyze(path, commands={0x93})
+    after = path.read_bytes()
+
+    assert before == after
+    assert result["totals"]["valid_0x93"] == 1
+    event = result["events"][0]
+    assert event["serial"] == "H221005E22212581"
+    assert event["decode_source"] == "historical_raw_redecode"
+    assert result["per_adr"][2]["serial_decode_source"] == "historical_raw_redecode"
+    assert "ADR 02 | 0x93 SERIAL BASELINE | H221005E22212581" in render_text(result)
+
+
+def test_historical_0x93_changes_only_suppresses_identical_repeat(tmp_path):
+    path = tmp_path / "history.jsonl"
+    write_jsonl(path, [
+        historical_serial_frame("2026-08-31T19:01:00+00:00"),
+        historical_serial_frame("2026-08-31T19:02:00+00:00"),
+    ])
+    result = analyze(path, commands={0x93}, changes_only=True)
+    assert len(result["events"]) == 1
+    assert result["events"][0]["marker"] == "BASELINE"
+    assert result["per_adr"][2]["serial_observations"] == 2
+
+
+@pytest.mark.parametrize("overrides", [
+    {"checksum_valid": False},
+    {"request_matched": False},
+    {"info_raw": "0248"},
+    {"info_raw": "0348323231303035453232323132353831"},
+])
+def test_historical_0x93_invalid_raw_evidence_is_not_redecoded(tmp_path, overrides):
+    path = tmp_path / "history.jsonl"
+    write_jsonl(path, [historical_serial_frame(**overrides)])
+    result = analyze(path, commands={0x93})
+    assert result["totals"]["valid_0x93"] == 0
+    assert result["counters"]["invalid_evidence"] == 1
+    assert result["events"] == []
+
+
+def test_historical_0x93_json_output_exposes_redecode_provenance(tmp_path, capsys):
+    path = tmp_path / "history.jsonl"
+    write_jsonl(path, [historical_serial_frame()])
+    assert main(["--file", str(path), "--from", "2026-08-31T19:00:00+00:00",
+                 "--to", "2026-08-31T19:40:00+00:00", "--commands", "0x93",
+                 "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["events"][0]["decode_source"] == "historical_raw_redecode"
+    assert output["per_adr"]["2"]["serial"] == "H221005E22212581"
 
 
 def test_cli_json_output(tmp_path, capsys):

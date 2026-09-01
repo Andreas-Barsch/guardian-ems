@@ -352,6 +352,37 @@ def decode_0x93_request(frame: ParsedFrame) -> dict:
     return {**result, "command": command, "decoder_supported": True}
 
 
+def decode_0x93_info(adr: int, info: bytes) -> dict:
+    """Decode documented 0x93 DATAI bytes independently of record age."""
+    if not isinstance(info, bytes):
+        raise TypeError("info must be bytes")
+    if len(info) != 17:
+        return {"decoder_supported": False, "decode_error": "invalid_info_length"}
+    command = info[0]
+    error = _serial_command_error(int(adr), command)
+    if error:
+        return {
+            "command": command, "decoder_supported": False,
+            "decode_error": error,
+        }
+    serial_bytes = info[1:]
+    try:
+        serial_string = serial_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        return {
+            "command": command,
+            "serial_raw": serial_bytes.hex().upper(),
+            "decoder_supported": False,
+            "decode_error": "serial_not_ascii",
+        }
+    return {
+        "command": command,
+        "serial_raw": serial_bytes.hex().upper(),
+        "serial_string": serial_string,
+        "decoder_supported": True,
+    }
+
+
 def decode_0x93(correlation: Correlation) -> dict:
     """Decode a V3.3 0x93 response without inferring a module position.
 
@@ -367,32 +398,11 @@ def decode_0x93(correlation: Correlation) -> dict:
         return {**result, "rtn": frame.rtn, "decode_error": "unmatched_response"}
     if frame.rtn != 0:
         return {**result, "rtn": frame.rtn, "decode_error": "nonzero_rtn"}
-    if len(frame.info) != 17:
-        return {**result, "rtn": frame.rtn, "decode_error": "invalid_info_length"}
-
-    command = frame.info[0]
-    error = _serial_command_error(frame.adr, command)
-    if error:
-        return {
-            **result, "rtn": frame.rtn, "command": command,
-            "decode_error": error,
-        }
-    serial_bytes = frame.info[1:]
-    try:
-        serial_string = serial_bytes.decode("ascii")
-    except UnicodeDecodeError:
-        return {
-            **result, "rtn": frame.rtn, "command": command,
-            "serial_raw": serial_bytes.hex().upper(),
-            "decode_error": "serial_not_ascii",
-        }
+    decoded = decode_0x93_info(frame.adr, frame.info)
     return {
         **result,
         "rtn": frame.rtn,
-        "command": command,
-        "serial_raw": serial_bytes.hex().upper(),
-        "serial_string": serial_string,
-        "decoder_supported": True,
+        **decoded,
     }
 
 
