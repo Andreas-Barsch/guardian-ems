@@ -247,6 +247,79 @@ def test_unexpected_present_module_is_online_but_not_counted_as_expected():
                      "unexpected_present": 1}
 
 
+@pytest.mark.parametrize("expected,diagnostic_status", [
+    (True, "NORMAL"),
+    (True, "KRITISCH"),
+    (False, "NORMAL"),
+    (False, "KRITISCH"),
+])
+def test_present_module_keeps_diagnosis_separate_from_topology(
+        expected, diagnostic_status):
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"
+    publisher.client = client
+    publisher.discovery_enabled = True
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    publisher.discovery(5)
+    topology = {6: {"position": 6, "expected": expected,
+                    "status": "present", "observed_serial": "SERIAL-M6"}}
+    publisher.publish(
+        modules(), "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"},
+        {6: {"status": diagnostic_status, "cells": []}}, {}, {}, topology)
+    states = {call["topic"]: call["payload"] for call in client.calls}
+    assert states["guardian/battery/sensor/module_6_cell_diag_live/state"] == \
+        diagnostic_status
+    attrs = json.loads(
+        states["guardian/battery/sensor/module_6_cell_diag_live/attributes"])
+    assert attrs["diagnostic_status"] == diagnostic_status
+    assert attrs["presence_status"] == "present"
+    assert attrs["expected"] is expected
+    assert attrs["physical_serial"] == "SERIAL-M6"
+    assert attrs["topology_label"] == ("" if expected else "NICHT ERWARTET")
+    config = next(json.loads(call["payload"]) for call in client.calls
+                  if call["topic"].endswith("module_6_cell_diag_live/config"))
+    assert config["availability_topic"] == "guardian/battery/availability"
+
+
+def test_live_diagnostic_projection_marks_stale_absent_and_unknown_without_nulls():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"
+    publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    base = {position: {"position": position, "expected": True,
+                       "status": "present"}
+            for position in range(1, 7)}
+    publisher.publish(
+        modules(), "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"},
+        {1: {"status": "NORMAL", "cells": []}}, {}, {}, base)
+    first_count = len(client.calls)
+    changed = {**base, 1: {"position": 1, "expected": True, "status": "stale"},
+               2: {"position": 2, "expected": True, "status": "absent"},
+               3: {"position": 3, "expected": True, "status": "unknown"},
+               6: {"position": 6, "expected": False, "status": "not_expected"}}
+    publisher.publish(
+        [], "critical", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"}, {}, {}, {}, changed)
+    recent = client.calls[first_count:]
+    states = {call["topic"]: call["payload"] for call in recent}
+    assert "guardian/battery/sensor/module_1_cell_diag_live/state" not in states
+    stale_attrs = json.loads(
+        states["guardian/battery/sensor/module_1_cell_diag_live/attributes"])
+    assert stale_attrs["topology_label"] == "VERALTET"
+    assert states["guardian/battery/sensor/module_2_cell_diag_live/state"] == \
+        "ENTFERNT / NICHT VERFÜGBAR"
+    assert states["guardian/battery/sensor/module_3_cell_diag_live/state"] == \
+        "STATUS UNBEKANNT"
+    assert states["guardian/battery/sensor/module_6_cell_diag_live/state"] == \
+        "NICHT ERWARTET · NICHT VORHANDEN"
+    assert not any(call["payload"] is None for call in recent)
+
+
 def test_hard_payload_guards_fail_before_client_publish():
     publisher = Mqtt.__new__(Mqtt)
     publisher.prefix = "guardian"

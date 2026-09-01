@@ -30,7 +30,7 @@ from history_ui import render_history_html
 from guardian_header import render_guardian_header
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog,
                               PositionHistoryService, classify_stack_change,
-                              stable_observed_changes)
+                              history_observation_ready, stable_observed_changes)
 from position_history_api import POSITION_HISTORY_API_ROUTE, PositionHistoryApi
 from module_information_ui import render_module_information_html
 from config_history import ConfigHistory
@@ -130,6 +130,8 @@ def record_stable_observed_positions() -> bool:
     live MQTT maintenance event. Missing or unstable reads never reach here.
     """
     with _AUTOMATIC_POSITION_LOCK:
+        if not history_observation_ready():
+            return False
         position_service = _get_position_history_api().service
         current = position_service.current()
         changes = stable_observed_changes(current.positions if current else None)

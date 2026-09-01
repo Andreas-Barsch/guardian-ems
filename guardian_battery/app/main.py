@@ -28,7 +28,8 @@ from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_text)
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
-                              current_presence, missing_expected_positions,
+                              current_presence, history_observation_ready,
+                              missing_expected_positions,
                               resolve_maintenance_event_identities, update_observed_stack,
                               update_rs485_observations)
 from stack_soc import current_stack_soc
@@ -681,6 +682,7 @@ class Mqtt:
                 (f"module_{module}_cell_median", f"Modul {module} Zellmedian", "mV", None, "mdi:chart-bell-curve"),
                 (f"module_{module}_mos_temperature", f"Modul {module} MOS-Temperatur", "°C", "temperature", "mdi:thermometer-lines"),
                 (f"module_{module}_cell_diag_status", f"Modul {module} Zelldiagnostik Status", None, None, "mdi:battery-search"),
+                (f"module_{module}_cell_diag_live", f"Modul {module} Zelldiagnostik Live", None, None, "mdi:battery-search"),
                 (f"module_{module}_cell_diag_confidence", f"Modul {module} Zelldiagnostik Confidence", None, None, "mdi:check-decagram"),
                 (f"module_{module}_cell_diag_samples", f"Modul {module} Zelldiagnostik Messpunkte", None, None, "mdi:counter"),
                 (f"module_{module}_cell_diag_worst_cell", f"Modul {module} auffälligste Zelle", None, None, "mdi:battery-alert"),
@@ -717,7 +719,8 @@ class Mqtt:
         for object_id, name, unit, device_class, icon in sensors:
             match = re.match(r"module_([1-6])_", object_id)
             is_presence_or_inventory = (object_id.endswith("_presence")
-                                        or object_id.endswith("_info"))
+                                        or object_id.endswith("_info")
+                                        or object_id.endswith("_cell_diag_live"))
             availability_topic = f"{self.prefix}/battery/availability"
             if match and not is_presence_or_inventory:
                 availability_topic = f"{self.prefix}/battery/module_{match.group(1)}/availability"
@@ -924,6 +927,7 @@ class Mqtt:
 
         for position, topology in sorted(live_topology.items()):
             presence_status = topology.get("status", topology.get("presence_status", "unknown"))
+            expected = bool(topology.get("expected"))
             self._publish(f"{self.prefix}/battery/module_{position}/availability",
                           "online" if presence_status == "present" else "offline", retain=True)
             self.state(f"module_{position}_presence", presence_status)
@@ -934,6 +938,37 @@ class Mqtt:
                     "observed_serial", topology.get("currently_observed_serial")),
                 "last_seen": topology.get("last_observed_at", topology.get("last_seen")),
                 "source": topology.get("sources", topology.get("source", [])),
+            })
+            diagnostic_status = cell_results.get(position, {}).get("status")
+            topology_label = ""
+            if presence_status == "present":
+                if not expected:
+                    topology_label = "NICHT ERWARTET"
+                self.state(f"module_{position}_cell_diag_live",
+                           diagnostic_status or "LERNPHASE")
+            elif presence_status == "stale":
+                topology_label = "VERALTET"
+                # Preserve the retained last diagnosis; only its topology label
+                # changes. No synthetic diagnostic value is created.
+            elif presence_status == "absent":
+                topology_label = "ENTFERNT / NICHT VERFÜGBAR"
+                self.state(f"module_{position}_cell_diag_live", topology_label)
+            elif presence_status == "not_expected":
+                topology_label = "NICHT ERWARTET · NICHT VORHANDEN"
+                self.state(f"module_{position}_cell_diag_live", topology_label)
+            else:
+                topology_label = "STATUS UNBEKANNT"
+                self.state(f"module_{position}_cell_diag_live", topology_label)
+            self.attributes(f"module_{position}_cell_diag_live", {
+                "module_position": position,
+                "expected": expected,
+                "presence_status": presence_status,
+                "physical_serial": topology.get(
+                    "observed_serial", topology.get(
+                        "currently_observed_serial", topology.get("physical_serial"))),
+                "topology_label": topology_label,
+                "diagnostic_status": diagnostic_status if presence_status == "present" else None,
+                "diagnostic_engine_version": DIAGNOSTIC_ENGINE_VERSION,
             })
 
         for module in modules:
@@ -1264,9 +1299,10 @@ def main() -> None:
                     module_infos, present_positions={module.module for module in modules},
                     communication_healthy=bool(modules),
                     expected_module_count=int(options["module_count"]), observed_at=now_wall,
+                    confirm_history=False,
                 )
+                resolved_identities = {}
                 if rs485_reader is not None:
-                    resolved_identities = {}
                     for adr, identity in rs485_reader.identities().items():
                         try:
                             resolved = resolve_rs485_identity(
@@ -1294,11 +1330,8 @@ def main() -> None:
                             # datetime is the position-resolution time, not a new
                             # RS485 observation.
                             resolved_identities[int(adr)] = {**resolved, **identity}
-                    update_rs485_observations(resolved_identities, observed_at=now_wall)
-                try:
-                    record_stable_observed_positions()
-                except Exception as exc:
-                    LOG.warning("Positionshistorie konnte nicht fortgeschrieben werden: %s", exc)
+                    update_rs485_observations(
+                        resolved_identities, observed_at=now_wall, confirm_history=False)
 
                 # Identity is resolved before a new raw sample is persisted, so
                 # the first sample after a confirmed swap cannot inherit the
@@ -1366,11 +1399,30 @@ def main() -> None:
                                        rs485_management,
                                        rs485_writer.status())
 
+                # Durable topology confirmation happens only after the complete
+                # poll and every projection/publish step succeeded. Live presence
+                # above remains immediate and independent.
+                update_observed_stack(
+                    module_infos, present_positions={module.module for module in modules},
+                    communication_healthy=bool(modules),
+                    expected_module_count=int(options["module_count"]),
+                    observed_at=now_wall, confirm_history=True,
+                )
+                if resolved_identities:
+                    update_rs485_observations(
+                        resolved_identities, observed_at=now_wall, confirm_history=True)
+                if history_observation_ready():
+                    try:
+                        record_stable_observed_positions()
+                    except Exception as exc:
+                        LOG.warning("Positionshistorie konnte nicht fortgeschrieben werden: %s", exc)
+
             except Exception as exc:
                 LOG.exception("Abfrage fehlgeschlagen: %s", exc)
                 update_observed_stack(
                     {}, present_positions=set(), communication_healthy=False,
                     expected_module_count=int(options["module_count"]),
+                    confirm_history=False,
                 )
                 try:
                     console.close()

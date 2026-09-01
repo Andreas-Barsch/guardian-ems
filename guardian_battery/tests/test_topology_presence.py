@@ -1,5 +1,6 @@
 import pytest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import position_history
@@ -17,6 +18,7 @@ def reset_presence(monkeypatch):
     monkeypatch.setattr(position_history, "_MISSING_CANDIDATES", {})
     monkeypatch.setattr(position_history, "_COMMUNICATION_HEALTHY", None)
     monkeypatch.setattr(position_history, "_EXPECTED_MODULE_COUNT", 6)
+    monkeypatch.setattr(position_history, "_HISTORY_READY", False)
 
 
 @pytest.mark.parametrize(
@@ -114,6 +116,34 @@ def test_global_communication_outage_is_unknown_and_never_removal():
     assert 2 not in stable_observed_changes({"1": "SN-1", "2": "SN-2",
                                              "3": None, "4": None, "5": None,
                                              "6": None})
+
+
+def test_poll_exception_resets_history_guard_and_removal_evidence():
+    infos = {1: {"barcode": "SN-1"}, 2: {"barcode": "SN-2"}}
+    for timestamp in (0, 1, 2):
+        update_observed_stack(infos, present_positions={1, 2},
+                              expected_module_count=2, observed_at=timestamp)
+    assert position_history.history_observation_ready() is True
+    update_observed_stack({}, present_positions=set(), communication_healthy=False,
+                          expected_module_count=2, observed_at=10,
+                          confirm_history=False)
+    assert position_history.history_observation_ready() is False
+    for timestamp in (20, 40, 60):
+        update_observed_stack(infos, present_positions={1},
+                              expected_module_count=2, observed_at=timestamp)
+    assert position_history.history_observation_ready() is False
+    assert 2 not in stable_observed_changes(
+        {"1": "SN-1", "2": "SN-2", "3": None,
+         "4": None, "5": None, "6": None})
+
+
+def test_main_confirms_durable_history_only_after_publish_succeeds():
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+    publish = source.index("                publisher.publish(")
+    confirmation = source.index("                # Durable topology confirmation")
+    record = source.index("                if history_observation_ready():")
+    assert publish < confirmation < record
+    assert "confirm_history=False" in source[publish - 7000:publish]
 
 
 def test_position_above_configured_topology_is_not_expected():

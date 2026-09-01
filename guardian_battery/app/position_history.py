@@ -313,6 +313,7 @@ _PRESENCE_SOURCES: dict[int, dict[str, dict[str, Any]]] = {}
 _MISSING_CANDIDATES: dict[int, tuple[int, float]] = {}
 _COMMUNICATION_HEALTHY: bool | None = None
 _EXPECTED_MODULE_COUNT = 6
+_HISTORY_READY = False
 OBSERVATION_CONFIRMATIONS = 3
 PRESENCE_FRESHNESS_SECONDS = 90.0
 ABSENCE_CONFIRMATIONS = 3
@@ -330,14 +331,18 @@ def update_observed_stack(module_infos: Mapping[int, Mapping[str, Any]], *,
                           present_positions: set[int] | None = None,
                           communication_healthy: bool = True,
                           expected_module_count: int = 6,
-                          observed_at: float | None = None) -> None:
+                          observed_at: float | None = None,
+                          confirm_history: bool = True) -> None:
     """Update current Console presence without treating cached INFO as live data."""
     global _OBSERVED_STACK, _OBSERVATION_CANDIDATES, _PRESENCE_SOURCES
     global _MISSING_CANDIDATES, _COMMUNICATION_HEALTHY, _EXPECTED_MODULE_COUNT
+    global _HISTORY_READY
     now = time.time() if observed_at is None else float(observed_at)
     _COMMUNICATION_HEALTHY = bool(communication_healthy)
     _EXPECTED_MODULE_COUNT = max(1, min(6, int(expected_module_count)))
     if not communication_healthy:
+        _HISTORY_READY = False
+        _MISSING_CANDIDATES.clear()
         return
     positions = ({int(value) for value in present_positions}
                  if present_positions is not None else {int(value) for value in module_infos})
@@ -353,16 +358,26 @@ def update_observed_stack(module_infos: Mapping[int, Mapping[str, Any]], *,
             "identity": serial, "timestamp": now, "source": "console"
         }
         _MISSING_CANDIDATES.pop(position, None)
+        if not confirm_history:
+            continue
         candidate, count = _OBSERVATION_CANDIDATES.get(position, ("", 0))
         count = count + 1 if candidate == serial else 1
         _OBSERVATION_CANDIDATES[position] = (serial, count)
         if count >= OBSERVATION_CONFIRMATIONS:
             _OBSERVED_STACK[position] = serial
-    if not observed_any:
+    if not observed_any or not confirm_history:
         return
-    for position in range(1, _EXPECTED_MODULE_COUNT + 1):
-        if position in positions:
-            continue
+    expected_positions = set(range(1, _EXPECTED_MODULE_COUNT + 1))
+    if expected_positions <= positions:
+        _HISTORY_READY = True
+    if not _HISTORY_READY:
+        return
+    missing_positions = expected_positions - positions
+    # A removal needs a healthy observed rest stack. A poll missing several
+    # expected positions is incomplete evidence, not several removals.
+    if len(missing_positions) != 1:
+        return
+    for position in missing_positions:
         count, since = _MISSING_CANDIDATES.get(position, (0, now))
         _MISSING_CANDIDATES[position] = (count + 1, since)
         if count + 1 >= ABSENCE_CONFIRMATIONS and now - since >= ABSENCE_MIN_SECONDS:
@@ -370,7 +385,8 @@ def update_observed_stack(module_infos: Mapping[int, Mapping[str, Any]], *,
 
 
 def update_rs485_observations(observations: Mapping[int, Mapping[str, Any]], *,
-                              observed_at: float | None = None) -> None:
+                              observed_at: float | None = None,
+                              confirm_history: bool = True) -> None:
     """Merge time-aware 0x93 identities already resolved through position history."""
     global _OBSERVED_STACK, _OBSERVATION_CANDIDATES, _PRESENCE_SOURCES
     now = time.time() if observed_at is None else float(observed_at)
@@ -402,7 +418,7 @@ def update_rs485_observations(observations: Mapping[int, Mapping[str, Any]], *,
         }
         if now - timestamp <= PRESENCE_FRESHNESS_SECONDS:
             _MISSING_CANDIDATES.pop(int(position), None)
-            if not sample_is_new:
+            if not confirm_history or not sample_is_new:
                 continue
             candidate, count = _OBSERVATION_CANDIDATES.get(int(position), ("", 0))
             count = count + 1 if candidate == serial else 1
@@ -413,6 +429,11 @@ def update_rs485_observations(observations: Mapping[int, Mapping[str, Any]], *,
 
 def observed_stack() -> dict[int, str | None]:
     return dict(_OBSERVED_STACK)
+
+
+def history_observation_ready() -> bool:
+    """True after one successful confirmation cycle saw all expected positions."""
+    return _HISTORY_READY
 
 
 def current_presence(*, now: float | None = None,

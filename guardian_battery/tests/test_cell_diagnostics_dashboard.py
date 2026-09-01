@@ -11,14 +11,47 @@ DASHBOARDS = (
 )
 
 
+def _dashboard(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
 def _cell_views(path: Path) -> list[dict]:
-    dashboard = yaml.safe_load(path.read_text(encoding="utf-8"))
+    dashboard = _dashboard(path)
     return [
         view
         for view in dashboard["views"]
         if str(view.get("path", "")).startswith("module-")
         and "-cell-" in str(view.get("path", ""))
     ]
+
+
+def test_module_overview_and_details_keep_diagnosis_separate_from_topology():
+    for path in DASHBOARDS:
+        dashboard = _dashboard(path)
+        overview = next(view for view in dashboard["views"]
+                        if view.get("path") == "overview")
+        overview_text = str(overview)
+        for module in range(1, 7):
+            entity = (f"sensor.guardian_battery_modul_{module}_"
+                      "zelldiagnostik_live")
+            module_view = next(view for view in dashboard["views"]
+                               if view.get("path") == f"module-{module}")
+            header = module_view["sections"][0]["cards"][0]["content"]
+            assert entity in overview_text
+            assert entity in header
+            assert "topology_label" in header
+            assert "physical_serial" in header
+            assert "{{ s }}" in header
+
+        state_content_cards = [
+            card["card"]
+            for card in overview["cards"]
+            if card.get("type") == "conditional"
+            and card.get("card", {}).get("state_content")
+        ]
+        assert len(state_content_cards) == 6
+        assert all(card["state_content"] == ["state", "topology_label"]
+                   for card in state_content_cards)
 
 
 def _card(view: dict, title: str) -> dict:

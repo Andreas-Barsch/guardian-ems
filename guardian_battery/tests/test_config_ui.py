@@ -107,6 +107,7 @@ def test_confirmed_bms_identity_creates_append_only_system_event_and_snapshot(tm
     monkeypatch.setattr(position_history,'_PRESENCE_SOURCES',{})
     monkeypatch.setattr(position_history,'_MISSING_CANDIDATES',{})
     monkeypatch.setattr(position_history,'_COMMUNICATION_HEALTHY',None)
+    monkeypatch.setattr(position_history,'_HISTORY_READY',True)
     for _ in range(3): position_history.update_observed_stack({2:{'barcode':'SN-A'}})
     assert config_ui.record_stable_observed_positions() is True
     assert config_ui.record_stable_observed_positions() is False
@@ -133,6 +134,7 @@ def test_confirmed_removal_and_readd_each_create_one_full_snapshot(tmp_path, mon
     monkeypatch.setattr(position_history, '_PRESENCE_SOURCES', {})
     monkeypatch.setattr(position_history, '_MISSING_CANDIDATES', {})
     monkeypatch.setattr(position_history, '_COMMUNICATION_HEALTHY', None)
+    monkeypatch.setattr(position_history, '_HISTORY_READY', False)
 
     infos = {1: {'barcode': 'SN-A'}, 2: {'barcode': 'SN-B'}}
     for timestamp in (0, 1, 2):
@@ -148,6 +150,12 @@ def test_confirmed_removal_and_readd_each_create_one_full_snapshot(tmp_path, mon
     position_history.update_observed_stack(
         {}, present_positions=set(), communication_healthy=False,
         expected_module_count=2, observed_at=120)
+    assert config_ui.record_stable_observed_positions() is False
+
+    # Reconnect must first establish one complete healthy baseline again.
+    position_history.update_observed_stack(
+        infos, present_positions={1, 2}, expected_module_count=2,
+        observed_at=125)
     assert config_ui.record_stable_observed_positions() is False
 
     for timestamp in (130, 145, 161):
@@ -185,6 +193,7 @@ def test_confirmed_unexpected_sixth_module_creates_snapshot_with_expected_five(t
     monkeypatch.setattr(position_history, '_PRESENCE_SOURCES', {})
     monkeypatch.setattr(position_history, '_MISSING_CANDIDATES', {})
     monkeypatch.setattr(position_history, '_COMMUNICATION_HEALTHY', None)
+    monkeypatch.setattr(position_history, '_HISTORY_READY', False)
 
     five = {position: {'barcode': f'SN-{position}'} for position in range(1, 6)}
     for timestamp in (0, 1, 2):
@@ -205,3 +214,73 @@ def test_confirmed_unexpected_sixth_module_creates_snapshot_with_expected_five(t
     snapshots = config_ui._get_position_history_api().service.list()
     assert len(snapshots) == 2
     assert snapshots[-1].positions['6'] == 'SN-6'
+
+
+def test_partial_startup_cannot_replace_full_snapshot_with_nulls(tmp_path, monkeypatch):
+    import position_history
+    monkeypatch.setattr(config_ui, 'DEFAULT_MAINTENANCE_EVENT_FILE',
+                        tmp_path / 'maintenance.jsonl')
+    monkeypatch.setattr(config_ui, 'DEFAULT_POSITION_HISTORY_FILE',
+                        tmp_path / 'positions.jsonl')
+    monkeypatch.setattr(config_ui, '_MAINTENANCE_API', None)
+    monkeypatch.setattr(config_ui, '_POSITION_HISTORY_API', None)
+    monkeypatch.setattr(position_history, '_OBSERVED_STACK', {})
+    monkeypatch.setattr(position_history, '_OBSERVATION_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_PRESENCE_SOURCES', {})
+    monkeypatch.setattr(position_history, '_MISSING_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_COMMUNICATION_HEALTHY', None)
+    monkeypatch.setattr(position_history, '_HISTORY_READY', False)
+
+    five = {position: {'barcode': serial} for position, serial in
+            ((1, 'A'), (2, 'B'), (3, 'C'), (4, 'D'), (5, 'E'))}
+    for timestamp in (0, 1, 2):
+        position_history.update_observed_stack(
+            five, present_positions=set(five), expected_module_count=5,
+            observed_at=timestamp)
+    assert config_ui.record_stable_observed_positions() is True
+    original = config_ui._get_position_history_api().service.current()
+
+    # Simulate a process restart followed by repeated partial successful polls.
+    monkeypatch.setattr(position_history, '_OBSERVED_STACK', {})
+    monkeypatch.setattr(position_history, '_OBSERVATION_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_PRESENCE_SOURCES', {})
+    monkeypatch.setattr(position_history, '_MISSING_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_HISTORY_READY', False)
+    partial = {1: {'barcode': 'A'}, 6: {'barcode': 'F'}}
+    for timestamp in (100, 115, 131):
+        position_history.update_observed_stack(
+            partial, present_positions={1, 6}, expected_module_count=5,
+            observed_at=timestamp)
+    assert position_history.history_observation_ready() is False
+    assert config_ui.record_stable_observed_positions() is False
+    assert config_ui._get_position_history_api().service.current() == original
+
+    complete = {**five, 6: {'barcode': 'F'}}
+    position_history.update_observed_stack(
+        complete, present_positions=set(complete), expected_module_count=5,
+        observed_at=140)
+    assert position_history.history_observation_ready() is True
+    assert config_ui.record_stable_observed_positions() is True
+    assert config_ui.record_stable_observed_positions() is False
+    snapshots = config_ui._get_position_history_api().service.list()
+    assert len(snapshots) == 2
+    assert snapshots[-1].positions == {
+        '1': 'A', '2': 'B', '3': 'C', '4': 'D', '5': 'E', '6': 'F'}
+
+
+def test_failed_poll_live_presence_never_advances_history_confirmation(monkeypatch):
+    import position_history
+    monkeypatch.setattr(position_history, '_OBSERVED_STACK', {})
+    monkeypatch.setattr(position_history, '_OBSERVATION_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_PRESENCE_SOURCES', {})
+    monkeypatch.setattr(position_history, '_MISSING_CANDIDATES', {})
+    monkeypatch.setattr(position_history, '_HISTORY_READY', False)
+    for timestamp in (0, 15, 31):
+        position_history.update_observed_stack(
+            {1: {'barcode': 'A'}}, present_positions={1},
+            expected_module_count=1, observed_at=timestamp,
+            confirm_history=False)
+    assert position_history.current_presence(
+        now=31, expected_module_count=1)[1]['status'] == 'present'
+    assert position_history.observed_stack() == {}
+    assert position_history.history_observation_ready() is False

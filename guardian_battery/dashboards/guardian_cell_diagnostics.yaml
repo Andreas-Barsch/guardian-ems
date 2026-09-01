@@ -37,15 +37,18 @@ views:
   - type: conditional
     conditions:
     - condition: state
-      entity: sensor.guardian_battery_modul_1_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_1_zelldiagnostik_live
       state_not: unavailable
     - condition: state
-      entity: sensor.guardian_battery_modul_1_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_1_zelldiagnostik_live
       state_not: unknown
     card:
       type: tile
-      entity: sensor.guardian_battery_modul_1_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_1_zelldiagnostik_live
       name: Modul 1
+      state_content:
+      - state
+      - topology_label
       icon: mdi:battery-search
       vertical: false
       tap_action:
@@ -54,15 +57,18 @@ views:
   - type: conditional
     conditions:
     - condition: state
-      entity: sensor.guardian_battery_modul_2_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_2_zelldiagnostik_live
       state_not: unavailable
     - condition: state
-      entity: sensor.guardian_battery_modul_2_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_2_zelldiagnostik_live
       state_not: unknown
     card:
       type: tile
-      entity: sensor.guardian_battery_modul_2_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_2_zelldiagnostik_live
       name: Modul 2
+      state_content:
+      - state
+      - topology_label
       icon: mdi:battery-search
       vertical: false
       tap_action:
@@ -71,15 +77,18 @@ views:
   - type: conditional
     conditions:
     - condition: state
-      entity: sensor.guardian_battery_modul_3_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_3_zelldiagnostik_live
       state_not: unavailable
     - condition: state
-      entity: sensor.guardian_battery_modul_3_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_3_zelldiagnostik_live
       state_not: unknown
     card:
       type: tile
-      entity: sensor.guardian_battery_modul_3_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_3_zelldiagnostik_live
       name: Modul 3
+      state_content:
+      - state
+      - topology_label
       icon: mdi:battery-search
       vertical: false
       tap_action:
@@ -88,15 +97,18 @@ views:
   - type: conditional
     conditions:
     - condition: state
-      entity: sensor.guardian_battery_modul_4_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_4_zelldiagnostik_live
       state_not: unavailable
     - condition: state
-      entity: sensor.guardian_battery_modul_4_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_4_zelldiagnostik_live
       state_not: unknown
     card:
       type: tile
-      entity: sensor.guardian_battery_modul_4_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_4_zelldiagnostik_live
       name: Modul 4
+      state_content:
+      - state
+      - topology_label
       icon: mdi:battery-search
       vertical: false
       tap_action:
@@ -105,15 +117,18 @@ views:
   - type: conditional
     conditions:
     - condition: state
-      entity: sensor.guardian_battery_modul_5_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_5_zelldiagnostik_live
       state_not: unavailable
     - condition: state
-      entity: sensor.guardian_battery_modul_5_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_5_zelldiagnostik_live
       state_not: unknown
     card:
       type: tile
-      entity: sensor.guardian_battery_modul_5_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_5_zelldiagnostik_live
       name: Modul 5
+      state_content:
+      - state
+      - topology_label
       icon: mdi:battery-search
       vertical: false
       tap_action:
@@ -122,15 +137,18 @@ views:
   - type: conditional
     conditions:
     - condition: state
-      entity: sensor.guardian_battery_modul_6_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_6_zelldiagnostik_live
       state_not: unavailable
     - condition: state
-      entity: sensor.guardian_battery_modul_6_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_6_zelldiagnostik_live
       state_not: unknown
     card:
       type: tile
-      entity: sensor.guardian_battery_modul_6_zelldiagnostik_status
+      entity: sensor.guardian_battery_modul_6_zelldiagnostik_live
       name: Modul 6
+      state_content:
+      - state
+      - topology_label
       icon: mdi:battery-search
       vertical: false
       tap_action:
@@ -146,12 +164,14 @@ views:
     cards:
     - type: markdown
       title: Modul 1 · Zelldiagnostik
-      content: '{% set s = states(''sensor.guardian_battery_modul_1_zelldiagnostik_status'') %} {% set c = states(''sensor.guardian_battery_modul_1_zelldiagnostik_confidence'')
+      content: '{% set s = states(''sensor.guardian_battery_modul_1_zelldiagnostik_live'') %} {% set topology = state_attr(''sensor.guardian_battery_modul_1_zelldiagnostik_live'', ''topology_label'') %} {% set serial = state_attr(''sensor.guardian_battery_modul_1_zelldiagnostik_live'', ''physical_serial'') %} {% set c = states(''sensor.guardian_battery_modul_1_zelldiagnostik_confidence'')
         %} {% set n = states(''sensor.guardian_battery_modul_1_zelldiagnostik_messpunkte'') %} {% set w = states(''sensor.guardian_battery_modul_1_auffalligste_zelle'')
         %} {% set e = states(''sensor.guardian_battery_modul_1_zelldiagnostik_evidenzabweichung'') %}
 
         ## {% if s == ''NORMAL'' %}🟢{% elif s in [''BEOBACHTEN'',''LERNPHASE'',''NICHT BEWERTBAR''] %}🟡{% else %}🔴{% endif
         %} {{ s }}
+
+        {% if topology %}**{{ topology }}**{% endif %}{% if serial %} · Seriennummer {{ serial }}{% endif %}
 
         **Confidence:** {{ c }}   **Messpunkte:** {{ n }}   **Auffälligste Zelle:** {{ w }}   **Evidenzabweichung:** {{ e
         }} mV
@@ -341,7 +361,7 @@ views:
       title: Modul 1 · Diagnosebasis
       show_header_toggle: false
       entities:
-      - entity: sensor.guardian_battery_modul_1_zelldiagnostik_status
+      - entity: sensor.guardian_battery_modul_1_zelldiagnostik_live
         name: Gesamtbefund
       - entity: sensor.guardian_battery_modul_1_zelldiagnostik_confidence
         name: Confidence
@@ -365,12 +385,14 @@ views:
     cards:
     - type: markdown
       title: Modul 2 · Zelldiagnostik
-      content: '{% set s = states(''sensor.guardian_battery_modul_2_zelldiagnostik_status'') %} {% set c = states(''sensor.guardian_battery_modul_2_zelldiagnostik_confidence'')
+      content: '{% set s = states(''sensor.guardian_battery_modul_2_zelldiagnostik_live'') %} {% set topology = state_attr(''sensor.guardian_battery_modul_2_zelldiagnostik_live'', ''topology_label'') %} {% set serial = state_attr(''sensor.guardian_battery_modul_2_zelldiagnostik_live'', ''physical_serial'') %} {% set c = states(''sensor.guardian_battery_modul_2_zelldiagnostik_confidence'')
         %} {% set n = states(''sensor.guardian_battery_modul_2_zelldiagnostik_messpunkte'') %} {% set w = states(''sensor.guardian_battery_modul_2_auffalligste_zelle'')
         %} {% set e = states(''sensor.guardian_battery_modul_2_zelldiagnostik_evidenzabweichung'') %}
 
         ## {% if s == ''NORMAL'' %}🟢{% elif s in [''BEOBACHTEN'',''LERNPHASE'',''NICHT BEWERTBAR''] %}🟡{% else %}🔴{% endif
         %} {{ s }}
+
+        {% if topology %}**{{ topology }}**{% endif %}{% if serial %} · Seriennummer {{ serial }}{% endif %}
 
         **Confidence:** {{ c }}   **Messpunkte:** {{ n }}   **Auffälligste Zelle:** {{ w }}   **Evidenzabweichung:** {{ e
         }} mV
@@ -560,7 +582,7 @@ views:
       title: Modul 2 · Diagnosebasis
       show_header_toggle: false
       entities:
-      - entity: sensor.guardian_battery_modul_2_zelldiagnostik_status
+      - entity: sensor.guardian_battery_modul_2_zelldiagnostik_live
         name: Gesamtbefund
       - entity: sensor.guardian_battery_modul_2_zelldiagnostik_confidence
         name: Confidence
@@ -584,12 +606,14 @@ views:
     cards:
     - type: markdown
       title: Modul 3 · Zelldiagnostik
-      content: '{% set s = states(''sensor.guardian_battery_modul_3_zelldiagnostik_status'') %} {% set c = states(''sensor.guardian_battery_modul_3_zelldiagnostik_confidence'')
+      content: '{% set s = states(''sensor.guardian_battery_modul_3_zelldiagnostik_live'') %} {% set topology = state_attr(''sensor.guardian_battery_modul_3_zelldiagnostik_live'', ''topology_label'') %} {% set serial = state_attr(''sensor.guardian_battery_modul_3_zelldiagnostik_live'', ''physical_serial'') %} {% set c = states(''sensor.guardian_battery_modul_3_zelldiagnostik_confidence'')
         %} {% set n = states(''sensor.guardian_battery_modul_3_zelldiagnostik_messpunkte'') %} {% set w = states(''sensor.guardian_battery_modul_3_auffalligste_zelle'')
         %} {% set e = states(''sensor.guardian_battery_modul_3_zelldiagnostik_evidenzabweichung'') %}
 
         ## {% if s == ''NORMAL'' %}🟢{% elif s in [''BEOBACHTEN'',''LERNPHASE'',''NICHT BEWERTBAR''] %}🟡{% else %}🔴{% endif
         %} {{ s }}
+
+        {% if topology %}**{{ topology }}**{% endif %}{% if serial %} · Seriennummer {{ serial }}{% endif %}
 
         **Confidence:** {{ c }}   **Messpunkte:** {{ n }}   **Auffälligste Zelle:** {{ w }}   **Evidenzabweichung:** {{ e
         }} mV
@@ -779,7 +803,7 @@ views:
       title: Modul 3 · Diagnosebasis
       show_header_toggle: false
       entities:
-      - entity: sensor.guardian_battery_modul_3_zelldiagnostik_status
+      - entity: sensor.guardian_battery_modul_3_zelldiagnostik_live
         name: Gesamtbefund
       - entity: sensor.guardian_battery_modul_3_zelldiagnostik_confidence
         name: Confidence
@@ -803,12 +827,14 @@ views:
     cards:
     - type: markdown
       title: Modul 4 · Zelldiagnostik
-      content: '{% set s = states(''sensor.guardian_battery_modul_4_zelldiagnostik_status'') %} {% set c = states(''sensor.guardian_battery_modul_4_zelldiagnostik_confidence'')
+      content: '{% set s = states(''sensor.guardian_battery_modul_4_zelldiagnostik_live'') %} {% set topology = state_attr(''sensor.guardian_battery_modul_4_zelldiagnostik_live'', ''topology_label'') %} {% set serial = state_attr(''sensor.guardian_battery_modul_4_zelldiagnostik_live'', ''physical_serial'') %} {% set c = states(''sensor.guardian_battery_modul_4_zelldiagnostik_confidence'')
         %} {% set n = states(''sensor.guardian_battery_modul_4_zelldiagnostik_messpunkte'') %} {% set w = states(''sensor.guardian_battery_modul_4_auffalligste_zelle'')
         %} {% set e = states(''sensor.guardian_battery_modul_4_zelldiagnostik_evidenzabweichung'') %}
 
         ## {% if s == ''NORMAL'' %}🟢{% elif s in [''BEOBACHTEN'',''LERNPHASE'',''NICHT BEWERTBAR''] %}🟡{% else %}🔴{% endif
         %} {{ s }}
+
+        {% if topology %}**{{ topology }}**{% endif %}{% if serial %} · Seriennummer {{ serial }}{% endif %}
 
         **Confidence:** {{ c }}   **Messpunkte:** {{ n }}   **Auffälligste Zelle:** {{ w }}   **Evidenzabweichung:** {{ e
         }} mV
@@ -998,7 +1024,7 @@ views:
       title: Modul 4 · Diagnosebasis
       show_header_toggle: false
       entities:
-      - entity: sensor.guardian_battery_modul_4_zelldiagnostik_status
+      - entity: sensor.guardian_battery_modul_4_zelldiagnostik_live
         name: Gesamtbefund
       - entity: sensor.guardian_battery_modul_4_zelldiagnostik_confidence
         name: Confidence
@@ -1022,12 +1048,14 @@ views:
     cards:
     - type: markdown
       title: Modul 5 · Zelldiagnostik
-      content: '{% set s = states(''sensor.guardian_battery_modul_5_zelldiagnostik_status'') %} {% set c = states(''sensor.guardian_battery_modul_5_zelldiagnostik_confidence'')
+      content: '{% set s = states(''sensor.guardian_battery_modul_5_zelldiagnostik_live'') %} {% set topology = state_attr(''sensor.guardian_battery_modul_5_zelldiagnostik_live'', ''topology_label'') %} {% set serial = state_attr(''sensor.guardian_battery_modul_5_zelldiagnostik_live'', ''physical_serial'') %} {% set c = states(''sensor.guardian_battery_modul_5_zelldiagnostik_confidence'')
         %} {% set n = states(''sensor.guardian_battery_modul_5_zelldiagnostik_messpunkte'') %} {% set w = states(''sensor.guardian_battery_modul_5_auffalligste_zelle'')
         %} {% set e = states(''sensor.guardian_battery_modul_5_zelldiagnostik_evidenzabweichung'') %}
 
         ## {% if s == ''NORMAL'' %}🟢{% elif s in [''BEOBACHTEN'',''LERNPHASE'',''NICHT BEWERTBAR''] %}🟡{% else %}🔴{% endif
         %} {{ s }}
+
+        {% if topology %}**{{ topology }}**{% endif %}{% if serial %} · Seriennummer {{ serial }}{% endif %}
 
         **Confidence:** {{ c }}   **Messpunkte:** {{ n }}   **Auffälligste Zelle:** {{ w }}   **Evidenzabweichung:** {{ e
         }} mV
@@ -1217,7 +1245,7 @@ views:
       title: Modul 5 · Diagnosebasis
       show_header_toggle: false
       entities:
-      - entity: sensor.guardian_battery_modul_5_zelldiagnostik_status
+      - entity: sensor.guardian_battery_modul_5_zelldiagnostik_live
         name: Gesamtbefund
       - entity: sensor.guardian_battery_modul_5_zelldiagnostik_confidence
         name: Confidence
@@ -1241,12 +1269,14 @@ views:
     cards:
     - type: markdown
       title: Modul 6 · Zelldiagnostik
-      content: '{% set s = states(''sensor.guardian_battery_modul_6_zelldiagnostik_status'') %} {% set c = states(''sensor.guardian_battery_modul_6_zelldiagnostik_confidence'')
+      content: '{% set s = states(''sensor.guardian_battery_modul_6_zelldiagnostik_live'') %} {% set topology = state_attr(''sensor.guardian_battery_modul_6_zelldiagnostik_live'', ''topology_label'') %} {% set serial = state_attr(''sensor.guardian_battery_modul_6_zelldiagnostik_live'', ''physical_serial'') %} {% set c = states(''sensor.guardian_battery_modul_6_zelldiagnostik_confidence'')
         %} {% set n = states(''sensor.guardian_battery_modul_6_zelldiagnostik_messpunkte'') %} {% set w = states(''sensor.guardian_battery_modul_6_auffalligste_zelle'')
         %} {% set e = states(''sensor.guardian_battery_modul_6_zelldiagnostik_evidenzabweichung'') %}
 
         ## {% if s == ''NORMAL'' %}🟢{% elif s in [''BEOBACHTEN'',''LERNPHASE'',''NICHT BEWERTBAR''] %}🟡{% else %}🔴{% endif
         %} {{ s }}
+
+        {% if topology %}**{{ topology }}**{% endif %}{% if serial %} · Seriennummer {{ serial }}{% endif %}
 
         **Confidence:** {{ c }}   **Messpunkte:** {{ n }}   **Auffälligste Zelle:** {{ w }}   **Evidenzabweichung:** {{ e
         }} mV
@@ -1436,7 +1466,7 @@ views:
       title: Modul 6 · Diagnosebasis
       show_header_toggle: false
       entities:
-      - entity: sensor.guardian_battery_modul_6_zelldiagnostik_status
+      - entity: sensor.guardian_battery_modul_6_zelldiagnostik_live
         name: Gesamtbefund
       - entity: sensor.guardian_battery_modul_6_zelldiagnostik_confidence
         name: Confidence
