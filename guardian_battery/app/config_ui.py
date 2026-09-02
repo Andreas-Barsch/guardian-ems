@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -33,12 +34,17 @@ from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog,
                               history_observation_ready, stable_observed_changes)
 from position_history_api import POSITION_HISTORY_API_ROUTE, PositionHistoryApi
 from module_information_ui import render_module_information_html
+from guardian_diagnostics import (API_ROUTE as DIAGNOSTICS_API_ROUTE,
+                                  GuardianDiagnosticsApi,
+                                  GuardianDiagnosticsRepository)
+from guardian_diagnostics_ui import render_guardian_diagnostics_html
 from config_history import ConfigHistory
 from phase_engine import PhaseEngine
 from version import GUARDIAN_VERSION, DIAGNOSTIC_ENGINE_VERSION
 
 OPTIONS_FILE = Path('/data/options.json')
 CONFIG_HISTORY_FILE = Path('/share/guardian_battery/config_history.jsonl')
+DAILY_DIAGNOSTICS_ROOT = Path('/share/guardian_battery/diagnostics')
 SUPERVISOR = 'http://supervisor'
 TOKEN = os.environ.get('SUPERVISOR_TOKEN', '')
 _MAINTENANCE_API = None
@@ -46,9 +52,11 @@ _MAINTENANCE_API_LOCK = threading.Lock()
 _TIMELINE_API = None
 _HISTORY_API = None
 _POSITION_HISTORY_API = None
+_DIAGNOSTICS_API = None
 _MAINTENANCE_LIVE_PUBLISHER = None
 _RS485_STATUS_PROVIDER = None
 _AUTOMATIC_POSITION_LOCK = threading.Lock()
+LOG = logging.getLogger("guardian_battery.config_ui")
 
 
 def configure_maintenance_live_publisher(publisher):
@@ -121,6 +129,18 @@ def _get_position_history_api():
                     module_count_provider=lambda: _read_options()["module_count"],
                 )
     return _POSITION_HISTORY_API
+
+
+def _get_diagnostics_api():
+    """Create the read-only Derived Data projection lazily for ingress."""
+    global _DIAGNOSTICS_API
+    if _DIAGNOSTICS_API is None:
+        with _MAINTENANCE_API_LOCK:
+            if _DIAGNOSTICS_API is None:
+                _DIAGNOSTICS_API = GuardianDiagnosticsApi(
+                    GuardianDiagnosticsRepository(DAILY_DIAGNOSTICS_ROOT))
+                LOG.info("Guardian Diagnostics API/UI initialisiert")
+    return _DIAGNOSTICS_API
 
 
 def record_stable_observed_positions() -> bool:
@@ -362,11 +382,13 @@ class Handler(BaseHTTPRequestHandler):
         return HISTORY_API_ROUTE in self.path.split('?',1)[0]
     def _is_position_history_api(self):
         return POSITION_HISTORY_API_ROUTE in self.path.split('?',1)[0]
+    def _is_diagnostics_api(self):
+        return DIAGNOSTICS_API_ROUTE in self.path.split('?',1)[0]
     def _ingress_base(self):
         header=self.headers.get('X-Ingress-Path','').rstrip('/')
         if header: return header
         path=urlsplit(self.path).path.rstrip('/')
-        for suffix in ('/maintenance','/timeline','/history','/module-information','/configuration'):
+        for suffix in ('/maintenance','/timeline','/history','/module-information','/configuration','/diagnostics'):
             if path.endswith(suffix): return path[:-len(suffix)]
         return path
     def _is_maintenance_ui(self):
@@ -379,6 +401,11 @@ class Handler(BaseHTTPRequestHandler):
         return urlsplit(self.path).path.rstrip('/').endswith('/module-information')
     def _is_configuration_ui(self):
         return urlsplit(self.path).path.rstrip('/').endswith('/configuration')
+    def _is_diagnostics_ui(self):
+        return urlsplit(self.path).path.rstrip('/').endswith('/diagnostics')
+    def _diagnostics_request(self, method):
+        response = _get_diagnostics_api().handle(method, self.path)
+        self._send(response.status, response.body, headers=response.headers)
     def _maintenance_request(self,method):
         try: length=int(self.headers.get('Content-Length','0'))
         except ValueError:
@@ -393,6 +420,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(response.status,response.body,headers=response.headers)
     def do_GET(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_diagnostics_api(): self._diagnostics_request('GET'); return
         if self._is_history_api():
             response=_get_history_api().handle('GET',self.path)
             self._send(response.status,response.body,headers=response.headers); return
@@ -423,9 +451,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip('/').endswith('/api/config'):
             rec=_last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
             self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
+        if self._is_diagnostics_ui():
+            base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics',modules_path=base or './'),'text/html'); return
         base=self._ingress_base(); self._send(200,render_module_information_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance'),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_diagnostics_api(): self._diagnostics_request('POST'); return
         if self._is_position_history_api():
             try: length=int(self.headers.get('Content-Length','0'))
             except ValueError: self._send(400,error_json('invalid_request','Content-Length must be an integer')); return
@@ -460,14 +491,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc: self._send(500,{'error':str(exc)})
     def do_PATCH(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_diagnostics_api(): self._diagnostics_request('PATCH'); return
         if self._is_maintenance_api(): self._maintenance_request('PATCH'); return
         self._send(404,{'error':'not found'})
     def do_PUT(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_diagnostics_api(): self._diagnostics_request('PUT'); return
         if self._is_maintenance_api(): self._maintenance_request('PUT'); return
         self._send(404,{'error':'not found'})
     def do_DELETE(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_diagnostics_api(): self._diagnostics_request('DELETE'); return
         if self._is_maintenance_api(): self._maintenance_request('DELETE'); return
         self._send(404,{'error':'not found'})
 

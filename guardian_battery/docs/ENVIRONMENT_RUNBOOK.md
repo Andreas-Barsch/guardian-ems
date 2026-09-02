@@ -98,7 +98,7 @@ Für `physical_serial=Y225004C32250226` wurde manuell verifiziert:
 - endpoint-basierte Nullphasen von ungefähr `2.018,857 s`;
 - gap-qualifizierte DCL-Zero-Zeit von ungefähr `52,313 s`;
 - Management Coverage von ungefähr `2.759,740 s`;
-- gap-qualifizierter Duty Cycle von ungefähr `1,896 %`.
+- gap-qualifizierter Duty Cycle des vollständigen produktiven Daily Runs von ungefähr `0,564 %` (`dcl_zero_duty_cycle≈0,00564049`). Dieser Lauf verwendete 4.337 RS485- und 6.830 Cell-Records. Die früher genannten `1,896 %` stammten aus einer kleineren manuell ausgewerteten RS485-Teilmenge und sind nicht der vollständige Tageswert. Die sieben Ereignisse wurden in beiden Auswertungen reproduziert.
 
 Endpoint-Dauer und gap-qualifizierte Duty-Cycle-Evidence sind unterschiedliche Messgrößen und dürfen nicht gleichgesetzt werden. Die Korrelation belegt keine Ursache.
 

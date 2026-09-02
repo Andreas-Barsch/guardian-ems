@@ -16,6 +16,8 @@ from daily_diagnostics import (DEFAULT_TIMEZONE, DailyDiagnosticBusyError,
                                SourceChangedError, _atomic_json,
                                build_source_catalog, probe_daily_inputs,
                                run_daily_diagnostic)
+from guardian_diagnostics import (DiagnosticsCorrupt, DiagnosticsNotFound,
+                                  read_validated_daily_result)
 
 
 WORKER_STATE_SCHEMA_VERSION = 1
@@ -181,32 +183,13 @@ class DailyDiagnosticWorker:
 
     def _index(self, diagnostic_date: str) -> Mapping[str, Any] | None:
         path = self.output_root / "daily" / diagnostic_date / "index.json"
-        if not path.exists():
-            return None
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            result_name = str(value["result"])
-            if (Path(result_name).name != result_name or result_name == "index.json"
-                    or not result_name.endswith(".json")):
-                raise ValueError("unsafe or incomplete index")
-            result_path = path.parent / result_name
-            if (not result_path.is_file()
-                    or value.get("schema_version") != 1
-                    or value.get("diagnostic_date") != diagnostic_date
-                    or not value.get("daily_result_id")
-                    or not value.get("input_fingerprint")):
-                return None
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-            if (not isinstance(result, dict)
-                    or result.get("schema_version") != 1
-                    or result.get("diagnostic_date") != diagnostic_date
-                    or result.get("daily_result_id") != value.get("daily_result_id")
-                    or result.get("input_fingerprint") != value.get("input_fingerprint")
-                    or result.get("overall_status") not in {"complete", "partial"}):
-                raise ValueError("index and result revision are inconsistent")
+            value, _result = read_validated_daily_result(self.output_root, diagnostic_date)
             self._invalid_index_logged.discard(diagnostic_date)
             return value
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        except DiagnosticsNotFound:
+            return None
+        except DiagnosticsCorrupt as exc:
             if diagnostic_date not in self._invalid_index_logged:
                 self.log.warning("Daily diagnostics index invalid date=%s path=%s error=%s",
                                  diagnostic_date, path, exc)

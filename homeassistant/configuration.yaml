@@ -31,3 +31,9 @@ lovelace:
       icon: mdi:information-outline
       show_in_sidebar: true
       filename: dashboards/guardian_module_information.yaml
+    guardian-diagnostics:
+      mode: yaml
+      title: Guardian Diagnostics
+      icon: mdi:chart-box-outline
+      show_in_sidebar: true
+      filename: dashboards/guardian_diagnostics.yaml
