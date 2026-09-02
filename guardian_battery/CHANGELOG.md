@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.17 – Deterministic Daily Diagnostics
+
+- Ergänzt deterministische BMS-Management-Evidence nach physischer Seriennummer und zeitgültiger Position: CCL-/DCL-Reduktionen, Zero Events und Recoveries einschließlich `Limit=0` trotz Enable, Cell-/Lowest-Cell-/Medianabweichungs-/Spread-/Modulstromkontext, rekonstruierter Stackstrom-Provenienz sowie roher `0x44`-Korrelation ohne Bitsemantik oder Kausalitätsdiagnose (`causality=not_determined`). Peer-relative CCL-/DCL-Werte und Daily Aggregates setzen keinen festen Normalwert voraus.
+- Führt einen side-effect-freien Daily-Diagnostics-Core für den Guardian-Tag in `Europe/Berlin` ein. Halb offene Zeitfenster `[day_start, day_end)`, timestamp-basiertes Slicing und Zeitzonenlogik bilden DST-Tage mit 23, 24 oder 25 Stunden korrekt ab.
+- Persistiert physische Source-Provenienz, semantische Input-Fingerprints, deterministische Result-IDs und immutable Resultrevisionen atomar. Der Event Store ist idempotent; Komponentenfehler bleiben isoliert und Ergebnisse werden als `complete`, `partial` oder `failed` klassifiziert. Veränderte späte Evidenz kann eine neue Revision auslösen.
+- Startet den isolierten `DailyDiagnosticWorker` nach der Live-Acquisition. Er prüft alle fünf Minuten, wartet nach Tagesende 15 Minuten und auf zwei stabile Input-Beobachtungen, verarbeitet initial höchstens drei Tage, danach höchstens einen Backlog-Tag pro Zyklus, begrenzt automatische Historie auf sieben vergangene Tage und beobachtet drei Tage auf Late Data. Aktueller und zukünftiger Tag bleiben ausgeschlossen; persistenter State, Result Index und Crash Recovery sichern den Lifecycle.
+- Ergänzt strukturierte First-Deployment-Logs für Workerstart, Catch-up, Stability, Grace Period, Runs, Resultzusammenfassung und isolierte Fehler, ohne Rawframes, vollständige Cell Arrays oder Eventpayloads zu protokollieren.
+- Schreibt ausschließlich Derived Data unter `/share/guardian_battery/diagnostics`; gespeicherte Raw History bleibt unverändert. Es gibt in 0.7.17 keine automatische Retention, Daily UI, Daily-MQTT-Projektion, Daily-HTTP/API oder KI-Interpretation.
+- Daily Diagnostics liest ausschließlich gespeicherte Evidence und erzeugt keine RS485 Writes, Console Commands, MQTT Commands oder Hycube Actions. RS485 bleibt passiv; Cell Status, Diagnostic Confidence, Maintenance Risk, Phasenklassifikation, Gesamtbewertung, Diagnosegrenzen und relative Endpoints bleiben unverändert. Die Diagnostic Engine bleibt `0.4.12`.
+- Guardian Battery und Add-on sind `0.7.17`.
+
 ## 0.7.16 – RS485 Management Timestamp Contract Hotfix
 
 - Korrigiert den RS485-Management-Timestamp-Vertrag: `management[ADR]["timestamp"]` bleibt ausschließlich der direkte numerische Zeitpunkt des 0x92-Samples und wird nicht mehr durch den `datetime` des Identity Resolvers überschrieben.

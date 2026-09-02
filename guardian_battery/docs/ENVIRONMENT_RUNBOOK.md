@@ -1,6 +1,119 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-08-31
+Stand: 2026-09-02
+
+## Guardian Battery 0.7.17 – Deterministic Daily Diagnostics
+
+### Zweck und Sicherheitsgrenze
+
+- 0.7.17 erzeugt ausschließlich deterministische Derived Data aus bereits gespeicherter Evidence. Es enthält keine KI-Interpretation und verändert keine Raw History.
+- Daily Diagnostics sendet keine RS485 Writes, Console Commands, MQTT Commands oder Hycube Actions. Der RS485-Pfad bleibt passiv.
+- Cell Status, Diagnostic Confidence, Maintenance Risk, Phasenklassifikation, Gesamtbewertung, bestehende Diagnosegrenzen und relative Endpoints bleiben unverändert; die Diagnostic Engine bleibt `0.4.12`.
+- Es gibt in 0.7.17 noch keine Daily-Diagnostics-UI, Daily-Result-MQTT-Projektion oder HTTP/API für Daily Results. First-Deployment-Observability erfolgt über strukturierte Logs und read-only Inspection der Derived Files.
+
+### BMS Management Evidence
+
+- Primäre Identität ist `physical_serial`; Positionen werden ausschließlich anhand der zum Evidence-Zeitpunkt gültigen Position History aufgelöst. Es gibt keine ADR→Position-Formel.
+- Deterministisch erfasst werden CCL-/DCL-Reduktionen, Zero Events und Recoveries sowie `Limit=0` trotz Charge-/Discharge-Enable. Absolute Werte und peer-relative CCL-/DCL-Abweichungen bleiben getrennt; `25 A` oder ein anderer Wert wird nicht als feste Normalgrenze hardcodiert.
+- Eventkontext umfasst Cell History, Lowest Cell, Cell Median Deviations, Spread, Module Current, rekonstruierten Stackstrom mit Provenienz und rohe `0x44`-Korrelation ohne angenommene Bitsemantik. Daily Aggregates fassen die beobachtete Evidence zusammen. `causality=not_determined` ist verbindlich; daraus folgt keine Kausaldiagnose.
+
+### Daily Core und Guardian-Tag
+
+- Der fachliche Tag gilt in `Europe/Berlin` als halb offenes Intervall `[day_start, day_end)`. Timestamp-basiertes Slicing behandelt Sommer-/Winterzeit korrekt und erlaubt je nach DST 23-, 24- oder 25-Stunden-Tage.
+- Semantische Input-Fingerprints und physische Source-Provenienz identifizieren den gelesenen Evidence-Stand. Ergebnisse besitzen deterministische IDs und werden als immutable Revisionen atomar persistiert; der BMS-Event-Store ist idempotent.
+- Komponenten bleiben gegeneinander isoliert. Der Gesamtstatus unterscheidet `complete`, `partial` und `failed`. Neue oder geänderte Late Data kann bei verändertem Fingerprint eine neue Resultrevision auslösen.
+
+### Output Root und Dateistruktur
+
+Produktiver Derived-Data-Pfad:
+
+```text
+/share/guardian_battery/diagnostics/
+├── daily/
+├── events/
+│   └── bms_management/
+├── aggregates/
+│   └── bms_management/
+├── state/
+└── locks/
+```
+
+Dieser Baum enthält Derived Data, nicht Raw History. 0.7.17 führt noch keine automatische Retention für Daily Results, BMS Event Store oder BMS Aggregates ein. Das ist ein bekannter Non-Blocker; eine Regel wird erst nach realer Größenbeobachtung festgelegt.
+
+### Worker Lifecycle und Scheduling
+
+- `DailyDiagnosticWorker` läuft in einem eigenen isolierten Background Thread und startet erst nach Initialisierung/Start der wesentlichen Live-Acquisition. Sein Fehlerpfad darf Main Poll, Console, RS485, MQTT oder Hycube nicht steuern oder blockieren.
+- Checkintervall: 5 Minuten. Ein abgeschlossener Tag wird frühestens nach 15 Minuten Grace Period und nach zwei stabilen Fingerprint-Beobachtungen verarbeitet.
+- Initial Catch-up: maximal drei priorisierte vergangene Tage. Danach wird pro Zyklus maximal ein weiterer Backlog-Tag verarbeitet. Die automatische Historie ist auf die letzten sieben vergangenen Tage begrenzt; aktueller und zukünftiger Tag sind ausgeschlossen.
+- Das Late-Data-Fenster umfasst drei Tage. Ein gegen den vollständig validierten Result Index veränderter Fingerprint markiert einen Tag als stale und erlaubt eine neue immutable Revision.
+- Persistenter Worker-State und Crash Recovery erkennen einen unterbrochenen Versuch. Der vollständig gegen seine Resultrevision validierte Result Index ist die fachliche Wahrheit für bereits abgeschlossene Ergebnisse.
+
+### First-Deployment-Logs
+
+Die implementierten Suchbegriffe sind:
+
+```text
+Daily diagnostics worker starting
+Daily diagnostics worker started
+Daily diagnostics catch-up
+Daily diagnostics candidate
+waiting_for_grace
+stability reset
+Daily diagnostics unchanged
+Daily diagnostics started
+Daily diagnostics completed
+Daily diagnostics stale
+Daily diagnostics source changed
+Daily diagnostics probe failed
+Daily diagnostics index invalid
+Daily diagnostics run failed
+Daily diagnostics worker state write failed
+Daily diagnostics interrupted attempt recovered
+```
+
+Die Logs enthalten kompakte Konfiguration, Kandidaten-/Stability-/Catch-up-Angaben, `diagnostic_date`, Attempt-/Result-ID, Status, Dauer, Fingerprint-Präfix, Component Summary, Event Count, Quality und Coverage. Sie enthalten keine Rawframes, vollständigen Cell Arrays oder vollständigen Eventpayloads.
+
+### Read-only First-Deployment-Inspection
+
+Die folgenden Befehle lesen ausschließlich; sie legen nichts an und bereinigen nichts automatisch:
+
+```sh
+ls -la /share/guardian_battery/diagnostics
+find /share/guardian_battery/diagnostics -type f
+sed -n '1,160p' /share/guardian_battery/diagnostics/state/daily_job_state.json
+grep -R '"overall_status"' /share/guardian_battery/diagnostics/daily
+sha256sum /share/guardian_battery/diagnostics/daily/*/*.json
+```
+
+Bei der ersten realen Abnahme getrennt prüfen: Workerstart nach Live-Acquisition, begrenzten Catch-up, niemals den aktuellen Tag, Output- und Indexstruktur, `complete`/`partial`/`failed`, Late-Data-/Stale-Verhalten, unveränderte Raw History sowie CPU-, RAM- und I/O-Auswirkung auf die Live-Acquisition.
+
+### Reale Referenzevidence für den 31.08.2026
+
+Für `physical_serial=Y225004C32250226` wurde manuell verifiziert:
+
+- sieben DCL-Zero-Ereignisse und sieben Recoveries;
+- DCL=0 trotz Discharge Enable bei 7/7 Ereignissen;
+- C8 als Lowest Cell bei 7/7 Ereignissen;
+- rohe `0x44`-Korrelation Offset 0 `11→00` bei 7/7 Ereignissen;
+- endpoint-basierte Nullphasen von ungefähr `2.018,857 s`;
+- gap-qualifizierte DCL-Zero-Zeit von ungefähr `52,313 s`;
+- Management Coverage von ungefähr `2.759,740 s`;
+- gap-qualifizierter Duty Cycle von ungefähr `1,896 %`.
+
+Endpoint-Dauer und gap-qualifizierte Duty-Cycle-Evidence sind unterschiedliche Messgrößen und dürfen nicht gleichgesetzt werden. Die Korrelation belegt keine Ursache.
+
+### Abort Criteria und Rollback
+
+Rollback erwägen, wenn Main Poll oder Console stoppt, der RS485 Reader unerwartet endet, der Worker in eine Exception Loop gerät, mehr als drei Initial-Catch-up-Tage verarbeitet werden, der aktuelle Tag analysiert wird, automatische Verarbeitung außerhalb des Sieben-Tage-Horizonts erfolgt, ein ungültiger Result Index wirksam wird, Raw History verändert wird, CPU/RAM/I/O die Live-Acquisition beeinträchtigt oder RS485-Passivität verletzt wird.
+
+Rollback-Ziel ist 0.7.16. Dabei Raw History, Position History, Config History und Maintenance History weder löschen noch verändern. `diagnostics/` als Derived Data bestehen lassen; 0.7.16 ignoriert diesen Baum. Source-Release, installiertes Add-on und produktive Daten bleiben getrennte Zustände.
+
+### Offene reale Abnahme
+
+- Workerstart, Grace Period, Stability, Catch-up-Grenzen, Late-Data-Revisionslauf, Crash Recovery und Shutdown im produktiven Add-on beobachten.
+- Derived Files und Logs gegen die Referenzevidence vom 31.08.2026 prüfen.
+- Bestätigen, dass Main Poll, Console, RS485 Reader und Live-Acquisition unter realer CPU-/RAM-/I/O-Last unverändert weiterlaufen.
+- Retention nach real beobachteter Datenmenge separat definieren. Es erfolgt in diesem Source-Release kein Deployment und kein Zugriff auf produktives `/share` oder `/config`.
 
 ## Guardian Battery 0.7.16 – RS485 Management Timestamp Contract Hotfix
 
