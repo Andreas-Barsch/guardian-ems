@@ -103,7 +103,7 @@ class CellHistorySeries:
         }
 
     def query_bundles(self, *, requests, timestamp_from, timestamp_to, module_number,
-                      max_points=DEFAULT_MAX_DISPLAY_POINTS):
+                      max_points=DEFAULT_MAX_DISPLAY_POINTS, include_all_module_soc=False):
         """Project several metrics from one JSONL scan and one shared sample set."""
         normalized = []
         for request in requests:
@@ -128,7 +128,7 @@ class CellHistorySeries:
         except OSError as exc:
             raise SeriesHistoryError("cell history is unavailable") from exc
         key = (signature, position_signature, tuple(normalized), timestamp_from, timestamp_to, module_number,
-               max_points)
+               max_points, include_all_module_soc)
         if key in self._cache:
             self._cache.move_to_end(key)
             return {**self._cache[key], "cache_hit": True}
@@ -143,6 +143,8 @@ class CellHistorySeries:
                 and cell_number is None else 1)
             collectors.append((max(4, max_points // group_count), {}))
         samples, raw_records, stack_records = [], 0, []
+        soc_collectors = ({number: _ExtremaCollector(max(4, max_points // 7), start_epoch, end_epoch)
+                           for number in range(1, 7)} if include_all_module_soc else {})
         raw_points = [0] * len(normalized)
         try:
             for path in paths:
@@ -156,9 +158,16 @@ class CellHistorySeries:
                         epoch = float(record["timestamp"])
                         if not start_epoch <= epoch <= end_epoch:
                             continue
+                        record_module = int(record["module"])
+                        if include_all_module_soc and record_module in soc_collectors:
+                            timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                            point = self._points(record, "soc", None, timestamp, epoch)[0]
+                            point["module_number"] = record_module
+                            point["source"] = "pylontech"
+                            soc_collectors[record_module].add(point)
                         if any(metric in STACK_SOC_METRICS for metric, _, _ in normalized):
                             stack_records.append(record)
-                        if int(record["module"]) != module_number:
+                        if record_module != module_number:
                             continue
                         timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
                         raw_records += 1
@@ -210,7 +219,14 @@ class CellHistorySeries:
                               "cell_numbers": list(selected_cells or ()), "points": points,
                               "raw_points": raw_points[index]})
         downsample_seconds = time.perf_counter() - downsample_started
+        soc_module_series = [
+            {"metric": "soc", "label": f"Modul {number} SOC", "unit": "%",
+             "source": "pylontech", "module_number": number,
+             "points": collector.points()}
+            for number, collector in soc_collectors.items() if collector.points()
+        ]
         result = {"series": projected, "samples": samples, "raw_records": raw_records,
+                  "soc_module_series": soc_module_series,
                   "read_seconds": scan_seconds,
                   "downsample_seconds": downsample_seconds,
                   "cache_hit": False}

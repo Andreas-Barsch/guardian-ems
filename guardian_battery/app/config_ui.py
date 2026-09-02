@@ -26,6 +26,7 @@ from timeline_ui import render_timeline_html
 from event_overlay import EventOverlayAdapter
 from history_api import HISTORY_API_ROUTE, HistoryApi
 from history_series import DEFAULT_CELL_HISTORY_DIR, CellHistorySeries
+from hycube_evidence import DEFAULT_HYCUBE_HISTORY_DIR, HycubeBatteryCapacitySeries
 from rs485_evidence import DEFAULT_RS485_HISTORY_DIR, Rs485HistorySeries
 from history_ui import render_history_html
 from guardian_header import render_guardian_header
@@ -114,6 +115,7 @@ def _get_history_api():
                     EventOverlayAdapter(timeline),
                     PhaseEngine(ConfigHistory(CONFIG_HISTORY_FILE), _read_options),
                     Rs485HistorySeries(DEFAULT_RS485_HISTORY_DIR),
+                    HycubeBatteryCapacitySeries(DEFAULT_HYCUBE_HISTORY_DIR),
                 )
     return _HISTORY_API
 

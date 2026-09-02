@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -21,6 +22,92 @@ COLLECTOR_VERSION = "guardian-hycube-read-only-1"
 FIELDS = ("BatteryPower", "BatteryCapacity", "GridPower", "HomePower",
           "solarPower", "ExternalPower", "Date2")
 MAX_RESPONSE_BODY_BYTES = 1024 * 1024
+DEFAULT_HYCUBE_HISTORY_DIR = Path("/share/guardian_battery/hycube_history")
+
+
+class HycubeHistoryError(RuntimeError):
+    pass
+
+
+class HycubeBatteryCapacitySeries:
+    """Read-only, time-windowed projection of observed BatteryCapacity."""
+
+    def __init__(self, directory=DEFAULT_HYCUBE_HISTORY_DIR, cache_size=24):
+        self.directory = Path(directory)
+        self.cache_size = cache_size
+        self._cache = OrderedDict()
+
+    def _paths(self, start, end):
+        if not self.directory.exists():
+            return []
+        first = datetime.fromisoformat(start).astimezone(timezone.utc).date().isoformat()
+        last = datetime.fromisoformat(end).astimezone(timezone.utc).date().isoformat()
+        return sorted(path for path in self.directory.glob("*.jsonl")
+                      if first <= path.stem <= last)
+
+    def query(self, *, timestamp_from, timestamp_to, max_points=850):
+        from history_series import _ExtremaCollector
+
+        paths = self._paths(timestamp_from, timestamp_to)
+        try:
+            signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns)
+                              for path in paths)
+        except OSError as exc:
+            raise HycubeHistoryError("Hycube history is unavailable") from exc
+        key = (signature, timestamp_from, timestamp_to, max_points)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return {**self._cache[key], "cache_hit": True}
+        started = time.perf_counter()
+        start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
+        end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
+        collector = _ExtremaCollector(max_points, start_epoch, end_epoch)
+        raw_records = 0
+        try:
+            for path in paths:
+                with path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        record = json.loads(line)
+                        if record.get("record_type") != "hycube_system_observation":
+                            continue
+                        received_at = record.get("received_at")
+                        capacity = record.get("BatteryCapacity")
+                        if received_at is None or isinstance(capacity, bool) or not isinstance(capacity, (int, float)):
+                            continue
+                        epoch = datetime.fromisoformat(received_at).timestamp()
+                        if not start_epoch <= epoch <= end_epoch:
+                            continue
+                        collector.add({
+                            "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+                            "_epoch": epoch, "value": float(capacity),
+                            "source": "hycube", "source_field": "BatteryCapacity",
+                            "device_timestamp": record.get("device_timestamp"),
+                            "timezone_semantics": record.get("timezone_semantics"),
+                            "parse_quality": record.get("parse_quality"),
+                            "payload_sha256": record.get("payload_sha256"),
+                            "configured_interval_seconds": record.get("configured_interval_seconds"),
+                            "actual_interval_seconds": record.get("actual_interval_seconds"),
+                            "actual_interval_quality": record.get("actual_interval_quality"),
+                        })
+                        raw_records += 1
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise HycubeHistoryError(f"Hycube history is invalid: {exc}") from exc
+        read_seconds = time.perf_counter() - started
+        downsample_started = time.perf_counter()
+        points = collector.points()
+        result = {"metric": "hycube_battery_capacity", "label": "Hycube Battery Capacity",
+                  "unit": "%", "source": "hycube", "source_field": "BatteryCapacity",
+                  "timestamp_source": "received_at", "points": points,
+                  "raw_points": raw_records, "raw_records": raw_records,
+                  "read_seconds": read_seconds,
+                  "downsample_seconds": time.perf_counter() - downsample_started,
+                  "cache_hit": False}
+        self._cache[key] = result
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+        return result
 
 
 def evidence_enabled(value) -> bool:

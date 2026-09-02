@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from event_overlay import EventOverlayAdapter, OverlayContext
 from history_series import CellHistorySeries, SERIES_METRICS, SeriesHistoryError
 from rs485_evidence import RS485_SERIES_METRICS, Rs485HistorySeries
+from hycube_evidence import HycubeBatteryCapacitySeries, HycubeHistoryError
 from maintenance import MaintenanceValidationError, normalize_utc_timestamp
 from maintenance_api import ApiResponse, error_json
 from maintenance_service import MaintenanceHistoryError
@@ -34,11 +35,13 @@ class HistoryApiProblem(ValueError):
 
 class HistoryApi:
     def __init__(self, series: CellHistorySeries, overlays: EventOverlayAdapter, phase_engine=None,
-                 rs485_series: Rs485HistorySeries | None = None):
+                 rs485_series: Rs485HistorySeries | None = None,
+                 hycube_series: HycubeBatteryCapacitySeries | None = None):
         self.series = series
         self.overlays = overlays
         self.phase_engine = phase_engine
         self.rs485_series = rs485_series
+        self.hycube_series = hycube_series
 
     def handle(self, method: str, target: str) -> ApiResponse:
         try:
@@ -54,6 +57,9 @@ class HistoryApi:
         except SeriesHistoryError as exc:
             LOG.error("Guardian series unavailable: %s", exc)
             return ApiResponse(503, error_json("series_history_error", "Guardian series history is unavailable"))
+        except HycubeHistoryError as exc:
+            LOG.error("Hycube history unavailable: %s", exc)
+            return ApiResponse(503, error_json("hycube_history_error", "Hycube history is unavailable"))
         except MaintenanceHistoryError as exc:
             LOG.error("Maintenance overlay unavailable: %s", exc)
             return ApiResponse(503, error_json("maintenance_history_error", "Maintenance history is unavailable"))
@@ -121,7 +127,11 @@ class HistoryApi:
         bundle = self.series.query_bundles(
             requests=cell_requests or [{"metric": "soc", "cell_number": None, "cell_numbers": None}],
             timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-            module_number=module_number)
+            module_number=module_number, include_all_module_soc="soc" in metrics)
+        hycube = (self.hycube_series.query(timestamp_from=timestamp_from,
+                                           timestamp_to=timestamp_to,
+                                           max_points=max(4, 6000 // 7))
+                  if "soc" in metrics and self.hycube_series is not None else None)
         projected_series = list(bundle["series"] if cell_requests else [])
         if any(item["metric"] in RS485_SERIES_METRICS for item in requests):
             if self.rs485_series is None:
@@ -188,6 +198,14 @@ class HistoryApi:
                                               "direct_evidence", "confirmed_cause"],
                           "relative_endpoints": "observation_only",
                           "bms_limit_requires_direct_evidence": True},
+            "soc_timeline": {
+                "module_series": bundle.get("soc_module_series", []),
+                "hycube_series": hycube if hycube and hycube["points"] else None,
+                "policy_series": [], "policy_evidence": "unavailable",
+                "policy_evidence_reason": "no_verified_read_only_source",
+                "battery_capacity_semantics": "separate_hycube_system_value",
+                "aggregation_rule": "not_verified", "causality": "not_determined",
+            } if "soc" in metrics else None,
             "phase_analysis": {"mode": mode, "intervals": phases,
                                "diagnostic_intervals": diagnostic_phases,
                                "relative_endpoints": relative_endpoints,
@@ -199,11 +217,11 @@ class HistoryApi:
         response["series"] = ([{**item, "module_number": module_number} for item in projected_series]
                               if combined else {**projected_series[0], "module_number": module_number})
         response["performance"] = {
-            "raw_records": bundle["raw_records"],
+            "raw_records": bundle["raw_records"] + (hycube["raw_records"] if hycube else 0),
             "raw_points": sum(item.get("raw_points", len(item["points"])) for item in projected_series),
             "display_points": sum(len(item["points"]) for item in projected_series),
-            "history_read_seconds": round(bundle["read_seconds"], 6),
-            "downsample_seconds": round(bundle["downsample_seconds"], 6),
+            "history_read_seconds": round(bundle["read_seconds"] + (hycube["read_seconds"] if hycube else 0), 6),
+            "downsample_seconds": round(bundle["downsample_seconds"] + (hycube["downsample_seconds"] if hycube else 0), 6),
             "phase_projection_seconds": round(phase_seconds, 6), "cache_hit": bundle["cache_hit"],
             "backend_seconds": round(time.perf_counter() - backend_started, 6),
         }

@@ -12,6 +12,19 @@ def test_generic_soc_and_cell_chart_with_touch_markers_and_responsive_layout():
     assert "overflow:hidden" in html
 
 
+def test_soc_projection_distinguishes_module_and_hycube_sources_without_policy_lines():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert "soc_timeline" in html and "module_series" in html and "hycube_series" in html
+    assert "Hycube Battery Capacity" in html
+    assert "Quelle Hycube" in html
+    assert "Aggregationsregel ist nicht als Mittelwert" in html
+    assert "Policy-Grenzen werden mangels verifizierter Read-only-Semantik nicht dargestellt" in html
+    assert "stroke-dasharray','8 4" in html
+    assert "Stack-SOC" not in html
+    assert "data.phase_analysis?.intervals" in html
+    assert ".legend{display:flex" in html and "flex-wrap:wrap" in html
+
+
 def test_overlay_uses_server_deep_link_and_safe_text_rendering():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
     assert "marker.deep_link" in html

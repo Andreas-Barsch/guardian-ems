@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from event_overlay import EventOverlayAdapter
 from history_api import HistoryApi
 from history_series import CellHistorySeries
+from hycube_evidence import HycubeBatteryCapacitySeries
 from rs485_evidence import Rs485HistorySeries
 from config_history import ConfigHistory
 from phase_engine import PhaseEngine
@@ -13,13 +14,24 @@ from test_timeline import add, build
 
 
 def write_sample(directory, timestamp, module=3):
-    directory.mkdir()
+    directory.mkdir(exist_ok=True)
     record = {"schema_version": 1, "timestamp": timestamp, "module": module,
               "voltages_mv": [3300 + n for n in range(15)], "current_a": -2.5,
               "soc_percent": 64.0, "temperatures_c": [24.0 + n / 10 for n in range(15)],
               "balancing": [False] * 15, "physical_groups": {}}
     day = datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
     (directory / f"{day}.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+
+def append_sample(directory, timestamp, module, soc):
+    directory.mkdir(exist_ok=True)
+    day = datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
+    record = {"schema_version": 1, "timestamp": timestamp, "module": module,
+              "voltages_mv": [3300] * 15, "current_a": 0, "soc_percent": soc,
+              "temperatures_c": [25] * 15, "balancing": [False] * 15,
+              "physical_groups": {}, "module_serial": f"SERIAL-{module}"}
+    with (directory / f"{day}.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
 
 
 def api_env(tmp_path):
@@ -54,6 +66,50 @@ def test_series_without_maintenance_is_unchanged_and_has_no_markers(tmp_path):
     assert response.status == 200
     assert response.body["series"]["points"][0]["value"] == 64.0
     assert response.body["overlays"] == []
+
+
+def test_soc_timeline_projects_six_modules_and_hycube_received_at(tmp_path):
+    maintenance, _, timeline = build(tmp_path)
+    cell_directory = tmp_path / "cell_history"
+    hycube_directory = tmp_path / "hycube_history"
+    timestamp = datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp()
+    for module in range(1, 7):
+        append_sample(cell_directory, timestamp + module, module, 70 + module)
+    hycube_directory.mkdir()
+    record = {"schema_version": 1, "record_type": "hycube_system_observation",
+              "received_at": "2026-09-02T08:00:20+00:00", "BatteryCapacity": 82,
+              "Date2": None, "device_timestamp": None, "timezone_semantics": "unavailable",
+              "parse_quality": "complete", "payload_sha256": "abc",
+              "configured_interval_seconds": 5.0, "actual_interval_seconds": 5.1,
+              "actual_interval_quality": "observed"}
+    (hycube_directory / "2026-09-02.jsonl").write_text(json.dumps(record) + "\n")
+    api = HistoryApi(CellHistorySeries(cell_directory), EventOverlayAdapter(timeline),
+                     hycube_series=HycubeBatteryCapacitySeries(hycube_directory))
+    response = api.handle("GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z&to=2026-09-02T09:00:00Z&module_number=3")
+    assert response.status == 200
+    projected = response.body["soc_timeline"]
+    assert [item["module_number"] for item in projected["module_series"]] == list(range(1, 7))
+    assert projected["hycube_series"]["points"] == [{
+        "timestamp": "2026-09-02T08:00:20+00:00", "value": 82.0,
+        "source": "hycube", "source_field": "BatteryCapacity",
+        "device_timestamp": None, "timezone_semantics": "unavailable",
+        "parse_quality": "complete", "payload_sha256": "abc",
+        "configured_interval_seconds": 5.0, "actual_interval_seconds": 5.1,
+        "actual_interval_quality": "observed"}]
+    assert projected["policy_series"] == []
+    assert projected["policy_evidence"] == "unavailable"
+    assert projected["aggregation_rule"] == "not_verified"
+
+
+def test_soc_timeline_omits_hycube_series_when_history_is_missing(tmp_path):
+    maintenance, directory, timeline = build(tmp_path)
+    timestamp = datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp()
+    append_sample(directory, timestamp, 1, 70)
+    api = HistoryApi(CellHistorySeries(directory), EventOverlayAdapter(timeline),
+                     hycube_series=HycubeBatteryCapacitySeries(tmp_path / "missing"))
+    response = api.handle("GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z&to=2026-09-02T09:00:00Z&module_number=1")
+    assert response.status == 200
+    assert response.body["soc_timeline"]["hycube_series"] is None
 
 
 def test_rs485_history_api_resolves_module_via_serial_without_adr_selector(tmp_path):

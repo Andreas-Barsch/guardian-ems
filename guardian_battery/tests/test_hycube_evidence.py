@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
-from hycube_evidence import (MAX_RESPONSE_BODY_BYTES, HycubeCollector,
+from hycube_evidence import (MAX_RESPONSE_BODY_BYTES, HycubeBatteryCapacitySeries, HycubeCollector,
                              HycubeEvidenceWriter, collector_from_options,
                              data_row_url, evidence_enabled, observation)
 
@@ -162,3 +162,40 @@ def test_start_is_singleton_and_stop_is_bounded(tmp_path):
     assert collector.start() is False
     collector.stop(.2)
     assert collector.status()["state"] == "disabled"
+
+
+def test_battery_capacity_history_is_windowed_read_only_and_extrema_preserving(tmp_path, monkeypatch):
+    history = tmp_path / "history"
+    history.mkdir()
+    old = history / "2026-09-01.jsonl"
+    current = history / "2026-09-02.jsonl"
+    old.write_text(json.dumps({"record_type": "hycube_system_observation",
+                               "received_at": "2026-09-01T12:00:00+00:00",
+                               "BatteryCapacity": 10}) + "\n")
+    rows = []
+    for index in range(100):
+        value = 5 if index == 40 else 99 if index == 60 else 50
+        rows.append(json.dumps({"record_type": "hycube_system_observation",
+                                "received_at": f"2026-09-02T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                                "BatteryCapacity": value, "Date2": None,
+                                "device_timestamp": None, "timezone_semantics": "unavailable",
+                                "parse_quality": "complete"}))
+    current.write_text("\n".join(rows) + "\n")
+    before = {path: path.read_bytes() for path in (old, current)}
+    opened = []
+    original_open = Path.open
+
+    def counted_open(path, *args, **kwargs):
+        if path.parent == history:
+            opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    result = HycubeBatteryCapacitySeries(history).query(
+        timestamp_from="2026-09-02T00:00:00+00:00",
+        timestamp_to="2026-09-02T01:00:00+00:00", max_points=20)
+    assert opened == [current]
+    assert len(result["points"]) <= 20
+    assert {5.0, 99.0} <= {point["value"] for point in result["points"]}
+    assert all(point["timestamp"].startswith("2026-09-02") for point in result["points"])
+    assert {path: path.read_bytes() for path in (old, current)} == before
