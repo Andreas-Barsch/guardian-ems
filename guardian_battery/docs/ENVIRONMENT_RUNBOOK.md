@@ -2,6 +2,62 @@
 
 Stand: 2026-09-02
 
+## Guardian Battery 0.7.18 – Guardian Diagnostics
+
+### Zweck, Datenquelle und aktive Komponente
+
+- Guardian Diagnostics macht abgeschlossene Daily Diagnostics in einer eigenständigen Gesamtübersicht, einer nach Datum sortierten Tagesliste und validierten Tagesdetails sichtbar. Benutzer müssen dafür keine Derived-JSON-Dateien oder Worker-Logs lesen.
+- V1 verwendet ausschließlich die aktive deterministische Komponente **BMS Management Evidence** und bleibt architektonisch für weitere Daily Components offen. Es enthält keine KI und keine neue Diagnosebewertung.
+- API und UI lesen ausschließlich bereits erzeugte Derived Data unter `/share/guardian_battery/diagnostics`. Browserzugriffe analysieren weder `cell_history` noch `rs485_history` neu und starten keinen Daily Run, Backfill oder Worker-Vorgang.
+
+### Read-only API und Sicherheitsvertrag
+
+Erlaubte GET-Routen:
+
+```text
+/api/diagnostics/overview
+/api/diagnostics/days
+/api/diagnostics/daily/YYYY-MM-DD
+/api/diagnostics/bms-management/aggregate/YYYY-MM-DD
+/api/diagnostics/bms-management/events/YYYY-MM-DD
+```
+
+- POST, PUT, PATCH und DELETE werden mit `405` abgelehnt. Es existieren keine Runtime- oder Anlagensteuerungsendpunkte.
+- Datumswerte müssen kanonisches `YYYY-MM-DD` sein. Pfad-Traversal, freie Resultdateireferenzen und Symlink-Escapes werden verhindert. Resultrevisionen werden mit demselben vollständigen Indexvertrag wie im Daily Worker validiert.
+- Browser-DTOs enthalten keine absoluten Raw-History-Pfade oder Rawframes; HTML/Text wird escaped und Eventantworten sind begrenzt. GET verändert weder Resultrevision, Event Store, Aggregate noch Worker-State.
+
+### Datenqualität und Evidence-Semantik
+
+- `complete`: vollständig gemäß den aktiven Components analysiert.
+- `partial`: verwertbares Tagesresultat bei eingeschränkter Datenlage; null Ereignisse dürfen nicht als unauffälliger vollständiger Tag interpretiert werden.
+- `failed`: kein gültiges neues Tagesresultat. Dies bezeichnet einen Analysefehler und keinen kritischen Batteriezustand. Da fehlgeschlagene Attempts derzeit nicht vollständig historisch je Tag persistiert sind, bleibt eine historische Failed-Liste offen und wird nicht erfunden.
+- Fehlende Tage sind keine Nulltage. 7-/30-Tage-Fenster aggregieren nur vorhandene autoritative Derived Results; bei unzureichender Historie bleibt der Trend „noch nicht bestimmbar“.
+- `physical_serial` ist die primäre Identität. Eine angezeigte historische Position stammt ausschließlich aus zeitgültiger Tages-Evidence und niemals aus der heutigen Zuordnung.
+- CCL und DCL sind die vom adressierten BMS gemeldeten Management-Limitwerte, nicht automatisch lokales Zell-, Stack- oder Wechselrichterlimit. Numerisches Limit und Enable sind getrennte Evidence: CCL=0 bei Charge Enable sowie DCL=0 bei Discharge Enable können beobachtet werden.
+- Cell Context, Current Context, rekonstruierter Stackstrom, Lowest Cell, Coverage und gap-qualifizierter Duty Cycle werden nur aus vorhandenen Derived Data projiziert. Rohe `0x44`-Byteübergänge bleiben uninterpretierte zeitliche Korrelation und werden nicht als Protection, MOSFET, Shutdown oder Fault bezeichnet. `causality=not_determined` bleibt verbindlich.
+
+Als reales, nicht hardcodiertes Beispiel wurde am 02.09.2026 CCL `10 / 10 / 5 / 0 / 0 / 0 A` bei Charge Enable `ENABLED` für alle sechs Module und DCL `-25 A` beobachtet. Dies belegt ausschließlich die Trennung von Limit und Enable und keine Ursache oder Produktregel.
+
+### Dashboard-, Sidebar- und Deployment-Separation
+
+- HA-Dashboard-Source: `homeassistant/dashboards/guardian_diagnostics.yaml`.
+- Späteres produktives Ziel: `/config/dashboards/guardian_diagnostics.yaml`.
+- Die Registrierung `guardian-diagnostics` aus `homeassistant/configuration.yaml` muss separat gegen die produktive `/config/configuration.yaml` geprüft und kontrolliert übernommen werden. Ein Add-on-Update aktualisiert weder Dashboarddatei noch Registrierung automatisch.
+- Guardian Diagnostics ist ein eigener Lovelace-Seitenmenüpunkt, keine zweite Add-on-Ingress-Registrierung. Die reale Sidebar-/Iframe-Auflösung bleibt Deployment-Abnahme.
+- Bei jedem Dashboardrelease getrennt prüfen: (1) Git/Source, (2) Add-on-Version, (3) produktive Dashboarddatei, (4) produktive Dashboardregistrierung und (5) Browserdarstellung auf Desktop und Smartphone.
+
+### Produktiv verifizierte Referenz vom 31.08.2026
+
+Der vollständigere Daily Run für `physical_serial=Y225004C32250226` verwendete 4.337 RS485- und 6.830 Cell-Records. Er reproduzierte sieben DCL-Zero-Ereignisse, sieben Recoveries, siebenmal DCL Zero trotz Enable, C8 als Lowest Cell bei 7/7 Ereignissen, das dominante rohe Muster `offset:0:11->00` mit Ratio `1,0`, maximal 398 mV Spread, minimal 2.884 mV Cell Voltage und etwa 52,313 s gap-qualifizierte DCL-Zero-Zeit. Der produktive DCL-Zero-Duty-Cycle betrug etwa `0,564 %`.
+
+Die früheren `1,896 %` waren das Ergebnis einer kleineren manuellen Teil-Evidence mit kleinerem Coverage-Nenner, kein Fehler der Daily Engine. Die sieben Ereignisse wurden mit vollständigerer Tages-Evidence unverändert reproduziert. Endpoint-Dauer und gap-qualifizierte Dauer/Coverage bleiben unterschiedliche Größen; aus diesen Beobachtungen folgt keine Ursache.
+
+### Offene reale 0.7.18-Abnahme
+
+- Produktive API gegen echte Derived Data sowie Gesamtübersicht, Tagesauswahl und Tagesdetails für 31.08./30.08. prüfen.
+- Dashboarddatei und Registrierung separat unter `/config` installieren, Sidebar-Auflösung und Rücknavigation kontrollieren und Desktop-/Smartphone-Darstellung prüfen.
+- Reale 7-/30-Tage-Fenster, `partial`-Darstellung und unveränderte Live-Acquisition/Worker-Ausführung verifizieren. Dieses Source-Release führt kein Deployment aus.
+
 ## Guardian Battery 0.7.17 – Deterministic Daily Diagnostics
 
 ### Zweck und Sicherheitsgrenze

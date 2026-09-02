@@ -1,5 +1,15 @@
 # Guardian Battery Changelog
 
+## 0.7.18 – Guardian Diagnostics
+
+- Macht die automatisch erzeugten Daily Diagnostics erstmals direkt in einem eigenständigen Benutzerbereich sichtbar. Gesamtübersicht, Datumsauswahl und Tagesdetails fassen vorhandene deterministische Evidence verständlich zusammen, ohne dass JSON-Dateien, Logs oder einzelne BMS-Ereignisse manuell rekonstruiert werden müssen.
+- Ergänzt eine vollständig read-only Diagnostics API für Overview, vorhandene Tage, validierte Tagesresultate sowie BMS-Management-Aggregate und -Events. Sie liest ausschließlich Derived Data unter `/share/guardian_battery/diagnostics`, analysiert bei Browserzugriff weder Cell History noch RS485 Raw History neu und bietet keine POST-/PUT-/PATCH-/DELETE-, Daily-Run-, Backfill-, Worker- oder Anlagensteuerung.
+- Zeigt 7-/30-Tage-Zusammenfassungen, Datenqualität (`complete`, `partial`, `failed`) und BMS Management Evidence je `physical_serial`. `partial` bedeutet eingeschränkte Datenlage und nicht „unauffällig“; `failed` bezeichnet ein fehlendes gültiges Tagesresultat und keinen kritischen Batteriezustand.
+- Stellt CCL/DCL, Enable, Cell Context, Current Context, Coverage und Duty Cycle getrennt und ohne feste Normalgrenze dar. Wiederkehrende rohe `0x44`-Byteübergänge bleiben reine zeitliche Evidence ohne Interpretation als Protection, MOSFET, Shutdown oder Fault. Korrelation wird nicht als Ursache behauptet; BMS Management V1 bleibt `causality=not_determined`.
+- Ergänzt eine responsive Hilfe-/Erklärungsansicht sowie die HA-Dashboard-Source `homeassistant/dashboards/guardian_diagnostics.yaml` und ihre Source-Registrierung. Dashboarddatei und produktive `/config/configuration.yaml` müssen bei einem späteren Deployment separat und kontrolliert aktualisiert werden; ein Add-on-Update kopiert sie nicht automatisch.
+- V1 bindet ausschließlich die deterministische Daily Component **BMS Management Evidence** an. Die Architektur bleibt für weitere Components offen, enthält aber keine KI, neue Diagnosebewertung oder neue Grenzwerte. Cell Status, Confidence, Maintenance Risk, Phasenklassifikation, Gesamtbewertung und relative Endpoints bleiben unverändert.
+- RS485 bleibt passiv; die Diagnostic Engine bleibt `0.4.12`. Guardian Battery und Add-on sind `0.7.18`.
+
 ## 0.7.17 – Deterministic Daily Diagnostics
 
 - Ergänzt deterministische BMS-Management-Evidence nach physischer Seriennummer und zeitgültiger Position: CCL-/DCL-Reduktionen, Zero Events und Recoveries einschließlich `Limit=0` trotz Enable, Cell-/Lowest-Cell-/Medianabweichungs-/Spread-/Modulstromkontext, rekonstruierter Stackstrom-Provenienz sowie roher `0x44`-Korrelation ohne Bitsemantik oder Kausalitätsdiagnose (`causality=not_determined`). Peer-relative CCL-/DCL-Werte und Daily Aggregates setzen keinen festen Normalwert voraus.
