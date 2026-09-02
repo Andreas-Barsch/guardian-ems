@@ -368,6 +368,83 @@ def test_parameters_and_config_projection_change_fingerprint(tmp_path):
     assert first["provenance"]["config_history_projection"][0]["config_id"] == "one"
 
 
+def test_future_history_records_do_not_change_old_day_but_relevant_records_do(tmp_path):
+    timestamp = berlin_timestamp()
+    before = datetime.fromtimestamp(timestamp - 3600, timezone.utc).isoformat()
+    sources = source_set(tmp_path, [management(timestamp, -25)],
+                         positions=[position(before)], configs=[
+                             {"schema_version": 1, "timestamp": before,
+                              "config_id": "before", "parameters": {}}])
+    maintenance = tmp_path / "maintenance.jsonl"
+    sources = daily.DailyDiagnosticSources(
+        sources.cell_history_root, sources.rs485_history_root,
+        sources.position_history_path, sources.config_history_path, maintenance)
+    first = daily.probe_daily_inputs("2026-08-31", sources).input_fingerprint
+    future = "2026-09-02T10:00:00+00:00"
+    with Path(sources.position_history_path).open("a") as handle:
+        handle.write(json.dumps(position(future, serial="FUTURE")) + "\n")
+    with Path(sources.config_history_path).open("a") as handle:
+        handle.write(json.dumps({"schema_version": 1, "timestamp": future,
+                                 "config_id": "future", "parameters": {}}) + "\n")
+    write_jsonl(maintenance, [{"occurred_at": future, "event": "future"}])
+    assert daily.probe_daily_inputs("2026-08-31", sources).input_fingerprint == first
+
+    relevant = datetime.fromtimestamp(timestamp + 60, timezone.utc).isoformat()
+    with Path(sources.position_history_path).open("a") as handle:
+        handle.write(json.dumps(position(relevant, serial="RELEVANT")) + "\n")
+    second = daily.probe_daily_inputs("2026-08-31", sources).input_fingerprint
+    assert second != first
+    with Path(sources.config_history_path).open("a") as handle:
+        handle.write(json.dumps({"schema_version": 1, "timestamp": relevant,
+                                 "config_id": "relevant", "parameters": {}}) + "\n")
+    third = daily.probe_daily_inputs("2026-08-31", sources).input_fingerprint
+    assert third != second
+    with maintenance.open("a") as handle:
+        handle.write(json.dumps({"occurred_at": relevant,
+                                 "event": "late-documentation"}) + "\n")
+    assert daily.probe_daily_inputs("2026-08-31", sources).input_fingerprint != third
+
+
+@pytest.mark.parametrize("failure_stage", ["event", "aggregate", "result", "index"])
+def test_persistence_failures_keep_old_index_and_rerun_is_idempotent(
+        tmp_path, monkeypatch, failure_stage):
+    timestamp = berlin_timestamp()
+    sources = source_set(tmp_path, [management(timestamp, -25)])
+    original = run(tmp_path, sources)
+    index_path = Path(original["index_path"])
+    old_index = index_path.read_bytes()
+    with (Path(sources.rs485_history_root) / "raw.jsonl").open("a") as handle:
+        handle.write(json.dumps(management(timestamp + 10, 0)) + "\n")
+
+    append = daily.BmsManagementEvidenceStore.append_events
+    aggregate = daily.BmsManagementEvidenceStore.save_daily_aggregates
+    atomic = daily._atomic_json
+    if failure_stage == "event":
+        monkeypatch.setattr(daily.BmsManagementEvidenceStore, "append_events",
+                            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("event full")))
+    elif failure_stage == "aggregate":
+        monkeypatch.setattr(daily.BmsManagementEvidenceStore, "save_daily_aggregates",
+                            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("aggregate full")))
+    else:
+        def fail_atomic(path, payload):
+            if ((failure_stage == "index" and path.name == "index.json")
+                    or (failure_stage == "result" and path.name != "index.json")):
+                raise OSError(f"{failure_stage} full")
+            atomic(path, payload)
+        monkeypatch.setattr(daily, "_atomic_json", fail_atomic)
+    with pytest.raises(OSError, match="full"):
+        run(tmp_path, sources)
+    assert index_path.read_bytes() == old_index
+
+    monkeypatch.setattr(daily.BmsManagementEvidenceStore, "append_events", append)
+    monkeypatch.setattr(daily.BmsManagementEvidenceStore, "save_daily_aggregates", aggregate)
+    monkeypatch.setattr(daily, "_atomic_json", atomic)
+    repaired = run(tmp_path, sources)
+    assert repaired["input_fingerprint"] != original["input_fingerprint"]
+    event_path = tmp_path / "output/events/bms_management/2026-08-31.jsonl"
+    assert len(event_path.read_text().splitlines()) == 1
+
+
 def test_daily_schema_has_required_contract_and_atomic_index(tmp_path):
     timestamp = berlin_timestamp()
     result = run(tmp_path, source_set(tmp_path, [management(timestamp, -25)]))

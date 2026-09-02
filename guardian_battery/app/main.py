@@ -19,6 +19,8 @@ from diagnostic_aggregates import DiagnosticAggregateStore
 from diagnostic_backfill import DiagnosticAggregateBackfill
 from current_condition_backfill import CurrentConditionBackfill
 from config_history import ConfigHistory
+from daily_diagnostics import DailyDiagnosticSources
+from daily_diagnostic_worker import DailyDiagnosticWorker
 from config_ui import (configure_maintenance_live_publisher,
                        configure_rs485_status_provider,
                        record_stable_observed_positions, start_config_server)
@@ -61,6 +63,7 @@ CELL_DIAG_FILE = SHARE_DIR / "cell_diagnostics.json"
 CELL_HISTORY_DIR = SHARE_DIR / "cell_history"
 DIAGNOSTIC_AGGREGATE_FILE = SHARE_DIR / "diagnostic_aggregates.json"
 CONFIG_HISTORY_FILE = SHARE_DIR / "config_history.jsonl"
+DAILY_DIAGNOSTICS_ROOT = SHARE_DIR / "diagnostics"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -1241,12 +1244,28 @@ def main() -> None:
     bms_stat = {}
     module_infos: dict[int, dict] = {}
     identity_resolution_log: dict[int, tuple[str, int | None]] = {}
+    daily_worker = None
 
     if rs485_reader is not None:
         restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
         rs485_reader.restore_identities(restored_identities)
         rs485_writer.start()
         rs485_reader.start()
+    try:
+        daily_worker = DailyDiagnosticWorker(
+            DailyDiagnosticSources(
+                cell_history_root=CELL_HISTORY_DIR,
+                rs485_history_root=DEFAULT_RS485_HISTORY_DIR,
+                position_history_path=DEFAULT_POSITION_HISTORY_FILE,
+                config_history_path=CONFIG_HISTORY_FILE,
+                maintenance_history_path=DEFAULT_MAINTENANCE_EVENT_FILE,
+            ),
+            DAILY_DIAGNOSTICS_ROOT,
+        )
+        daily_worker.start()
+    except Exception as exc:
+        daily_worker = None
+        LOG.warning("Daily diagnostics worker konnte nicht gestartet werden: %s", exc)
     try:
         while RUNNING:
             started = time.monotonic()
@@ -1432,6 +1451,11 @@ def main() -> None:
             elapsed = time.monotonic() - started
             time.sleep(max(1, int(options["poll_interval_seconds"]) - elapsed))
     finally:
+        if daily_worker is not None:
+            try:
+                daily_worker.stop()
+            except Exception as exc:
+                LOG.warning("Daily diagnostics worker konnte nicht gestoppt werden: %s", exc)
         if rs485_reader is not None:
             rs485_reader.stop()
         if rs485_writer is not None:

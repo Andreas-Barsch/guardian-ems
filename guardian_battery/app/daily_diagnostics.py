@@ -83,6 +83,16 @@ class SourceSlice:
         return "complete"
 
 
+@dataclass(frozen=True)
+class DailyInputProbe:
+    day: GuardianDay
+    input_fingerprint: str
+    sources: Mapping[str, SourceSlice]
+    position_projection: tuple[Mapping[str, Any], ...]
+    config_projection: tuple[Mapping[str, Any], ...]
+    component_manifest: Mapping[str, Any]
+
+
 def guardian_day(diagnostic_date: date | str, timezone_name: str = DEFAULT_TIMEZONE) -> GuardianDay:
     parsed = (diagnostic_date if isinstance(diagnostic_date, date)
               else date.fromisoformat(str(diagnostic_date)))
@@ -117,21 +127,43 @@ def _stat(path: Path) -> tuple[int, int, int | None]:
     return value.st_size, value.st_mtime_ns, getattr(value, "st_ino", None)
 
 
-def _source_files(path: Path | str | None) -> list[Path]:
+def _source_files(path: Path | str | None, day: GuardianDay | None = None,
+                  discovered: Sequence[Path] | None = None) -> list[Path]:
     if path is None:
         return []
     root = Path(path)
-    if root.is_file():
-        return [root]
-    if not root.exists():
-        return []
-    return sorted(item for item in root.rglob("*.jsonl") if item.is_file())
+    if discovered is None:
+        if root.is_file():
+            return [root]
+        if not root.exists():
+            return []
+        files = sorted(item for item in root.rglob("*.jsonl") if item.is_file())
+    else:
+        files = list(discovered)
+    if day is None:
+        return files
+    # Daily writers use either local or UTC YYYY-MM-DD filenames. Include both
+    # possible UTC boundary dates and retain non-date names for compatibility.
+    utc_start = day.start.astimezone(timezone.utc).date()
+    utc_end = (day.end.astimezone(timezone.utc) - timedelta(microseconds=1)).date()
+    relevant_dates = {day.diagnostic_date, utc_start.isoformat(), utc_end.isoformat()}
+    selected = []
+    for item in files:
+        try:
+            file_date = date.fromisoformat(item.stem[:10]).isoformat()
+        except ValueError:
+            selected.append(item)
+        else:
+            if file_date in relevant_dates:
+                selected.append(item)
+    return selected
 
 
 def _slice_jsonl(name: str, path: Path | str | None, day: GuardianDay,
                  *, timestamp_field: str = "timestamp",
-                 include_history_before_day: bool = False) -> SourceSlice:
-    files = _source_files(path)
+                 include_history_before_day: bool = False,
+                 discovered: Sequence[Path] | None = None) -> SourceSlice:
+    files = _source_files(path, day, discovered)
     missing = path is None or not Path(path).exists()
     used: list[Mapping[str, Any]] = []
     provenance = []
@@ -284,6 +316,63 @@ def _component_manifest(parameters: EvidenceParameters) -> dict[str, Any]:
                                "parameters": asdict(parameters)}}
 
 
+def build_source_catalog(sources: DailyDiagnosticSources) -> dict[str, tuple[Path, ...]]:
+    """Discover source filenames once without reading record contents."""
+    paths = {
+        "rs485": sources.rs485_history_root,
+        "cell": sources.cell_history_root,
+        "position_history": sources.position_history_path,
+        "config_history": sources.config_history_path,
+        "maintenance_history": sources.maintenance_history_path,
+    }
+    return {name: tuple(_source_files(path)) for name, path in paths.items()}
+
+
+def probe_daily_inputs(diagnostic_date: date | str, sources: DailyDiagnosticSources,
+                       *, timezone_name: str = DEFAULT_TIMEZONE,
+                       bms_parameters: EvidenceParameters | None = None,
+                       source_catalog: Mapping[str, Sequence[Path]] | None = None
+                       ) -> DailyInputProbe:
+    """Slice and fingerprint one day without executing any diagnostic component."""
+    day = guardian_day(diagnostic_date, timezone_name)
+    parameters = bms_parameters or EvidenceParameters(daily_timezone=timezone_name)
+    if parameters.daily_timezone != timezone_name:
+        raise ValueError("BMS daily timezone must match the Guardian day timezone")
+    catalog = source_catalog or {}
+    rs485 = _slice_jsonl("rs485", sources.rs485_history_root, day,
+                         discovered=catalog.get("rs485"))
+    cells = _slice_jsonl("cell", sources.cell_history_root, day,
+                         discovered=catalog.get("cell"))
+    positions = _slice_jsonl("position_history", sources.position_history_path, day,
+                             timestamp_field="effective_at",
+                             include_history_before_day=True,
+                             discovered=catalog.get("position_history"))
+    configs = _slice_jsonl("config_history", sources.config_history_path, day,
+                           include_history_before_day=True,
+                           discovered=catalog.get("config_history"))
+    maintenance = _slice_jsonl("maintenance_history", sources.maintenance_history_path, day,
+                               timestamp_field="occurred_at",
+                               discovered=catalog.get("maintenance_history"))
+    position_projection = tuple(_history_projection(
+        positions.records, day, "effective_at"))
+    config_projection = tuple(_history_projection(configs.records, day, "timestamp"))
+    manifest = _component_manifest(parameters)
+    semantic = {
+        "timezone": timezone_name, "diagnostic_date": day.diagnostic_date,
+        "daily_schema_version": DAILY_SCHEMA_VERSION,
+        "core_version": CORE_VERSION, "component_manifest": manifest,
+        "rs485_records": list(rs485.records), "cell_records": list(cells.records),
+        "position_projection": list(position_projection),
+        "config_projection": list(config_projection),
+        "maintenance_records": list(maintenance.records),
+    }
+    fingerprint = hashlib.sha256(_canonical(semantic)).hexdigest()
+    return DailyInputProbe(
+        day, fingerprint,
+        {item.name: item for item in (rs485, cells, positions, configs, maintenance)},
+        position_projection, config_projection, manifest)
+
+
 def _component_result(result: Mapping[str, Any], rs485: SourceSlice,
                       cells: SourceSlice, position: SourceSlice,
                       diagnostic_date: str) -> dict[str, Any]:
@@ -337,27 +426,15 @@ def run_daily_diagnostic(diagnostic_date: date | str, sources: DailyDiagnosticSo
     attempt_id = str(uuid.uuid4())
     started = now().astimezone(timezone.utc).isoformat()
     with _output_lock(output, lock_timeout_seconds):
-        rs485 = _slice_jsonl("rs485", sources.rs485_history_root, day)
-        cells = _slice_jsonl("cell", sources.cell_history_root, day)
-        positions_all = _slice_jsonl("position_history", sources.position_history_path, day,
-                                     timestamp_field="effective_at",
-                                     include_history_before_day=True)
-        configs_all = _slice_jsonl("config_history", sources.config_history_path, day,
-                                   include_history_before_day=True)
-        maintenance = _slice_jsonl("maintenance_history", sources.maintenance_history_path, day,
-                                   timestamp_field="occurred_at")
-        positions = _history_projection(positions_all.records, day, "effective_at")
-        configs = _history_projection(configs_all.records, day, "timestamp")
-        manifest = _component_manifest(parameters)
-        semantic = {
-            "timezone": timezone_name, "diagnostic_date": day.diagnostic_date,
-            "daily_schema_version": DAILY_SCHEMA_VERSION,
-            "core_version": CORE_VERSION, "component_manifest": manifest,
-            "rs485_records": list(rs485.records), "cell_records": list(cells.records),
-            "position_projection": positions, "config_projection": configs,
-            "maintenance_records": list(maintenance.records),
-        }
-        fingerprint = hashlib.sha256(_canonical(semantic)).hexdigest()
+        probe = probe_daily_inputs(day.diagnostic_date, sources,
+                                   timezone_name=timezone_name,
+                                   bms_parameters=parameters)
+        rs485, cells = probe.sources["rs485"], probe.sources["cell"]
+        positions_all = probe.sources["position_history"]
+        configs_all = probe.sources["config_history"]
+        maintenance = probe.sources["maintenance_history"]
+        positions, configs = probe.position_projection, probe.config_projection
+        manifest, fingerprint = probe.component_manifest, probe.input_fingerprint
         result_hash = hashlib.sha256(_canonical({
             "diagnostic_date": day.diagnostic_date, "timezone": timezone_name,
             "schema_version": DAILY_SCHEMA_VERSION, "component_manifest": manifest,
