@@ -2,7 +2,7 @@
 
 Stand: 2026-09-02
 
-## Guardian Battery 0.7.18 – Guardian Diagnostics
+## Guardian Battery 0.7.19 – Guardian Diagnostics Ingress Navigation Fix
 
 ### Zweck, Datenquelle und aktive Komponente
 

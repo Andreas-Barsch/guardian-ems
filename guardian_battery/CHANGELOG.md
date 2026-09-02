@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.19 – Guardian Diagnostics Ingress Navigation Fix
+
+- Korrigiert den in 0.7.18 ausgelieferten separaten HA-Dashboard-Einstieg: Dort wurde der statische Add-on-Slug `3195b09a_guardian_battery` fälschlich als dynamischer Supervisor-Ingress-Session-Token verwendet, was im separaten Guardian-Diagnostics-Dashboard zu `503 Service Unavailable` führen konnte. Daily Diagnostics und das Diagnostics-Backend waren davon nicht betroffen.
+- Integriert Guardian Diagnostics als internen Bereich in den gemeinsamen Guardian-Header. Der Benutzer öffnet ihn innerhalb der bestehenden dynamischen Ingress-Sitzung über den relativen Pfad `diagnostics`; der API-Prefix folgt weiterhin dem aktuellen `X-Ingress-Path`.
+- Entfernt die fehlerhafte Source `homeassistant/dashboards/guardian_diagnostics.yaml` und ihre Registrierung `guardian-diagnostics` aus `homeassistant/configuration.yaml`. Die anderen Guardian-Dashboards bleiben unverändert.
+- Verwendet keinen statischen Session-Token, keinen zweiten Server oder Port, keinen direkten Zugriff auf Port 8099 und kein ingress-proxyendes Lovelace-Dashboard. Overview, Tagesauswahl, vorhandene Daily Results und BMS Management Evidence bleiben fachlich unverändert.
+- Daily Diagnostic Worker, Daily Core, BMS Management Evidence, Diagnostics-Backend und -API, Cell Diagnostics, RS485, MQTT, Position History sowie alle Diagnosebewertungen und -grenzen bleiben unverändert. RS485 und Guardian Diagnostics bleiben passiv und read-only; die Diagnostic Engine bleibt `0.4.12`.
+- Guardian Battery und Add-on sind `0.7.19`.
+
 ## 0.7.18 – Guardian Diagnostics
 
 - Macht die automatisch erzeugten Daily Diagnostics erstmals direkt in einem eigenständigen Benutzerbereich sichtbar. Gesamtübersicht, Datumsauswahl und Tagesdetails fassen vorhandene deterministische Evidence verständlich zusammen, ohne dass JSON-Dateien, Logs oder einzelne BMS-Ereignisse manuell rekonstruiert werden müssen.
