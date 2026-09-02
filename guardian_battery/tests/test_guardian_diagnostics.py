@@ -277,9 +277,20 @@ def test_existing_config_server_routes_diagnostics_get_and_rejects_write(tmp_pat
     assert captured["code"] == 405 and captured["headers"] == {"Allow": "GET"}
 
 
-def test_diagnostics_ui_route_uses_dynamic_ingress_base():
+@pytest.mark.parametrize("token", ["dynamic-token-a", "dynamic-token-b"])
+def test_diagnostics_ui_route_uses_current_dynamic_ingress_base(token):
     handler = object.__new__(config_ui.Handler)
-    handler.path = "/api/hassio_ingress/dynamic-token/diagnostics"
-    handler.headers = {"X-Ingress-Path": "/api/hassio_ingress/dynamic-token"}
+    prefix = f"/api/hassio_ingress/{token}"
+    handler.path = prefix + "/diagnostics"
+    handler.headers = {"X-Ingress-Path": prefix}
     assert handler._is_diagnostics_ui() is True
-    assert handler._ingress_base() == "/api/hassio_ingress/dynamic-token"
+    assert handler._ingress_base() == prefix
+    handler._ingress_allowed = lambda: True
+    captured = {}
+    handler._send = lambda code, body, ctype="application/json", headers=None: captured.update(
+        code=code, body=body, ctype=ctype)
+    handler.do_GET()
+    assert captured["code"] == 200 and captured["ctype"] == "text/html"
+    assert f"const API='{prefix}/api/diagnostics'" in captured["body"]
+    assert 'href="./">Module &amp; Stack</a>' in captured["body"]
+    assert "3195b09a_guardian_battery" not in captured["body"]

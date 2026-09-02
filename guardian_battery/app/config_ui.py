@@ -360,7 +360,7 @@ load().catch(e=>document.getElementById('status').textContent='Fehler: '+e);</sc
         active="configuration",
         paths={"modules": "./", "configuration": "configuration",
                "maintenance": maintenance_path, "timeline": timeline_path,
-               "history": history_path},
+               "history": history_path, "diagnostics": "diagnostics"},
         subtitle="Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern",
     )
     return page.replace('__HEADER__', header)
@@ -452,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
             rec=_last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
             self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
         if self._is_diagnostics_ui():
-            base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics',modules_path=base or './'),'text/html'); return
+            base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics'),'text/html'); return
         base=self._ingress_base(); self._send(200,render_module_information_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance'),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return

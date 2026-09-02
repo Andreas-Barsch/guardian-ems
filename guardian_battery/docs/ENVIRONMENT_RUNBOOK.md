@@ -38,13 +38,22 @@ Erlaubte GET-Routen:
 
 Als reales, nicht hardcodiertes Beispiel wurde am 02.09.2026 CCL `10 / 10 / 5 / 0 / 0 / 0 A` bei Charge Enable `ENABLED` für alle sechs Module und DCL `-25 A` beobachtet. Dies belegt ausschließlich die Trennung von Limit und Enable und keine Ursache oder Produktregel.
 
-### Dashboard-, Sidebar- und Deployment-Separation
+### Ingress-Navigation und Deployment-Separation
 
-- HA-Dashboard-Source: `homeassistant/dashboards/guardian_diagnostics.yaml`.
-- Späteres produktives Ziel: `/config/dashboards/guardian_diagnostics.yaml`.
-- Die Registrierung `guardian-diagnostics` aus `homeassistant/configuration.yaml` muss separat gegen die produktive `/config/configuration.yaml` geprüft und kontrolliert übernommen werden. Ein Add-on-Update aktualisiert weder Dashboarddatei noch Registrierung automatisch.
-- Guardian Diagnostics ist ein eigener Lovelace-Seitenmenüpunkt, keine zweite Add-on-Ingress-Registrierung. Die reale Sidebar-/Iframe-Auflösung bleibt Deployment-Abnahme.
-- Bei jedem Dashboardrelease getrennt prüfen: (1) Git/Source, (2) Add-on-Version, (3) produktive Dashboarddatei, (4) produktive Dashboardregistrierung und (5) Browserdarstellung auf Desktop und Smartphone.
+- Guardian Diagnostics ist ein interner Bereich des bestehenden Guardian-Ingress und wird dort relativ über `diagnostics` geöffnet.
+- Der bestehende Guardian-Seitenmenüpunkt erzeugt die dynamische Supervisor-Ingress-Sitzung. Der aktuelle Prefix wird aus `X-Ingress-Path` übernommen; Add-on-Slug und Session-Token sind nicht austauschbar.
+- Die frühere Dashboard-Source `homeassistant/dashboards/guardian_diagnostics.yaml` und ihre Registrierung wurden entfernt. Ein YAML-iframe ist kein direkter Ingress-Proxy und darf keinen statischen Add-on-Slug als Token persistieren.
+- Ein wirklich eigener HA-Seitenmenüpunkt bleibt einer späteren ingress-aware Frontendfunktion vorbehalten. D1.1 verwendet keinen zweiten Server, Port oder Direktzugriff.
+- Falls D1 bereits produktiv konfiguriert wurde, den Block `guardian-diagnostics` nach Backup kontrolliert aus `/config/configuration.yaml` entfernen. Danach `/config/dashboards/guardian_diagnostics.yaml` sichern und kontrolliert entfernen oder ungenutzt belassen. Diese Schritte erfolgen separat und nicht durch ein Add-on-Update.
+
+  ```yaml
+  guardian-diagnostics:
+    mode: yaml
+    title: Guardian Diagnostics
+    icon: mdi:stethoscope
+    show_in_sidebar: true
+    filename: dashboards/guardian_diagnostics.yaml
+  ```
 
 ### Produktiv verifizierte Referenz vom 31.08.2026
 
@@ -52,10 +61,10 @@ Der vollständigere Daily Run für `physical_serial=Y225004C32250226` verwendete
 
 Die früheren `1,896 %` waren das Ergebnis einer kleineren manuellen Teil-Evidence mit kleinerem Coverage-Nenner, kein Fehler der Daily Engine. Die sieben Ereignisse wurden mit vollständigerer Tages-Evidence unverändert reproduziert. Endpoint-Dauer und gap-qualifizierte Dauer/Coverage bleiben unterschiedliche Größen; aus diesen Beobachtungen folgt keine Ursache.
 
-### Offene reale 0.7.18-Abnahme
+### Offene reale Abnahme nach D1.1
 
 - Produktive API gegen echte Derived Data sowie Gesamtübersicht, Tagesauswahl und Tagesdetails für 31.08./30.08. prüfen.
-- Dashboarddatei und Registrierung separat unter `/config` installieren, Sidebar-Auflösung und Rücknavigation kontrollieren und Desktop-/Smartphone-Darstellung prüfen.
+- Produktive D1-Dashboardregistrierung kontrolliert bereinigen; danach interne Diagnostics-Navigation, API-Aufrufe und Rücknavigation innerhalb derselben Ingress-Sitzung auf Desktop und Smartphone prüfen.
 - Reale 7-/30-Tage-Fenster, `partial`-Darstellung und unveränderte Live-Acquisition/Worker-Ausführung verifizieren. Dieses Source-Release führt kein Deployment aus.
 
 ## Guardian Battery 0.7.17 – Deterministic Daily Diagnostics

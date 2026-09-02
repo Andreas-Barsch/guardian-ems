@@ -17,6 +17,8 @@ def test_configuration_navigation_has_no_extra_portal_level():
     assert 'href="configuration"' in html
     assert 'href="timeline"' in html
     assert 'href="history"' in html
+    assert 'href="diagnostics"' in html
+    assert "Guardian Diagnostics" in html
     assert not hasattr(config_ui, "_portal_html")
 
 def test_module_count_range():

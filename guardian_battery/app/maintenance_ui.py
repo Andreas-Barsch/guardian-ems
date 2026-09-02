@@ -23,7 +23,7 @@ def render_maintenance_html(*, configuration_path: str, timeline_path: str = "ti
         active="maintenance",
         paths={"modules": "./", "configuration": configuration_path,
                "maintenance": "maintenance", "timeline": timeline_path,
-               "history": history_path},
+               "history": history_path, "diagnostics": "diagnostics"},
     )
     return f'''<!doctype html>
 <html lang="de">

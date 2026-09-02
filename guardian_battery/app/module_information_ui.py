@@ -30,5 +30,5 @@ document.addEventListener('DOMContentLoaded',()=>{init();loadRs485()});
 </script></body></html>'''
     paths = {"modules": "./", "configuration": configuration_path,
              "maintenance": maintenance_path, "timeline": timeline_path,
-             "history": history_path}
+             "history": history_path, "diagnostics": "diagnostics"}
     return page.replace("__HEADER__", render_guardian_header(active="modules", paths=paths))

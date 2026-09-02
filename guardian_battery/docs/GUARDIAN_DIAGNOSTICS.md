@@ -39,8 +39,10 @@ Alle Routen akzeptieren ausschließlich `GET`:
 
 Datumswerte werden strikt als kanonisches `YYYY-MM-DD` validiert. Resultrevisionen werden ausschließlich über denselben vollständigen Indexvertrag wie im Daily Worker aufgelöst. Overview liest höchstens die 30 neuesten Derived Results; Aggregate dienen der Fensterzusammenfassung, Event Stores nur dem expliziten Tages-/Eventzugriff. Rawframes werden nicht ausgegeben.
 
-## Home-Assistant-Dashboard und Deploymentgrenze
+## Home-Assistant-Ingress und Deploymentgrenze
 
-Die einzige HA-Dashboard-Source ist `homeassistant/dashboards/guardian_diagnostics.yaml`. Für ein späteres Deployment muss sie separat als `/config/dashboards/guardian_diagnostics.yaml` installiert und der Source-Eintrag `guardian-diagnostics` aus `homeassistant/configuration.yaml` kontrolliert in die produktive Lovelace-Konfiguration übernommen werden. Ein Add-on-Update erledigt beides nicht automatisch.
+Guardian Diagnostics ist ein interner Bereich der bestehenden Guardian-Ingress-Anwendung. Der normale Guardian-Seitenmenüpunkt lässt Home Assistant die dynamische Ingress-Sitzung erzeugen; innerhalb dieser Sitzung führt der relative Navigationspfad `diagnostics` zur read-only Ansicht. API-Aufrufe verwenden den aktuellen, aus `X-Ingress-Path` abgeleiteten Prefix. Es gibt keinen gespeicherten Session-Token, keinen zweiten Ingress-Eintrag, keinen zweiten Webserver und keinen neuen Port.
 
-Das Dashboard registriert den eigenständigen Seitenmenüpunkt **Guardian Diagnostics** und bindet die servergerenderte read-only Ansicht des bestehenden Guardian-Ingress ein. Es gibt kein zweites Ingress-Panel, keinen zweiten Webserver und keinen neuen Port. Die konkrete Sidebar-/Iframe-Auflösung muss nach dem späteren Source-/Konfigurationsdeployment real im Browser verifiziert werden.
+Ein Lovelace-iframe der Form `/api/hassio_ingress/3195b09a_guardian_battery/diagnostics` ist kein gültiger Einstieg: `3195b09a_guardian_battery` ist der statische Add-on-Slug, während dieses URL-Segment einen dynamischen Supervisor-Session-Token erwartet. Deshalb wurden die separate Dashboard-Source und ihre Registrierung in D1.1 entfernt. Ein wirklich eigenständiger HA-Seitenmenüpunkt erfordert später eine separate ingress-aware Frontendlösung.
+
+Falls die fehlerhafte D1-Source bereits produktiv installiert wurde, muss der Block `guardian-diagnostics` kontrolliert aus `/config/configuration.yaml` entfernt werden. `/config/dashboards/guardian_diagnostics.yaml` kann nach vorheriger Sicherung entfernt oder ungenutzt belassen werden. Diese produktive Bereinigung ist kein Bestandteil der Source-Änderung.

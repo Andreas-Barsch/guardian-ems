@@ -32,7 +32,7 @@ function applyBooleanSteps(path){const parts=(path.getAttribute('d')||'').match(
         active="history",
         paths={"modules": "./", "configuration": configuration_path,
                "maintenance": maintenance_path, "timeline": timeline_path,
-               "history": "history"},
+               "history": "history", "diagnostics": "diagnostics"},
         subtitle="Messverläufe mit zeitlichem Maintenance-Kontext",
     )
     return html.replace('__HEADER__', header)

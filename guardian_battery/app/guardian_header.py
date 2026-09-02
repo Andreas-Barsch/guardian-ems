@@ -11,6 +11,7 @@ NAVIGATION = (
     ("maintenance", "Maintenance-Logbuch"),
     ("timeline", "Verlauf"),
     ("history", "Zeitverläufe"),
+    ("diagnostics", "Guardian Diagnostics"),
 )
 
 

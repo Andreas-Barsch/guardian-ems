@@ -13,7 +13,7 @@ def render_timeline_html(*, configuration_path: str, maintenance_path: str,
         active="timeline",
         paths={"modules": "./", "configuration": configuration_path,
                "maintenance": maintenance_path, "timeline": "timeline",
-               "history": history_path},
+               "history": history_path, "diagnostics": "diagnostics"},
         subtitle="Chronologischer Verlauf vorhandener Guardian-Ereignisquellen",
     )
     return fr'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Verlauf</title>
