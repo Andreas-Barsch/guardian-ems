@@ -2,6 +2,27 @@
 
 Stand: 2026-09-02
 
+## Guardian Battery 0.7.21 – Hycube Policy Boundaries + SOC Timeline
+
+### Read-only Policyquelle und Polling
+
+- Guardian liest Hycube-Systemwerte ausschließlich über `GET /data_row/` und die Batteriepolicy ausschließlich über `GET /Bat/getCustomBat/`. Beide Pfade sind parameterlose, read-only Requests; Redirects, Login-Automation, Proxyfunktion sowie mutierende Control-Endpunkte sind ausgeschlossen.
+- Die Policy-Felder `normalMode`, `bufferMode`, `emergency` und `batProtection` bezeichnen Normalbetrieb, Passiv, Notstrom und Batterieschutz in Prozent. Eine Beobachtung ist nur bei erfolgreichem HTTP, gültigem JSON, vier vorhandenen endlichen numerischen Werten im Bereich 0..100 und exakter Summe 100 autoritativ. Ungültige Beobachtungen ersetzen die letzte gültige Policy nicht.
+- Der bestehende Hycube-Collector liest die Policy einmal beim Start und danach alle 300 Sekunden im selben Thread. Es gibt keine parallelen Policy-Requests und keine Policy-Abfrage im Fünf-Sekunden-Takt. Timeout, Verbindungsfehler, ungültiges JSON, ungültige Felder/Summe sowie HTTP 4xx/5xx bleiben vom System-Collector und allen übrigen Guardian-Pfaden isoliert.
+
+### Historie und zeitgültige SOC-Darstellung
+
+- Policy-Evidence wird append-only unter `SHARE_DIR / "hycube_policy_history"` gespeichert. Jede Beobachtung bleibt erhalten; `policy_changed` und `effective_at` machen tatsächliche Änderungen nachvollziehbar.
+- Vor der ersten gültigen Beobachtung ist Policy `unavailable`. Danach gilt sie ab ihrem beobachteten Zeitpunkt als `observed` beziehungsweise für spätere Abfragefenster `historically_applicable`. Eine spätere Änderung lässt die alte Policy bis zum Änderungszeitpunkt gelten und wirkt nicht rückwirkend auf frühere Zeiträume.
+- Die kumulativen Bereichsgrenzen sind `100-normalMode`, `100-normalMode-bufferMode` und `100-normalMode-bufferMode-emergency`. Für 82/3/10/5 ergeben sich 18 %, 15 % und 5 %. Im SOC-Zeitverlauf heißen sie „Bereichsgrenze Normalbetrieb / Passiv“, „Bereichsgrenze Passiv / Notstrom“ und „Bereichsgrenze Notstrom / Batterieschutz“; Änderungen werden ohne Interpolation stufenförmig gezeichnet.
+- Modul-SOCs stammen weiterhin von Pylontech. Hycube Battery Capacity stammt aus `/data_row/`, bleibt eine separate Systemangabe und ist kein verifizierter Stack-SOC oder Modulmittelwert (`aggregation_rule=not_verified`). Policywerte stammen aus `/Bat/getCustomBat/`; die Linien markieren Bereichsübergänge und beweisen keine Abschaltursache.
+
+### Isolation und produktive Abnahme
+
+- Hycube `batProtection` ist nicht Pylontech Under Voltage Protect; Hycube Policy ist weder Pylontech DCL noch Enable. `causality=not_determined`. Cell-/Modul-/Stackstatus, Alarmgrenzen, Confidence, Daily Diagnostics, BMS Management sowie `0x44`-/`0x47`-Semantik bleiben unverändert; die Diagnostic Engine bleibt `0.4.12`.
+- History API und UI lesen nur die für das angeforderte Zeitfenster relevanten Hycube-/Policy-Dateien; bestehendes Downsampling bleibt erhalten. Das Release fügt keine Retention, Kompression oder Evidence Story hinzu.
+- Nach einer separaten Installation von 0.7.21 sind Policy Readback 82/3/10/5, die Linien bei 18/15/5, Modul-SOCs, Hycube Battery Capacity, Phasenflächen, Legende und Hilfe auf Desktop und Smartphone real abzunehmen. Dieser Source-Release führt kein Deployment aus, verändert keine Hycube Policy und greift nicht auf produktives `/share` oder `/config` zu.
+
 ## Guardian Battery 0.7.20 – D1.2a Evidence Acquisition
 
 ### Evidence-Schichten und Sicherheitsgrenze

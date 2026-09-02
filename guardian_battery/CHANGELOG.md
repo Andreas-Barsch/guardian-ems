@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.21 – Hycube Policy Boundaries + SOC Timeline
+
+- Zeigt Hycube Battery Capacity weiterhin als separate, read-only erfasste Systemangabe im SOC-Zeitverlauf; sie wird nicht als Stack-SOC oder automatisch als Mittelwert der Modul-SOCs interpretiert (`aggregation_rule=not_verified`).
+- Liest die Hycube-Batteriepolicy strikt read-only über `GET /Bat/getCustomBat/`: `normalMode` (Normalbetrieb), `bufferMode` (Passiv), `emergency` (Notstrom) und `batProtection` (Batterieschutz), jeweils in Prozent. Es gibt keine Queryparameter, Redirects oder Control-Endpunkte.
+- Validiert nur vollständige, endliche numerische Werte von 0 bis 100 mit exakter Summe 100 als authoritative Policy. Ungültige Beobachtungen bleiben nachvollziehbar, ersetzen aber nicht die letzte gültige Policy.
+- Historisiert jede Policy-Beobachtung append-only und kennzeichnet Änderungen über `policy_changed` und `effective_at`. Eine Policy gilt erst ab ihrer Beobachtung; heutige Werte werden nicht rückwirkend auf ältere Zeiträume angewendet.
+- Ergänzt im SOC-Diagramm drei zeitgültige, bei Änderungen stufenförmige Bereichsgrenzen für Normalbetrieb/Passiv, Passiv/Notstrom und Notstrom/Batterieschutz. Für 82/3/10/5 liegen sie bei 18, 15 und 5 Prozent.
+- Die Policy-Abfrage erfolgt einmal beim Start und danach alle 300 Sekunden im bestehenden Hycube-Collector-Thread. Fehler bleiben von `/data_row/`, Pylontech Console, RS485, MQTT, Daily Diagnostics, History UI und Guardian-Hauptprozess isoliert.
+- Die Darstellung behauptet weder Abschaltursache noch Gleichheit mit Pylontech Under Voltage Protect, DCL oder Enable. Diagnosealgorithmen und Kausalitätsentscheidung bleiben unverändert (`causality=not_determined`); die Diagnostic Engine bleibt `0.4.12`.
+- Guardian Battery und Add-on sind `0.7.21`.
+
 ## 0.7.20 – D1.2a Evidence Acquisition
 
 - Erfasst passiv beobachtete Pylontech-`0x47`-Requests und -Responses vollständig als zeitbezogene Evidence und dekodiert gültige Herstellerparameter für Zell-/Modulspannungs-, Temperatur- und Stromgrenzen. Rawwerte und `info_raw` bleiben erhalten; Identität und historische Position werden nur aus zeitgültiger Evidence aufgelöst. Guardian sendet keine `0x47`-Anfrage und erzeugt keine zusätzliche RS485- oder Console-Busaktivität.
