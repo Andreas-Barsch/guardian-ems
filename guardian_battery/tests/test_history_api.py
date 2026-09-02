@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from event_overlay import EventOverlayAdapter
 from history_api import HistoryApi
 from history_series import CellHistorySeries
-from hycube_evidence import HycubeBatteryCapacitySeries
+from hycube_evidence import (HycubeBatteryCapacitySeries, HycubePolicyHistory,
+                             policy_observation)
 from rs485_evidence import Rs485HistorySeries
 from config_history import ConfigHistory
 from phase_engine import PhaseEngine
@@ -110,6 +111,31 @@ def test_soc_timeline_omits_hycube_series_when_history_is_missing(tmp_path):
     response = api.handle("GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z&to=2026-09-02T09:00:00Z&module_number=1")
     assert response.status == 200
     assert response.body["soc_timeline"]["hycube_series"] is None
+
+
+def test_soc_timeline_projects_time_valid_policy_segments_without_backdating(tmp_path):
+    maintenance, directory, timeline = build(tmp_path)
+    append_sample(directory, datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp(), 1, 82)
+    policy = HycubePolicyHistory(tmp_path / "policy")
+    policy.append(policy_observation(
+        b'{"normalMode":82,"bufferMode":3,"emergency":10,"batProtection":5}',
+        datetime(2026, 9, 2, 8, 5, tzinfo=timezone.utc).timestamp()))
+    policy.append(policy_observation(
+        b'{"normalMode":72,"bufferMode":3,"emergency":20,"batProtection":5}',
+        datetime(2026, 9, 2, 8, 30, tzinfo=timezone.utc).timestamp()))
+    api = HistoryApi(CellHistorySeries(directory), EventOverlayAdapter(timeline),
+                     hycube_policy_history=policy)
+    before = api.handle("GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z&to=2026-09-02T08:04:00Z&module_number=1")
+    assert before.body["soc_timeline"]["policy_evidence"] == "unavailable"
+    assert before.body["soc_timeline"]["policy_series"] == []
+    response = api.handle("GET", "/api/history/series?metric=soc&from=2026-09-02T08:10:00Z&to=2026-09-02T09:00:00Z&module_number=1")
+    projected = response.body["soc_timeline"]
+    assert projected["policy_evidence"] == "observed"
+    assert [(item["boundary_normal_passive"], item["boundary_passive_emergency"],
+             item["boundary_emergency_protection"]) for item in projected["policy_series"]] == [
+        (18.0, 15.0, 5.0), (28.0, 25.0, 5.0)]
+    assert projected["policy_series"][0]["quality"] == "historically_applicable"
+    assert all(item["causality"] == "not_determined" for item in projected["policy_series"])
 
 
 def test_rs485_history_api_resolves_module_via_serial_without_adr_selector(tmp_path):

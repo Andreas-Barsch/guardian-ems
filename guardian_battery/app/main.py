@@ -66,6 +66,7 @@ DIAGNOSTIC_AGGREGATE_FILE = SHARE_DIR / "diagnostic_aggregates.json"
 CONFIG_HISTORY_FILE = SHARE_DIR / "config_history.jsonl"
 DAILY_DIAGNOSTICS_ROOT = SHARE_DIR / "diagnostics"
 HYCUBE_HISTORY_DIR = SHARE_DIR / "hycube_history"
+HYCUBE_POLICY_HISTORY_DIR = SHARE_DIR / "hycube_policy_history"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -1271,7 +1272,8 @@ def main() -> None:
         daily_worker = None
         LOG.warning("Daily diagnostics worker konnte nicht gestartet werden: %s", exc)
     try:
-        hycube_collector = collector_from_options(options, HYCUBE_HISTORY_DIR)
+        hycube_collector = collector_from_options(
+            options, HYCUBE_HISTORY_DIR, HYCUBE_POLICY_HISTORY_DIR)
         if hycube_collector is not None:
             hycube_collector.start()
     except Exception as exc:

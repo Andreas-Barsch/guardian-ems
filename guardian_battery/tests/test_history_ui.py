@@ -12,17 +12,29 @@ def test_generic_soc_and_cell_chart_with_touch_markers_and_responsive_layout():
     assert "overflow:hidden" in html
 
 
-def test_soc_projection_distinguishes_module_and_hycube_sources_without_policy_lines():
+def test_soc_projection_distinguishes_module_hycube_and_policy_sources():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
     assert "soc_timeline" in html and "module_series" in html and "hycube_series" in html
     assert "Hycube Battery Capacity" in html
     assert "Quelle Hycube" in html
-    assert "Aggregationsregel ist nicht als Mittelwert" in html
-    assert "Policy-Grenzen werden mangels verifizierter Read-only-Semantik nicht dargestellt" in html
+    assert "Aggregationsregel gegenüber den Pylontech-Modul-SOCs ist nicht bestätigt" in html
+    for label in ("Bereichsgrenze Normalbetrieb / Passiv",
+                  "Bereichsgrenze Passiv / Notstrom",
+                  "Bereichsgrenze Notstrom / Batterieschutz"):
+        assert label in html
+    assert "GET /Bat/getCustomBat/" in html
+    assert "kumulative Übergänge" in html
+    assert "keine Abschaltursache" in html
     assert "stroke-dasharray','8 4" in html
     assert "Stack-SOC" not in html
     assert "data.phase_analysis?.intervals" in html
     assert ".legend{display:flex" in html and "flex-wrap:wrap" in html
+    assert "timeline.policy_series.flatMap" in html
+    assert "{timestamp:segment.from" in html and "{timestamp:segment.to" in html
+    assert "Entladegrenze" not in html
+    assert "Normalbetrieb: ${policy.normal_operation_pct}" in html
+    assert "Batterieschutz: ${policy.battery_protection_pct}" in html
+    assert "Kausalität nicht bestimmt" in html
 
 
 def test_overlay_uses_server_deep_link_and_safe_text_rendering():

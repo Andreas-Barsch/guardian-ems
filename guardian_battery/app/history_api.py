@@ -10,7 +10,8 @@ from urllib.parse import parse_qs, urlsplit
 from event_overlay import EventOverlayAdapter, OverlayContext
 from history_series import CellHistorySeries, SERIES_METRICS, SeriesHistoryError
 from rs485_evidence import RS485_SERIES_METRICS, Rs485HistorySeries
-from hycube_evidence import HycubeBatteryCapacitySeries, HycubeHistoryError
+from hycube_evidence import (HycubeBatteryCapacitySeries, HycubeHistoryError,
+                             HycubePolicyHistory)
 from maintenance import MaintenanceValidationError, normalize_utc_timestamp
 from maintenance_api import ApiResponse, error_json
 from maintenance_service import MaintenanceHistoryError
@@ -36,12 +37,14 @@ class HistoryApiProblem(ValueError):
 class HistoryApi:
     def __init__(self, series: CellHistorySeries, overlays: EventOverlayAdapter, phase_engine=None,
                  rs485_series: Rs485HistorySeries | None = None,
-                 hycube_series: HycubeBatteryCapacitySeries | None = None):
+                 hycube_series: HycubeBatteryCapacitySeries | None = None,
+                 hycube_policy_history: HycubePolicyHistory | None = None):
         self.series = series
         self.overlays = overlays
         self.phase_engine = phase_engine
         self.rs485_series = rs485_series
         self.hycube_series = hycube_series
+        self.hycube_policy_history = hycube_policy_history
 
     def handle(self, method: str, target: str) -> ApiResponse:
         try:
@@ -132,6 +135,9 @@ class HistoryApi:
                                            timestamp_to=timestamp_to,
                                            max_points=max(4, 6000 // 7))
                   if "soc" in metrics and self.hycube_series is not None else None)
+        policy_series = (self.hycube_policy_history.query(
+            timestamp_from=timestamp_from, timestamp_to=timestamp_to)
+            if "soc" in metrics and self.hycube_policy_history is not None else [])
         projected_series = list(bundle["series"] if cell_requests else [])
         if any(item["metric"] in RS485_SERIES_METRICS for item in requests):
             if self.rs485_series is None:
@@ -201,8 +207,12 @@ class HistoryApi:
             "soc_timeline": {
                 "module_series": bundle.get("soc_module_series", []),
                 "hycube_series": hycube if hycube and hycube["points"] else None,
-                "policy_series": [], "policy_evidence": "unavailable",
-                "policy_evidence_reason": "no_verified_read_only_source",
+                "policy_series": policy_series,
+                "policy_evidence": ("observed" if any(
+                    item["quality"] == "observed" for item in policy_series)
+                    else "historically_applicable" if policy_series else "unavailable"),
+                "policy_evidence_reason": (None if policy_series else
+                                           "no_valid_observation_for_window"),
                 "battery_capacity_semantics": "separate_hycube_system_value",
                 "aggregation_rule": "not_verified", "causality": "not_determined",
             } if "soc" in metrics else None,

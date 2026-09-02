@@ -1,5 +1,6 @@
 import json
 import logging
+import hashlib
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -9,8 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from hycube_evidence import (MAX_RESPONSE_BODY_BYTES, HycubeBatteryCapacitySeries, HycubeCollector,
-                             HycubeEvidenceWriter, collector_from_options,
-                             data_row_url, evidence_enabled, observation)
+                             HycubeEvidenceWriter, HycubePolicyHistory, collector_from_options,
+                             data_row_url, evidence_enabled, observation, policy_observation,
+                             policy_url, _NoRedirect)
 
 
 PAYLOAD = {"BatteryPower": -1200, "BatteryCapacity": 42, "GridPower": 300,
@@ -22,6 +24,7 @@ class Response:
     def __init__(self, payload=PAYLOAD, status=200):
         self.raw = json.dumps(payload).encode() if isinstance(payload, dict) else payload
         self.status = status
+        self.headers = {"Content-Type": "application/json"}
     def __enter__(self): return self
     def __exit__(self, *_): return False
     def getcode(self): return self.status
@@ -48,6 +51,12 @@ def test_hycube_target_rejects_nonlocal_credentials_and_ssrf_forms(bad):
 def test_hycube_target_is_fixed_read_only_endpoint():
     assert data_row_url("http://192.168.1.22:8080/ignored") == \
         "http://192.168.1.22:8080/data_row/"
+    assert policy_url("http://192.168.1.22:8080/ignored") == \
+        "http://192.168.1.22:8080/Bat/getCustomBat/"
+
+
+def test_hycube_http_client_does_not_follow_redirects():
+    assert _NoRedirect().redirect_request(None, None, 302, {}, "https://example.com", None) is None
 
 
 @pytest.mark.parametrize("value", [False, None, "", "false", "true", 0, 1])
@@ -199,3 +208,124 @@ def test_battery_capacity_history_is_windowed_read_only_and_extrema_preserving(t
     assert {5.0, 99.0} <= {point["value"] for point in result["points"]}
     assert all(point["timestamp"].startswith("2026-09-02") for point in result["points"])
     assert {path: path.read_bytes() for path in (old, current)} == before
+
+
+def test_policy_fixture_maps_raw_fields_and_boundaries_exactly():
+    raw = b'{"batProtection":5,"bufferMode":3,"emergency":10,"normalMode":82}'
+    item = policy_observation(raw, 1_788_307_200, content_type="application/json")
+    assert item["parse_quality"] == "complete"
+    assert {field: item[field] for field in ("normalMode", "bufferMode", "emergency",
+                                              "batProtection")} == {
+        "normalMode": 82, "bufferMode": 3, "emergency": 10, "batProtection": 5}
+    assert (item["normal_operation_pct"], item["passive_pct"], item["emergency_pct"],
+            item["battery_protection_pct"]) == (82.0, 3.0, 10.0, 5.0)
+    assert (item["boundary_normal_passive"], item["boundary_passive_emergency"],
+            item["boundary_emergency_protection"]) == (18.0, 15.0, 5.0)
+    assert item["raw_response"] == raw.decode()
+    assert item["raw_response_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert item["causality"] == "not_determined"
+
+
+@pytest.mark.parametrize("payload,error", [
+    ({"normalMode": 82, "bufferMode": 3, "emergency": 10}, "missing_fields"),
+    ({"normalMode": "82", "bufferMode": 3, "emergency": 10, "batProtection": 5},
+     "fields_must_be_finite_numbers"),
+    ({"normalMode": float("nan"), "bufferMode": 3, "emergency": 10, "batProtection": 5},
+     "fields_must_be_finite_numbers"),
+    ({"normalMode": float("inf"), "bufferMode": 3, "emergency": 10, "batProtection": 5},
+     "fields_must_be_finite_numbers"),
+    ({"normalMode": -1, "bufferMode": 3, "emergency": 93, "batProtection": 5},
+     "field_out_of_range"),
+    ({"normalMode": 101, "bufferMode": 0, "emergency": 0, "batProtection": -1},
+     "field_out_of_range"),
+    ({"normalMode": 81, "bufferMode": 3, "emergency": 10, "batProtection": 5},
+     "sum_must_equal_100"),
+])
+def test_invalid_policy_contract_is_preserved_but_not_authoritative(payload, error):
+    item = policy_observation(json.dumps(payload).encode(), 1)
+    assert item["parse_quality"] == "invalid"
+    assert item["validation_error"] == error
+    assert item["raw_response"] == json.dumps(payload)
+    assert "boundary_normal_passive" not in item
+
+
+def test_invalid_json_and_http_status_are_not_policy(tmp_path):
+    assert policy_observation(b"broken", 1)["parse_quality"] == "invalid"
+    rejected = policy_observation(b'{"error":"no"}', 1, http_status=500)
+    assert rejected["validation_error"] == "http_status"
+    assert rejected["raw_response"] == '{"error":"no"}'
+
+
+def test_policy_collector_uses_only_parameter_free_read_endpoint_and_detects_change(tmp_path):
+    policy_history = HycubePolicyHistory(tmp_path / "policy")
+    opener = Opener(Response({"normalMode": 82, "bufferMode": 3,
+                              "emergency": 10, "batProtection": 5}))
+    collector = HycubeCollector("http://localhost/ignored", HycubeEvidenceWriter(tmp_path / "system"),
+                                policy_writer=policy_history, opener=opener,
+                                clock=lambda: 1_788_307_200)
+    collector.collect_policy_once()
+    collector.collect_policy_once()
+    request, timeout = opener.calls[-1]
+    assert request.method == "GET"
+    assert request.full_url == "http://localhost/Bat/getCustomBat/"
+    assert request.data is None and "?" not in request.full_url
+    stored = [json.loads(line) for line in next((tmp_path / "policy").glob("*.jsonl")).read_text().splitlines()]
+    assert [item["policy_changed"] for item in stored] == [True, False]
+    assert stored[0]["effective_at"] == stored[1]["effective_at"]
+    assert timeout == .8
+    assert collector.policy_interval_seconds == 300
+
+
+@pytest.mark.parametrize("status", [400, 500])
+def test_policy_http_failures_preserve_raw_and_do_not_replace_valid_policy(tmp_path, status):
+    policy_history = HycubePolicyHistory(tmp_path / "policy")
+    valid = policy_observation(
+        b'{"normalMode":82,"bufferMode":3,"emergency":10,"batProtection":5}', 1)
+    policy_history.append(valid)
+    collector = HycubeCollector("http://localhost", HycubeEvidenceWriter(tmp_path / "system"),
+                                policy_writer=policy_history,
+                                opener=Opener(Response(b'{"error":"unavailable"}', status=status)))
+    with pytest.raises(ValueError, match="http_status"):
+        collector.collect_policy_once()
+    records = [json.loads(line) for line in next((tmp_path / "policy").glob("*.jsonl")).read_text().splitlines()]
+    assert records[-1]["http_status"] == status
+    assert records[-1]["raw_response"] == '{"error":"unavailable"}'
+    assert policy_history._latest_valid()["normalMode"] == 82
+
+
+def test_policy_timeout_is_isolated_from_system_evidence(tmp_path):
+    system = tmp_path / "system"
+    collector = HycubeCollector("http://localhost", HycubeEvidenceWriter(system),
+                                policy_writer=HycubePolicyHistory(tmp_path / "policy"),
+                                opener=Opener(TimeoutError()))
+    with pytest.raises(TimeoutError):
+        collector.collect_policy_once()
+    assert not system.exists()
+    assert collector.status()["observations"] == 0
+
+
+def test_policy_history_restart_change_and_historical_applicability(tmp_path):
+    history = HycubePolicyHistory(tmp_path)
+    first = policy_observation(
+        b'{"normalMode":82,"bufferMode":3,"emergency":10,"batProtection":5}',
+        1_788_307_200)
+    history.append(first)
+    same = policy_observation(
+        b'{"normalMode":82,"bufferMode":3,"emergency":10,"batProtection":5}',
+        1_788_307_500)
+    HycubePolicyHistory(tmp_path).append(same)
+    changed = policy_observation(
+        b'{"normalMode":72,"bufferMode":3,"emergency":20,"batProtection":5}',
+        1_788_307_800)
+    HycubePolicyHistory(tmp_path).append(changed)
+    records = [json.loads(line) for line in next(tmp_path.glob("*.jsonl")).read_text().splitlines()]
+    assert [record["policy_changed"] for record in records] == [True, False, True]
+    assert history.query(timestamp_from="2026-09-01T23:00:00+00:00",
+                         timestamp_to="2026-09-01T23:59:59+00:00") == []
+    segments = history.query(timestamp_from="2026-09-02T00:05:00+00:00",
+                             timestamp_to="2026-09-02T00:15:00+00:00")
+    assert len(segments) == 2
+    assert segments[0]["quality"] == "historically_applicable"
+    assert segments[0]["boundary_normal_passive"] == 18
+    assert segments[1]["boundary_passive_emergency"] == 25
+    assert segments[0]["to"] == segments[1]["from"]
