@@ -1,0 +1,12 @@
+{
+  "physical_serial": "SYNTHETIC-MODULE-0001",
+  "adr": 6,
+  "event_offsets_seconds": [100, 600, 1100, 1600, 2100, 2600, 3100],
+  "zero_durations_seconds": [365, 374, 287, 336, 302, 303, 52],
+  "cell_8_mv": [2912, 3272, 2884, 3259, 3266, 3257, 3255],
+  "spread_mv": [377, 49, 398, 56, 47, 53, 53],
+  "current_before_a": [-22.413, -0.215, -21.733, -0.962, -0.218, -0.967, -1.102],
+  "current_after_a": [0.0, -24.281, 0.0, 0.0, 0.0, 0.0, -0.221],
+  "recovery_0x44_count": 6,
+  "causality": "not_determined"
+}
