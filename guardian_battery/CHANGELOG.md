@@ -1,5 +1,15 @@
 # Guardian Battery Changelog
 
+## 0.7.20 – D1.2a Evidence Acquisition
+
+- Erfasst passiv beobachtete Pylontech-`0x47`-Requests und -Responses vollständig als zeitbezogene Evidence und dekodiert gültige Herstellerparameter für Zell-/Modulspannungs-, Temperatur- und Stromgrenzen. Rawwerte und `info_raw` bleiben erhalten; Identität und historische Position werden nur aus zeitgültiger Evidence aufgelöst. Guardian sendet keine `0x47`-Anfrage und erzeugt keine zusätzliche RS485- oder Console-Busaktivität.
+- Ergänzt einen optionalen strikt read-only Hycube-Collector für `GET /data_row/`. Er historisiert den empfangenen Body samt SHA-256 sowie vorhandene Werte für `BatteryPower`, `BatteryCapacity`, `GridPower`, `HomePower`, `solarPower`, `ExternalPower` und `Date2` mit Empfangs-, Gerätezeit- und Samplingqualität. Redirects, Login-Automation, Proxy- und Control-Endpunkte sind ausgeschlossen; Responses sind auf 1 MiB begrenzt.
+- Hycube Evidence bleibt global standardmäßig deaktiviert und startet nur bei einem echten Boolean `true`. Nach explizitem Enable beträgt das konstante, konfigurierbare Standardintervall fünf Sekunden; es gibt keine adaptive oder ereignisabhängige Hochfrequenzabfrage.
+- Führt User/System Policy als fachlich getrennte Evidence-Ebene. Da keine verifizierte read-only Quelle für Notstromreserve, Minimum-SOC, globale Entladegrenze, Discharge Permission oder Battery Operating Mode vorliegt, bleibt sie ausdrücklich `unavailable` mit `no_verified_read_only_source`. Policy, Pylontech-Management, Cell Evidence und Hycube-Systemreaktion werden nicht gleichgesetzt.
+- Ergänzt `cell_sample_at`, `pwr_sample_at`, `pwr_age_seconds` und explizite Zeitqualität, weil BAT-Zellwerte und PWR-Strom/SOC nicht atomar gleichzeitig gemessen sein müssen. Bestehende Cell History bleibt kompatibel.
+- D1.2a sammelt ausschließlich Evidence und erzeugt noch keine Ereignisketten-UI, KI-Interpretation oder Diagnoseentscheidung. Cell-/Modul-/Stackstatus, Alarmgrenzen, Confidence, Daily Diagnostics, BMS Management und Kausalität bleiben unverändert; `causality=not_determined`, Diagnostic Engine `0.4.12`.
+- Guardian Battery und Add-on sind `0.7.20`.
+
 ## 0.7.19 – Guardian Diagnostics Ingress Navigation Fix
 
 - Korrigiert den in 0.7.18 ausgelieferten separaten HA-Dashboard-Einstieg: Dort wurde der statische Add-on-Slug `3195b09a_guardian_battery` fälschlich als dynamischer Supervisor-Ingress-Session-Token verwendet, was im separaten Guardian-Diagnostics-Dashboard zu `503 Service Unavailable` führen konnte. Daily Diagnostics und das Diagnostics-Backend waren davon nicht betroffen.

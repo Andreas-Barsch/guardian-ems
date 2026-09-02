@@ -2,6 +2,38 @@
 
 Stand: 2026-09-02
 
+## Guardian Battery 0.7.20 – D1.2a Evidence Acquisition
+
+### Evidence-Schichten und Sicherheitsgrenze
+
+- D1.2a erweitert ausschließlich die Datenerfassung. Die später vorgesehene Evidence Story trennt Cell Evidence, Pylontech Status (`0x44`), Pylontech Thresholds (`0x47`), User/System Policy, Pylontech Management (`0x92`), Module Response, Hycube System Response und eine mögliche spätere externe Systemebene. Es gibt in 0.7.20 keine automatische Ereigniskette, grafische Kausaldarstellung oder KI-Interpretation.
+- Gültige, passiv beobachtete `0x47`-Responses können Zell-/Modulspannungsgrenzen, Lade-/Entladetemperaturgrenzen und Lade-/Entladestromgrenzen liefern. Rawwerte und `info_raw` bleiben erhalten. Eine Schwelle gilt nur zum Beobachtungszeitpunkt und wird weder rückwirkend noch ohne reale `0x47`-Evidence angenommen. Physische Identität und historische Position stammen ausschließlich aus zeitgültiger Evidence; es gibt keine ADR→Position-Formel.
+- Guardian sendet niemals selbst `0x47`, fragt Thresholds nicht aktiv ab und ergänzt weder RS485- noch Console-Busaktivität. Die vollständige Historisierung greift nur für ohnehin passiv beobachtete Kommunikation.
+
+### Optionaler Hycube-Collector
+
+- Hycube Evidence ist global mit `hycube_evidence_enabled=false` deaktiviert. Nur ein echter Boolean `true` aktiviert den Collector; fehlendes Feld, `false`, Strings und numerische Werte tun dies nicht. Ohne explizites Enable entstehen kein Worker, DNS-/HTTP-Versuch, History, Retry oder fehlende-Konfiguration-Warnung.
+- Nach Enable liest genau ein nicht überlappender Collector ausschließlich `GET /data_row/`. Die lokale Basisadresse ist konfigurierbar; Redirects, Login-Automation, Proxyfunktion und Control-Endpunkte bleiben verboten. Insbesondere werden `/Wallbox/batteryDischargingPermission/`, `/update/updateControlValue/`, `/Bat/setCustomBat/` und andere mutierende Endpunkte nicht verwendet, auch wenn ein solcher Endpoint technisch GET verwendet.
+- Das konstante Defaultintervall beträgt fünf Sekunden und ist von 1 bis 60 Sekunden konfigurierbar. Es gibt keine adaptive oder ereignisabhängige Umschaltung auf 1 Hz. Jeder erfolgreiche Record enthält `received_at`, `device_timestamp`, Zeitqualität, `configured_interval_seconds`, `actual_interval_seconds` und `actual_interval_quality`.
+- Gespeichert werden der empfangene Body, sein SHA-256 und, soweit vorhanden, `BatteryPower`, `BatteryCapacity`, `GridPower`, `HomePower`, `solarPower`, `ExternalPower` und `Date2`. Unbekannte Payloadfelder bleiben im Body erhalten. Der Responsebody ist auf 1 MiB begrenzt; eine Überschreitung bleibt im Collector isoliert und erzeugt keinen partiellen History-Record.
+
+### User/System Policy und Zeitverträge
+
+- User/System Policy ist eine eigene Evidence-Ebene und wird nicht mit Pylontech DCL/CCL, Enable, Cell Evidence oder der Hycube-Systemreaktion gleichgesetzt. Aktuell ist keine read-only Quelle für Notstromreserve, Minimum-SOC, globale Entladegrenze, globale Discharge Permission oder Battery Operating Mode verifiziert. Deshalb gilt `policy_evidence=unavailable` mit `policy_evidence_reason=no_verified_read_only_source`.
+- Sobald später eine verifizierte Policy-Quelle vorliegt, muss Guardian Diagnostics Wert, Einheit, Quelle, Beobachtungszeit und zeitliche Gültigkeit anzeigen. Ein heutiger Policy-Wert darf niemals rückwirkend auf historische Ereignisse angewendet werden und beweist keine Ursache für DCL/CCL.
+- Cell History unterscheidet `cell_sample_at` und `pwr_sample_at` und weist `pwr_age_seconds` mit Qualitätsstatus aus. Fehlender PWR-Zeitpunkt ist `unavailable`, ein zukünftiger PWR-Zeitpunkt `invalid_future`; ein negativer Wert wird nicht als gültiges Alter gespeichert. Alte History bleibt lesbar.
+
+### Forensische Referenz und Diagnose-Isolation
+
+- Für den 31.08.2026 bleiben sieben DCL→0-Ereignisse bei `Y225004C32250226`, C8 als Lowest Cell bei 7/7, Discharge Enable `TRUE`, maximal 398 mV Spread und minimal 2.884 V für C8 belegt. Gleichzeitig enthielt `0x44` bei 0/7 keinen dokumentierten Cell-/Module-Low-Voltage-/UV-Alarm oder Protect. DATAFLAG `0x11→0x00` ist kein Low-Voltage-Bit; trotz zeitlicher Folge und 7/7 Korrelation existiert mindestens ein Gegenbeispiel ohne anschließendes DCL→0. `causality=not_determined` bleibt verbindlich.
+- D1.2a verändert keine Cell-, Modul- oder Stackbewertung, Alarmgrenze, Confidence, Daily-Diagnostic- oder BMS-Management-Bewertung. `0x47` und Hycube sind ausschließlich Evidence Acquisition; die Diagnostic Engine bleibt `0.4.12`.
+
+### Speicher und kontrollierte produktive Abnahme
+
+- Die synthetische Abschätzung eines repräsentativen Hycube-Records beträgt etwa 1.067 Byte. Bei fünf Sekunden entspricht dies ungefähr 17,58 MiB/Tag, 527,51 MiB/30 Tage und 6,27 GiB/Jahr. Diese Werte sind nicht produktiv gemessen. History wächst kontinuierlich; reale Payloadgröße, Wachstum, CPU und RAM müssen in einem kontrollierten Pilot bestimmt werden. Langfristige Retention beziehungsweise verlustfreie segmentierte Kompression bleibt offen.
+- Nach Installation 0.7.20 zunächst den normalen Betrieb mit `hycube_evidence_enabled=false` verifizieren. Ein späterer separater Pilot darf erst danach Basisadresse und Collector kontrolliert aktivieren und muss Payload, Feldsemantik, Zeit, Vorzeichen, Failure Isolation und Speicherwachstum prüfen. Kein Control-Endpunkt darf verwendet werden.
+- Dieses Source-Release führt kein Deployment aus, aktiviert Hycube nicht und greift nicht auf produktives `/share`, `/config` oder `/data_row/` zu.
+
 ## Guardian Battery 0.7.19 – Guardian Diagnostics Ingress Navigation Fix
 
 ### Zweck, Datenquelle und aktive Komponente
