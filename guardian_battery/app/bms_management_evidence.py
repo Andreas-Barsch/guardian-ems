@@ -98,9 +98,17 @@ class BmsManagementEvidenceStore:
         payload = {"schema_version": SCHEMA_VERSION,
                    "aggregates": sorted((dict(item) for item in aggregates),
                                         key=lambda item: (item["day"], item["physical_serial"]))}
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
-                                        sort_keys=True), encoding="utf-8")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"),
+                      sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
         temporary.replace(self.aggregate_path)
+        directory = os.open(self.aggregate_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def _timestamp(value) -> float:
