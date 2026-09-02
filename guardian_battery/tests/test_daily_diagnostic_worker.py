@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from daily_diagnostics import (DailyDiagnosticBusyError, DailyDiagnosticSources,
                                SourceChangedError)
+import daily_diagnostic_worker as worker_module
 from daily_diagnostic_worker import DailyDiagnosticWorker
 
 
@@ -201,6 +202,93 @@ def test_start_stop_and_wait_is_interruptible(tmp_path):
     started = time.monotonic()
     assert instance.stop(timeout=1) is True
     assert time.monotonic() - started < 1
+
+
+def test_startup_log_contains_release_acceptance_parameters(tmp_path, caplog):
+    harness = Harness()
+    instance = DailyDiagnosticWorker(
+        DailyDiagnosticSources(), tmp_path / "diagnostics", clock=Clock(NOW),
+        run_callable=harness.run, probe_callable=harness.probe)
+    with caplog.at_level(logging.INFO):
+        instance.start()
+        time.sleep(0.03)
+        instance.stop(timeout=1)
+    assert "Daily diagnostics worker started" in caplog.text
+    for value in ("output_root=", "timezone=Europe/Berlin", "grace_minutes=15",
+                  "check_interval_seconds=300", "initial_catchup_days=3",
+                  "automatic_history_days=7", "late_data_days=3"):
+        assert value in caplog.text
+    assert "Daily diagnostics catch-up candidates=" in caplog.text
+    assert "initial_plan=" in caplog.text and "remaining_backlog=" in caplog.text
+
+
+def test_candidate_stability_change_and_unchanged_logs_are_bounded(tmp_path, caplog):
+    harness = Harness({"2026-09-01": "first-fingerprint"})
+    instance, _ = worker(tmp_path, harness)
+    with caplog.at_level(logging.INFO):
+        instance.check_once()
+        harness.fingerprints["2026-09-01"] = "second-fingerprint"
+        instance.check_once()
+        instance.check_once()
+    assert "first_observation" in caplog.text
+    assert "fingerprint changed" in caplog.text
+    assert "stable fingerprint=" in caplog.text
+
+    root = tmp_path / "current"
+    current_harness = Harness({"2026-09-01": "same"})
+    current = DailyDiagnosticWorker(
+        DailyDiagnosticSources(), root, clock=Clock(NOW),
+        run_callable=current_harness.run, probe_callable=current_harness.probe,
+        automatic_history_days=1, initial_catchup_days=1)
+    write_index(root, "2026-09-01", "same")
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        current.check_once()
+        current.check_once()
+    assert caplog.text.count("Daily diagnostics unchanged") == 1
+
+
+def test_run_log_contains_attempt_result_duration_fingerprint_and_component(tmp_path,
+                                                                            caplog):
+    harness = Harness()
+    def rich_run(diagnostic_date, sources, output_root, **kwargs):
+        return {"diagnostic_date": diagnostic_date, "daily_result_id": "DDR-result",
+                "input_fingerprint": "1234567890abcdef", "overall_status": "partial",
+                "persisted": True, "components": {"bms_management": {
+                    "component_name": "bms_management", "status": "partial",
+                    "events": {"count": 7}, "quality": "limited",
+                    "coverage": {"rs485_records": 10}}}}
+    instance = DailyDiagnosticWorker(
+        DailyDiagnosticSources(), tmp_path / "diagnostics", clock=Clock(NOW),
+        run_callable=rich_run, probe_callable=harness.probe,
+        automatic_history_days=1, initial_catchup_days=1)
+    with caplog.at_level(logging.INFO):
+        instance.check_once()
+        instance.check_once()
+    for value in ("Daily diagnostics started date=2026-09-01 attempt_id=",
+                  "result_id=DDR-result", "status=partial", "duration_seconds=",
+                  "fingerprint=1234567890ab", "component=bms_management",
+                  "component_status=partial", "events=7", "quality=limited"):
+        assert value in caplog.text
+
+
+def test_missing_output_root_is_lazy_and_write_failure_isolated(tmp_path, monkeypatch,
+                                                                caplog):
+    instance, _ = worker(tmp_path)
+    assert not instance.output_root.exists()
+    instance.check_once()
+    assert instance.state_path.exists()
+
+    failed, _ = worker(tmp_path / "failed", check_interval_seconds=3600)
+    monkeypatch.setattr(worker_module, "_atomic_json",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            PermissionError("read-only output")))
+    with caplog.at_level(logging.ERROR):
+        failed.start()
+        time.sleep(0.03)
+        assert failed.thread.is_alive()
+        failed.stop(timeout=1)
+    assert "worker state write failed" in caplog.text
 
 
 def test_initial_catchup_yesterday_first_max_three_then_one_per_cycle(tmp_path):
@@ -425,11 +513,11 @@ def test_probe_source_change_is_retried_from_first_stability_observation(tmp_pat
 
 def test_outer_worker_exception_isolated_and_thread_survives(tmp_path):
     harness = Harness({"2026-09-01": RuntimeError("unexpected")})
-    instance, _ = worker(tmp_path, harness, check_interval_seconds=0.01)
+    instance, _ = worker(tmp_path, harness, check_interval_seconds=3600)
     instance.start()
     time.sleep(0.05)
     assert instance.thread.is_alive()
-    assert instance.state["last_error"]["kind"] == "worker_exception"
+    assert instance.state["last_error"]["kind"] == "probe_failure"
     assert instance.stop(timeout=1)
 
 

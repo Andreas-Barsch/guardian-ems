@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import uuid
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
@@ -74,6 +75,10 @@ class DailyDiagnosticWorker:
         self.log = logger or logging.getLogger("guardian_battery.daily_diagnostics")
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self._startup_cycle_logged = False
+        self._up_to_date_logged: set[str] = set()
+        self._invalid_index_logged: set[str] = set()
+        self._grace_wait_logged: set[str] = set()
         self.state_path = self.output_root / "state" / "daily_job_state.json"
         self.state = self._load_state()
         self._recover_interrupted()
@@ -112,7 +117,12 @@ class DailyDiagnosticWorker:
             return state
 
     def _save_state(self) -> None:
-        _atomic_json(self.state_path, self.state)
+        try:
+            _atomic_json(self.state_path, self.state)
+        except OSError as exc:
+            self.log.error("Daily diagnostics worker state write failed path=%s error=%s",
+                           self.state_path, exc)
+            raise
 
     def _recover_interrupted(self) -> None:
         running = self.state.get("currently_running_date")
@@ -133,8 +143,16 @@ class DailyDiagnosticWorker:
         self.stop_event.clear()
         self.thread = threading.Thread(
             target=self._loop, name="guardian-daily-diagnostics", daemon=True)
+        self.log.info(
+            "Daily diagnostics worker starting output_root=%s timezone=%s grace_minutes=%s "
+            "check_interval_seconds=%s initial_catchup_days=%s "
+            "automatic_history_days=%s late_data_days=%s",
+            self.output_root, self.timezone_name, int(self.grace.total_seconds() / 60),
+            self.check_interval_seconds, self.initial_catchup_days,
+            self.automatic_history_days, self.late_data_days)
         self.thread.start()
-        self.log.info("Daily diagnostics worker started")
+        self.log.info("Daily diagnostics worker started thread=%s",
+                      self.thread.name)
         return True
 
     def stop(self, timeout: float | None = None) -> bool:
@@ -163,12 +181,14 @@ class DailyDiagnosticWorker:
 
     def _index(self, diagnostic_date: str) -> Mapping[str, Any] | None:
         path = self.output_root / "daily" / diagnostic_date / "index.json"
+        if not path.exists():
+            return None
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
             result_name = str(value["result"])
             if (Path(result_name).name != result_name or result_name == "index.json"
                     or not result_name.endswith(".json")):
-                return None
+                raise ValueError("unsafe or incomplete index")
             result_path = path.parent / result_name
             if (not result_path.is_file()
                     or value.get("schema_version") != 1
@@ -183,9 +203,14 @@ class DailyDiagnosticWorker:
                     or result.get("daily_result_id") != value.get("daily_result_id")
                     or result.get("input_fingerprint") != value.get("input_fingerprint")
                     or result.get("overall_status") not in {"complete", "partial"}):
-                return None
+                raise ValueError("index and result revision are inconsistent")
+            self._invalid_index_logged.discard(diagnostic_date)
             return value
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            if diagnostic_date not in self._invalid_index_logged:
+                self.log.warning("Daily diagnostics index invalid date=%s path=%s error=%s",
+                                 diagnostic_date, path, exc)
+                self._invalid_index_logged.add(diagnostic_date)
             return None
 
     def _eligible_dates(self, now: datetime) -> list[date]:
@@ -232,14 +257,23 @@ class DailyDiagnosticWorker:
         candidates = self.state.setdefault("stability_candidates", {})
         previous = candidates.get(diagnostic_date)
         if not previous or previous.get("fingerprint") != fingerprint:
+            if previous:
+                self.log.info(
+                    "Daily diagnostics candidate fingerprint changed date=%s old=%s new=%s; "
+                    "stability reset", diagnostic_date,
+                    str(previous.get("fingerprint", ""))[:12], fingerprint[:12])
             candidates[diagnostic_date] = {
                 "fingerprint": fingerprint, "first_seen_at": _iso(now),
                 "observations": 1,
             }
-            self.log.info("Daily diagnostics candidate %s observed", diagnostic_date)
+            self.log.info("Daily diagnostics candidate date=%s first_observation fingerprint=%s",
+                          diagnostic_date, fingerprint[:12])
             return False
         previous["observations"] = int(previous.get("observations", 1)) + 1
         previous["last_seen_at"] = _iso(now)
+        if previous["observations"] == 2:
+            self.log.info("Daily diagnostics candidate date=%s stable fingerprint=%s",
+                          diagnostic_date, fingerprint[:12])
         return True
 
     def check_once(self) -> list[dict[str, Any]]:
@@ -257,6 +291,16 @@ class DailyDiagnosticWorker:
         recent = {today - timedelta(days=age)
                   for age in range(1, self.late_data_days + 1)}
         source_catalog = build_source_catalog(self.sources)
+        if not self._startup_cycle_logged:
+            recent_order = sorted(eligible, reverse=True)
+            initial_plan = recent_order[:self.initial_catchup_days]
+            self.log.info(
+                "Daily diagnostics catch-up candidates=%s initial_plan=%s "
+                "initial_budget=%s remaining_backlog=%s automatic_history_days=%s",
+                len(eligible), [item.isoformat() for item in initial_plan],
+                self.initial_catchup_days, max(0, len(eligible) - len(initial_plan)),
+                self.automatic_history_days)
+            self._startup_cycle_logged = True
         for candidate in eligible:
             text = candidate.isoformat()
             index = self._index(text)
@@ -275,17 +319,38 @@ class DailyDiagnosticWorker:
                                             "diagnostic_date": text, "message": str(exc)}
                 self.state.setdefault("stability_candidates", {}).pop(text, None)
                 continue
+            except Exception as exc:
+                self.log.exception("Daily diagnostics probe failed date=%s error=%s", text, exc)
+                self.state["last_error"] = {"kind": "probe_failure",
+                                            "diagnostic_date": text, "message": str(exc)}
+                self.state.setdefault("stability_candidates", {}).pop(text, None)
+                continue
             fingerprint = probe.input_fingerprint
             if index is not None and index.get("input_fingerprint") == fingerprint:
                 self.state.setdefault("stability_candidates", {}).pop(text, None)
                 if text in self.state.setdefault("stale_dates", []):
                     self.state["stale_dates"].remove(text)
+                if text not in self._up_to_date_logged:
+                    self.log.info("Daily diagnostics unchanged date=%s fingerprint=%s; skipped",
+                                  text, fingerprint[:12])
+                    self._up_to_date_logged.add(text)
                 continue
+            self._up_to_date_logged.discard(text)
             if index is not None:
                 if text not in self.state.setdefault("stale_dates", []):
                     self.state["stale_dates"].append(text)
                     self.log.info("Daily diagnostics stale %s", text)
-            if self._observe(text, fingerprint, now) and self._grace_elapsed(candidate, now):
+            stable = self._observe(text, fingerprint, now)
+            grace_elapsed = self._grace_elapsed(candidate, now)
+            if not grace_elapsed and text not in self._grace_wait_logged:
+                eligible_at = datetime.combine(
+                    candidate + timedelta(days=1), datetime_time(), self.zone) + self.grace
+                self.log.info(
+                    "Daily diagnostics candidate date=%s waiting_for_grace eligible_at=%s "
+                    "stable=%s", text, eligible_at.isoformat(), stable)
+                self._grace_wait_logged.add(text)
+            if stable and grace_elapsed:
+                self._grace_wait_logged.discard(text)
                 runnable.append(text)
 
         if initial and runnable:
@@ -300,7 +365,8 @@ class DailyDiagnosticWorker:
             self.state["currently_running_date"] = text
             self.state["currently_running_attempt"] = attempt
             self._save_state()
-            self.log.info("Daily diagnostics started %s", text)
+            self.log.info("Daily diagnostics started date=%s attempt_id=%s", text, attempt)
+            run_started = time.monotonic()
             try:
                 result = self.run_callable(
                     text, self.sources, self.output_root,
@@ -320,6 +386,7 @@ class DailyDiagnosticWorker:
                                             "diagnostic_date": text, "message": str(exc)}
             else:
                 results.append(dict(result))
+                duration = time.monotonic() - run_started
                 if result.get("overall_status") in {"complete", "partial"} and result.get("persisted"):
                     self.state["last_successful_date"] = max(
                         filter(None, (self.state.get("last_successful_date"), text)))
@@ -334,12 +401,25 @@ class DailyDiagnosticWorker:
                         "processed_dates", [])
                     if text not in processed:
                         processed.append(text)
-                    level = "partial" if result.get("overall_status") == "partial" else "completed"
-                    self.log.info("Daily diagnostics %s %s", level, text)
+                    component = result.get("components", {}).get("bms_management", {})
+                    self.log.info(
+                        "Daily diagnostics completed date=%s attempt_id=%s result_id=%s "
+                        "status=%s duration_seconds=%.3f fingerprint=%s component=%s "
+                        "component_status=%s events=%s quality=%s coverage=%s",
+                        text, attempt, result.get("daily_result_id"),
+                        result.get("overall_status"), duration,
+                        str(result.get("input_fingerprint", ""))[:12],
+                        component.get("component_name", "bms_management"),
+                        component.get("status"),
+                        component.get("events", {}).get("count"),
+                        component.get("quality"), component.get("coverage"))
                 else:
                     self.state["last_error"] = {"kind": "run_failed",
                                                 "diagnostic_date": text}
-                    self.log.error("Daily diagnostics run failed %s", text)
+                    self.log.error(
+                        "Daily diagnostics run failed date=%s attempt_id=%s status=%s "
+                        "duration_seconds=%.3f", text, attempt,
+                        result.get("overall_status"), duration)
             finally:
                 self.state["currently_running_date"] = None
                 self.state["currently_running_attempt"] = None
