@@ -215,6 +215,8 @@ DEFAULTS = {
  'cell_diag_aggregate_retention_days':730,'cell_diag_capacity_boundary_fraction':0.9,
  'cell_diag_capacity_max_crossing_mad_fraction':0.05,'cell_diag_curve_grid_points':21,
  'cell_diag_curve_max_rms_mad_mv':5,
+ 'hycube_evidence_enabled':False,'hycube_base_url':'','hycube_interval_seconds':5,
+ 'hycube_timeout_seconds':0.8,
 }
 
 # group, label, unit, min, max, step, consequence, level
@@ -256,6 +258,10 @@ META = {
  'baudrate':('Erweitert / System','Baudrate','Bd',None,None,None,'Eine falsche Baudrate verhindert die Kommunikation mit dem BMS.','advanced'),
  'command':('Erweitert / System','Pylontech Poll-Kommando','Text',None,None,None,'Änderung kann Parser und Datenerfassung vollständig außer Funktion setzen.','advanced'),
  'command_timeout_seconds':('Erweitert / System','Kommando-Timeout','s',1,30,1,'Zu kurz kann gültige Antworten abbrechen; zu lang verzögert Fehlererkennung.','advanced'),
+ 'hycube_evidence_enabled':('History & Datenerfassung','Hycube System-Evidence aktiv','bool',None,None,None,'Aktiviert ausschließlich GET /data_row/ und eine getrennte append-only Rohhistorie; Ausfälle ändern keine Batteriediagnose.','normal'),
+ 'hycube_base_url':('Erweitert / System','Hycube lokale Basisadresse','Text',None,None,None,'Nur eine explizit konfigurierte lokale HTTP(S)-Adresse ist zulässig; Zugangsdaten werden nicht unterstützt.','advanced'),
+ 'hycube_interval_seconds':('History & Datenerfassung','Hycube Evidence-Intervall','s',1,60,1,'Bestimmt die Zielauflösung des einzelnen nicht überlappenden Read-only Collectors.','normal'),
+ 'hycube_timeout_seconds':('Erweitert / System','Hycube GET-Timeout','s',0.1,10,0.1,'Begrenzt jeden GET /data_row/; Fehler werden isoliert und mit Backoff behandelt.','advanced'),
  'mqtt_topic_prefix':('Erweitert / System','MQTT Topic Prefix','Text',None,None,None,'Änderung verschiebt MQTT-Themen und kann bestehende Home-Assistant-Entities entkoppeln.','advanced'),
  'publish_discovery':('Erweitert / System','MQTT Discovery veröffentlichen','bool',None,None,None,'Deaktivieren verhindert neue Discovery-Publikationen; bestehende Entities können erhalten bleiben.','advanced'),
  'raw_log':('Erweitert / System','Raw-PWR-Log','bool',None,None,None,'Aktivieren schreibt die letzte rohe PWR-Antwort und erhöht Schreibzugriffe.','advanced'),
@@ -337,6 +343,12 @@ def validate(cfg):
         errors.append('Confidence-Reihenfolge muss Mindest-Samples < MEDIUM < HIGH sein.')
     for name,o,w,c in PHASE_KEYS+[('Fallback','cell_diag_observe_deviation_mv','cell_diag_warning_deviation_mv','cell_diag_critical_deviation_mv')]:
         if not (cfg.get(o,0)<cfg.get(w,0)<cfg.get(c,0)): errors.append(f'{name}: Beobachten < Warnung < Kritisch ist erforderlich.')
+    if cfg.get('hycube_evidence_enabled'):
+        try:
+            from hycube_evidence import data_row_url
+            data_row_url(cfg.get('hycube_base_url',''))
+        except (TypeError, ValueError):
+            errors.append('Hycube lokale Basisadresse: ungültig oder nicht lokal.')
     return errors
 
 def _config_html(maintenance_path='maintenance', timeline_path='timeline', history_path='history'):

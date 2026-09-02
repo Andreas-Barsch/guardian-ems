@@ -236,6 +236,60 @@ def _signed_16(raw: int) -> int:
     return raw - 0x10000 if raw & 0x8000 else raw
 
 
+def decode_0x47(correlation: Correlation) -> dict:
+    """Decode one passively observed V3.3 system-parameter response."""
+    frame = correlation.frame
+    quality = {
+        "adr": frame.adr, "rtn": frame.rtn,
+        "checksum_valid": frame.checksum_valid,
+        "frame_complete": frame.frame_complete,
+        "request_matched": correlation.request_matched,
+        "decoder_supported": False,
+        "source": frame.source,
+        "protocol_reference": frame.protocol_reference,
+        "decoder_version": frame.decoder_version,
+        "info_raw": frame.info_hex,
+    }
+    if frame.is_request:
+        raise ValueError("frame is not a 0x47 response")
+    if correlation.paired_command != 0x47 or not correlation.request_matched:
+        return {**quality, "decode_error": "unmatched_response"}
+    if frame.rtn != 0:
+        return {**quality, "decode_error": "nonzero_rtn"}
+    if len(frame.info) != 25:
+        return {**quality, "decode_error": "invalid_info_length"}
+
+    names = (
+        "cell_high_voltage_limit", "cell_low_voltage_alarm_limit",
+        "cell_under_voltage_protect_limit", "charge_high_temperature_limit",
+        "charge_low_temperature_limit", "charge_current_limit",
+        "module_high_voltage_limit", "module_low_voltage_alarm_limit",
+        "module_under_voltage_protect_limit", "discharge_high_temperature_limit",
+        "discharge_low_temperature_limit", "discharge_current_limit",
+    )
+    raw = [int.from_bytes(frame.info[offset:offset + 2], "big",
+                          signed=names[index] in {"charge_current_limit",
+                                                  "discharge_current_limit"})
+           for index, offset in enumerate(range(1, 25, 2))]
+    raw_values = dict(zip(names, raw))
+    result = {
+        "infoflag_raw": frame.info[0],
+        **{f"{name}_raw": value for name, value in raw_values.items()},
+    }
+    for name in names:
+        value = raw_values[name]
+        if "voltage" in name:
+            result[f"{name}_v"] = value / 1000.0
+        elif "temperature" in name:
+            kelvin = value / 10.0
+            result[f"{name}_k"] = kelvin
+            result[f"{name}_c"] = kelvin - 273.15
+        else:
+            result[f"{name}_a"] = value / 10.0
+    return {**quality, **result, "decoder_supported": True,
+            "causality": "not_determined"}
+
+
 def decode_0x92(correlation: Correlation) -> dict:
     """Decode a successfully correlated 0x92 management response.
 
@@ -468,6 +522,7 @@ class PassiveRs485Reader:
             "valid_frames": 0, "checksum_errors": 0, "frame_errors": 0,
             "requests_0x92": 0, "responses_0x92": 0, "unmatched_responses": 0,
             "requests_0x44": 0, "responses_0x44": 0,
+            "requests_0x47": 0, "responses_0x47": 0,
             "requests_0x93": 0, "responses_0x93": 0,
             "matched_0x93": 0, "decoded_valid_0x93": 0,
             "decode_errors_0x93": 0,
@@ -559,6 +614,8 @@ class PassiveRs485Reader:
                 self._set(requests_0x92=self.status()["requests_0x92"] + 1)
             elif frame.is_request and frame.command == 0x44:
                 self._set(requests_0x44=self.status()["requests_0x44"] + 1)
+            elif frame.is_request and frame.command == 0x47:
+                self._set(requests_0x47=self.status()["requests_0x47"] + 1)
             elif frame.is_request and frame.command == 0x93:
                 self._set(requests_0x93=self.status()["requests_0x93"] + 1)
             elif not frame.is_request:
@@ -588,6 +645,8 @@ class PassiveRs485Reader:
                             self._first_0x92_logged = True
                 elif correlation.paired_command == 0x44:
                     self._set(responses_0x44=self.status()["responses_0x44"] + 1)
+                elif correlation.paired_command == 0x47:
+                    self._set(responses_0x47=self.status()["responses_0x47"] + 1)
                 elif correlation.paired_command == 0x93:
                     current_status = self.status()
                     self._set(responses_0x93=current_status["responses_0x93"] + 1,

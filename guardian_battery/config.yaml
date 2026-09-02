@@ -35,6 +35,10 @@ options:
   module_count: 6
   command: pwr
   command_timeout_seconds: 5
+  hycube_evidence_enabled: false
+  hycube_base_url: ""
+  hycube_interval_seconds: 5
+  hycube_timeout_seconds: 0.8
   mqtt_topic_prefix: guardian
   publish_discovery: true
 
@@ -128,6 +132,10 @@ schema:
   module_count: int(1,6)
   command: str
   command_timeout_seconds: int(1,30)
+  hycube_evidence_enabled: bool
+  hycube_base_url: str
+  hycube_interval_seconds: float(1,60)
+  hycube_timeout_seconds: float(0.1,10)
   mqtt_topic_prefix: str
   publish_discovery: bool
 

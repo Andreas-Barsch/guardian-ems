@@ -10,7 +10,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rs485_sniffer import Correlation, ParsedFrame, decode_0x92, decode_0x93, decode_0x93_info
+from rs485_sniffer import (Correlation, ParsedFrame, decode_0x47, decode_0x92,
+                           decode_0x93, decode_0x93_info)
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryError,
                               PositionHistoryLog,
                               documented_position_at)
@@ -218,20 +219,22 @@ class Rs485EvidencePipeline:
         if frame.is_request:
             command = frame.command
         key = (frame.adr, "request" if frame.is_request else "response")
-        persist = command in {0x92, 0x44, 0x93}
+        persist = command in {0x92, 0x44, 0x47, 0x93}
         if command == 0x42:
             last = self._last_fast.get(key)
             persist = last is None or now - last >= self.fast_frame_interval_seconds
             if persist:
                 self._last_fast[key] = now
-        if command not in {0x42, 0x44, 0x92, 0x93}:
+        if command not in {0x42, 0x44, 0x47, 0x92, 0x93}:
             exemplar = (frame.adr, frame.cid2_or_rtn, command)
             persist = exemplar not in self._unknown_exemplars
             self._unknown_exemplars.add(exemplar)
         if not persist:
             return
         decoded = None
-        if command == 0x92 and not frame.is_request:
+        if command == 0x47 and not frame.is_request:
+            decoded = decode_0x47(correlation)
+        elif command == 0x92 and not frame.is_request:
             decoded = decode_0x92(correlation)
         elif command == 0x93 and not frame.is_request:
             decoded = decode_0x93(correlation)

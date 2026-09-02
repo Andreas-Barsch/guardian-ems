@@ -17,12 +17,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from rs485_sniffer import (  # noqa: E402
+    Correlation,
     FrameValidationError,
     PassiveRs485Reader,
     ResponseCorrelator,
     StreamFramer,
     calculate_checksum,
     calculate_lchksum,
+    decode_0x47,
     decode_0x92,
     decode_0x93,
     decode_0x93_info,
@@ -30,6 +32,64 @@ from rs485_sniffer import (  # noqa: E402
     open_passive_serial,
     parse_frame,
 )
+
+
+def threshold_info(values=None, flag=0):
+    values = values or (3600, 3000, 2800, 3182, 2732, 250, 54000, 45000,
+                        42000, 3232, 2632, -250)
+    return bytes([flag]) + b"".join(int(value).to_bytes(2, "big", signed=value < 0)
+                                    for value in values)
+
+
+def correlated_threshold(*, info=None, rtn=0, delay=.1):
+    correlator = ResponseCorrelator(timeout_seconds=1)
+    request = parse_frame(synthetic_frame(cid2_or_rtn=0x47))
+    correlator.observe(request, 10)
+    response = parse_frame(synthetic_frame(cid2_or_rtn=rtn,
+                                           info=threshold_info() if info is None else info))
+    return request, correlator.observe(response, 10 + delay)
+
+
+def test_decode_0x47_exact_structure_scaling_and_raw_values():
+    request, correlation = correlated_threshold()
+    decoded = decode_0x47(correlation)
+    assert request.info == b""
+    assert decoded["decoder_supported"] is True
+    assert decoded["cell_low_voltage_alarm_limit_raw"] == 3000
+    assert decoded["cell_low_voltage_alarm_limit_v"] == 3.0
+    assert decoded["cell_under_voltage_protect_limit_v"] == 2.8
+    assert decoded["module_low_voltage_alarm_limit_v"] == 45.0
+    assert decoded["module_under_voltage_protect_limit_v"] == 42.0
+    assert decoded["charge_high_temperature_limit_k"] == 318.2
+    assert decoded["charge_high_temperature_limit_c"] == pytest.approx(45.05)
+    assert decoded["discharge_current_limit_raw"] == -250
+    assert decoded["discharge_current_limit_a"] == -25.0
+    assert decoded["info_raw"] == threshold_info().hex().upper()
+
+
+@pytest.mark.parametrize("info,rtn,error", [
+    (b"\0" * 24, 0, "invalid_info_length"),
+    (threshold_info(), 6, "nonzero_rtn"),
+])
+def test_decode_0x47_rejects_non_authoritative_response(info, rtn, error):
+    _, correlation = correlated_threshold(info=info, rtn=rtn)
+    decoded = decode_0x47(correlation)
+    assert decoded["decoder_supported"] is False
+    assert decoded["decode_error"] == error
+
+
+def test_decode_0x47_rejects_unmatched_response():
+    response = parse_frame(synthetic_frame(cid2_or_rtn=0, info=threshold_info()))
+    decoded = decode_0x47(Correlation(response, None, False, None))
+    assert decoded["decoder_supported"] is False
+    assert decoded["decode_error"] == "unmatched_response"
+
+
+def test_0x47_invalid_checksum_is_rejected_before_decode():
+    raw = bytearray(synthetic_frame(cid2_or_rtn=0, info=threshold_info()))
+    raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
+    with pytest.raises(FrameValidationError, match="invalid_checksum"):
+        parse_frame(bytes(raw))
 
 
 def synthetic_frame(

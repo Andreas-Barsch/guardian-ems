@@ -7,6 +7,18 @@ from pathlib import Path
 from typing import Any
 
 
+def cell_history_timing(cell_sample_at: float, pwr_sample_at: float | None) -> dict:
+    """Describe the non-simultaneous PWR context without negative ages."""
+    if pwr_sample_at is None:
+        return {"cell_sample_at": float(cell_sample_at), "pwr_sample_at": None,
+                "pwr_age_seconds": None, "pwr_age_quality": "unavailable"}
+    age = float(cell_sample_at) - float(pwr_sample_at)
+    return {"cell_sample_at": float(cell_sample_at),
+            "pwr_sample_at": float(pwr_sample_at),
+            "pwr_age_seconds": age if age >= 0 else None,
+            "pwr_age_quality": "observed" if age >= 0 else "invalid_future"}
+
+
 class CellHistoryWriter:
     """Append-only daily JSONL history for raw cell diagnostic samples."""
 

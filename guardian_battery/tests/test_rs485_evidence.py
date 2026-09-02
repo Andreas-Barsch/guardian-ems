@@ -106,6 +106,58 @@ def test_0x42_is_downsampled_but_0x44_is_complete(tmp_path):
     assert [item["paired_command"] for item in records] == [0x42, 0x44, 0x44]
 
 
+def test_every_passive_0x47_request_and_response_is_persisted_and_decoded(tmp_path):
+    writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
+    writer.start()
+    clock = iter([1_786_147_200.0 + index for index in range(4)])
+    pipeline = Rs485EvidencePipeline(writer, wall_clock=lambda: next(clock),
+                                     position_history_path=tmp_path / "positions.jsonl")
+    correlator = ResponseCorrelator()
+    values = (3600, 3000, 2800, 3182, 2732, 250, 54000, 45000, 42000, 3232, 2632, -250)
+    info = bytes([0]) + b"".join(value.to_bytes(2, "big", signed=value < 0)
+                                  for value in values)
+    for index, offset in enumerate((0, 100)):
+        request = frame(adr=6, code=0x47)
+        pipeline(request, correlator.observe(request, 10 + offset))
+        current_info = info if index == 0 else info[:3] + (2990).to_bytes(2, "big") + info[5:]
+        response = frame(adr=6, code=0, info=current_info)
+        pipeline(response, correlator.observe(response, 10.1 + offset))
+    writer.stop()
+    records = read_records(next(tmp_path.glob("*.jsonl")))
+    assert len(records) == 4
+    assert all(record["paired_command"] == 0x47 for record in records)
+    assert [record["decoder_supported"] for record in records] == [False, True, False, True]
+    assert [record["decoded"]["cell_low_voltage_alarm_limit_v"]
+            for record in records if record["decoder_supported"]] == [3.0, 2.99]
+    assert records[-1]["physical_serial"] is None
+
+
+def test_0x47_inherits_only_observed_0x93_identity_without_position_formula(tmp_path):
+    writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
+    writer.start()
+    clock = iter([1_786_147_200.0 + index for index in range(4)])
+    pipeline = Rs485EvidencePipeline(writer, wall_clock=lambda: next(clock),
+                                     position_history_path=tmp_path / "positions.jsonl")
+    correlator = ResponseCorrelator()
+    serial_request = frame(adr=6, code=0x93, info=b"\x06")
+    pipeline(serial_request, correlator.observe(serial_request, 1))
+    serial_response = frame(adr=6, code=0, info=b"\x06Y225004C32250226")
+    pipeline(serial_response, correlator.observe(serial_response, 1.1))
+    request = frame(adr=6, code=0x47)
+    pipeline(request, correlator.observe(request, 2))
+    values = (3600, 3000, 2800, 3182, 2732, 250, 54000, 45000, 42000, 3232, 2632, -250)
+    info = bytes([0]) + b"".join(value.to_bytes(2, "big", signed=value < 0)
+                                  for value in values)
+    response = frame(adr=6, code=0, info=info)
+    pipeline(response, correlator.observe(response, 2.1))
+    writer.stop()
+    threshold = read_records(next(tmp_path.glob("*.jsonl")))[-1]
+    assert threshold["physical_serial"] == "Y225004C32250226"
+    assert threshold["identity_decode_source"] == "stored_decoded"
+    assert threshold["position"] is None
+    assert threshold["identity_resolved"] is False
+
+
 def test_queue_overflow_is_counted_and_nonblocking(tmp_path):
     writer = Rs485EvidenceWriter(tmp_path, queue_size=1)
     assert writer.append({"timestamp": "2026-08-31T00:00:00+00:00"})

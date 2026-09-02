@@ -14,13 +14,14 @@ from pathlib import Path
 from typing import Optional
 
 from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
-from cell_history import CellHistoryWriter
+from cell_history import CellHistoryWriter, cell_history_timing
 from diagnostic_aggregates import DiagnosticAggregateStore
 from diagnostic_backfill import DiagnosticAggregateBackfill
 from current_condition_backfill import CurrentConditionBackfill
 from config_history import ConfigHistory
 from daily_diagnostics import DailyDiagnosticSources
 from daily_diagnostic_worker import DailyDiagnosticWorker
+from hycube_evidence import collector_from_options
 from config_ui import (configure_maintenance_live_publisher,
                        configure_rs485_status_provider,
                        record_stable_observed_positions, start_config_server)
@@ -64,6 +65,7 @@ CELL_HISTORY_DIR = SHARE_DIR / "cell_history"
 DIAGNOSTIC_AGGREGATE_FILE = SHARE_DIR / "diagnostic_aggregates.json"
 CONFIG_HISTORY_FILE = SHARE_DIR / "config_history.jsonl"
 DAILY_DIAGNOSTICS_ROOT = SHARE_DIR / "diagnostics"
+HYCUBE_HISTORY_DIR = SHARE_DIR / "hycube_history"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -87,6 +89,7 @@ class Module:
     battery_temperature_state: str = ""
     mos_temperature_c: Optional[float] = None
     mos_temperature_state: str = ""
+    pwr_sample_at: float | None = None
 
     @property
     def delta_mv(self) -> int:
@@ -1245,6 +1248,7 @@ def main() -> None:
     module_infos: dict[int, dict] = {}
     identity_resolution_log: dict[int, tuple[str, int | None]] = {}
     daily_worker = None
+    hycube_collector = None
 
     if rs485_reader is not None:
         restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
@@ -1267,16 +1271,27 @@ def main() -> None:
         daily_worker = None
         LOG.warning("Daily diagnostics worker konnte nicht gestartet werden: %s", exc)
     try:
+        hycube_collector = collector_from_options(options, HYCUBE_HISTORY_DIR)
+        if hycube_collector is not None:
+            hycube_collector.start()
+    except Exception as exc:
+        hycube_collector = None
+        LOG.warning("Hycube read-only collector konnte nicht gestartet werden: %s",
+                    type(exc).__name__)
+    try:
         while RUNNING:
             started = time.monotonic()
             modules: list[Module] = []
             try:
                 raw = console.command(options["command"])
+                pwr_sample_at = time.time()
 
                 if options["raw_log"]:
                     (SHARE_DIR / "last_raw_pwr.txt").write_text(raw, encoding="utf-8")
 
                 modules = parse_pwr(raw, int(options["module_count"]))
+                for module in modules:
+                    module.pwr_sample_at = pwr_sample_at
                 if not modules:
                     (SHARE_DIR / "last_unparsed_pwr.txt").write_text(raw, encoding="utf-8")
                     status = "critical"
@@ -1380,7 +1395,10 @@ def main() -> None:
                                 try:
                                     cell_history.append({**asdict(sample), "module_serial": serial,
                                                          "position_history_id": position_history_id,
-                                                         "identity_source": "position_history" if serial else "unknown"})
+                                                         "identity_source": "position_history" if serial else "unknown",
+                                                         **cell_history_timing(
+                                                             sample_time,
+                                                             module.pwr_sample_at)})
                                 except Exception as history_exc:
                                     LOG.warning("Cell History Modul %s: %s", module.module, history_exc)
                         except Exception as exc: LOG.warning("Zelldiagnostik Modul %s: %s",module.module,exc)
@@ -1451,6 +1469,11 @@ def main() -> None:
             elapsed = time.monotonic() - started
             time.sleep(max(1, int(options["poll_interval_seconds"]) - elapsed))
     finally:
+        if hycube_collector is not None:
+            try:
+                hycube_collector.stop()
+            except Exception as exc:
+                LOG.warning("Hycube read-only collector konnte nicht gestoppt werden: %s", exc)
         if daily_worker is not None:
             try:
                 daily_worker.stop()
