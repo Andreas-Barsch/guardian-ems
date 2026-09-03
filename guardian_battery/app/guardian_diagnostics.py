@@ -206,6 +206,50 @@ class GuardianDiagnosticsRepository:
         return {"events": public, "event_count": len(events),
                 "truncated": len(events) > MAX_EVENT_RESPONSE}
 
+    def cell_risk(self, diagnostic_date: str, *, required: bool = False) -> dict[str, Any]:
+        text = validate_diagnostic_date(diagnostic_date)
+        path = self.output_root / "aggregates" / "cell_risk" / f"{text}.json"
+        if not _contained_file(path, path.parent):
+            if required:
+                raise DiagnosticsNotFound("Cell Risk aggregate is not available")
+            return {"schema_version": 1, "diagnostic_date": text, "cells": [], "top10": []}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+                    or payload.get("diagnostic_date") != text
+                    or not isinstance(payload.get("cells"), list)):
+                raise ValueError("invalid Cell Risk aggregate")
+            return payload
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise DiagnosticsCorrupt("Cell Risk aggregate is inconsistent") from exc
+
+    def cell_risk_detail(self, diagnostic_date: str, serial: str,
+                         cell_number: int) -> dict[str, Any]:
+        current = self.cell_risk(diagnostic_date, required=True)
+        selected = next((row for row in current["cells"]
+                         if row.get("physical_serial") == serial
+                         and row.get("cell_number") == cell_number), None)
+        if selected is None:
+            raise DiagnosticsNotFound("Cell Risk cell is not available")
+        history = []
+        aggregate_root = self.output_root / "aggregates" / "cell_risk"
+        if aggregate_root.is_dir():
+            for path in sorted(aggregate_root.glob("*.json")):
+                if not _DATE.fullmatch(path.stem) or path.stem > diagnostic_date:
+                    continue
+                try:
+                    payload = self.cell_risk(path.stem)
+                except DiagnosticsError:
+                    continue
+                row = next((item for item in payload["cells"]
+                            if item.get("physical_serial") == serial
+                            and item.get("cell_number") == cell_number), None)
+                if row:
+                    history.append({"date": path.stem, "risk_score_v2": row["risk_score_v2"],
+                                    "risk_class": row["risk_class"]})
+        return {"schema_version": 1, "date": diagnostic_date, "cell": selected,
+                "risk_history": history[-90:], "causality": "not_determined"}
+
     @classmethod
     def _without_raw(cls, value: Any) -> Any:
         if isinstance(value, dict):
@@ -285,6 +329,7 @@ class GuardianDiagnosticsRepository:
             "bms_management": {"aggregates": aggregates,
                                "event_count": summary["event_count"],
                                "event_details_available": event_payload["event_count"] > 0},
+            "cell_risk": self.cell_risk(diagnostic_date),
             "provenance": {"daily_result_id": result["daily_result_id"],
                            "input_fingerprint": result["input_fingerprint"],
                            "index_updated_at": index.get("updated_at"),
@@ -402,6 +447,17 @@ class GuardianDiagnosticsApi:
             elif len(parts) == 3 and parts[:2] == ["bms-management", "events"]:
                 body = {"schema_version": 1, "date": parts[2],
                         **self.repository.events(parts[2], required=True)}
+            elif len(parts) == 3 and parts[:2] == ["cell-risk", "top10"]:
+                result = self.repository.cell_risk(parts[2], required=True)
+                body = {"schema_version": 1, "date": parts[2],
+                        "cell_risk_algorithm_version": result.get("cell_risk_algorithm_version"),
+                        "cells": result.get("top10", result.get("cells", [])[:10])}
+            elif len(parts) == 5 and parts[:2] == ["cell-risk", "cell"]:
+                try:
+                    number = int(parts[4])
+                except ValueError as exc:
+                    raise DiagnosticsNotFound("Cell Risk cell is not available") from exc
+                body = self.repository.cell_risk_detail(parts[2], parts[3], number)
             else:
                 raise DiagnosticsNotFound("Diagnostics API route not found")
             return ApiResponse(200, body)

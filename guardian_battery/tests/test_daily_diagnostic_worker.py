@@ -325,8 +325,8 @@ def test_first_deployment_never_discovers_beyond_bounded_horizon(tmp_path):
     assert "2026-08-25" not in harness.probes
 
 
-def test_sixty_date_named_history_files_only_read_bounded_recent_horizon(tmp_path,
-                                                                         monkeypatch):
+def test_sixty_date_named_history_files_only_read_bounded_catchup_plus_risk_horizon(
+        tmp_path, monkeypatch):
     rs485 = tmp_path / "rs485"
     cells = tmp_path / "cells"
     rs485.mkdir()
@@ -352,7 +352,10 @@ def test_sixty_date_named_history_files_only_read_bounded_recent_horizon(tmp_pat
         automatic_history_days=7)
     instance.check_once()
     assert read_paths
-    assert all((today - datetime.strptime(path.stem[:10], "%Y-%m-%d").date()).days <= 8
+    # Seven catch-up candidates each use the bounded 14-day Cell Risk window:
+    # oldest candidate age 7 plus 13 preceding local days and one possible UTC
+    # boundary filename = 21, never all 60 days.
+    assert all((today - datetime.strptime(path.stem[:10], "%Y-%m-%d").date()).days <= 21
                for path in read_paths)
     assert not any(path.stem == "2026-07-04" for path in read_paths)
 

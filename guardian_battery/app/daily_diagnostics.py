@@ -22,6 +22,8 @@ from bms_management_evidence import (BmsManagementEvidenceAnalyzer,
                                      BmsManagementEvidenceStore,
                                      EvidenceParameters,
                                      SCHEMA_VERSION as BMS_SCHEMA_VERSION)
+from cell_risk_v2 import (CELL_RISK_ALGORITHM_VERSION,
+                          analyze_cell_risk)
 from position_history import PositionSnapshot
 
 
@@ -91,6 +93,7 @@ class DailyInputProbe:
     position_projection: tuple[Mapping[str, Any], ...]
     config_projection: tuple[Mapping[str, Any], ...]
     component_manifest: Mapping[str, Any]
+    risk_cell_records: tuple[Mapping[str, Any], ...] = ()
 
 
 def guardian_day(diagnostic_date: date | str, timezone_name: str = DEFAULT_TIMEZONE) -> GuardianDay:
@@ -313,7 +316,21 @@ def _source_summary(source: SourceSlice) -> dict[str, Any]:
 def _component_manifest(parameters: EvidenceParameters) -> dict[str, Any]:
     return {"bms_management": {"component_version": "1",
                                "schema_version": BMS_SCHEMA_VERSION,
-                               "parameters": asdict(parameters)}}
+                               "parameters": asdict(parameters)},
+            "cell_risk": {"component_version": "2",
+                          "cell_risk_algorithm_version": CELL_RISK_ALGORITHM_VERSION,
+                          "lookback_days": 14}}
+
+
+def _risk_history_records(path: Path | str | None, day: GuardianDay) -> tuple[Mapping[str, Any], ...]:
+    """Read the current and preceding 13 Guardian days for the daily job only."""
+    records = []
+    for offset in range(13, -1, -1):
+        target = date.fromisoformat(day.diagnostic_date) - timedelta(days=offset)
+        records.extend(_slice_jsonl("cell", path, guardian_day(target, day.timezone)).records)
+    records.sort(key=lambda item: (_timestamp(item["timestamp"]),
+                                   hashlib.sha256(_canonical(item)).hexdigest()))
+    return tuple(records)
 
 
 def build_source_catalog(sources: DailyDiagnosticSources) -> dict[str, tuple[Path, ...]]:
@@ -357,11 +374,13 @@ def probe_daily_inputs(diagnostic_date: date | str, sources: DailyDiagnosticSour
         positions.records, day, "effective_at"))
     config_projection = tuple(_history_projection(configs.records, day, "timestamp"))
     manifest = _component_manifest(parameters)
+    risk_records = _risk_history_records(sources.cell_history_root, day)
     semantic = {
         "timezone": timezone_name, "diagnostic_date": day.diagnostic_date,
         "daily_schema_version": DAILY_SCHEMA_VERSION,
         "core_version": CORE_VERSION, "component_manifest": manifest,
         "rs485_records": list(rs485.records), "cell_records": list(cells.records),
+        "cell_risk_records": list(risk_records),
         "position_projection": list(position_projection),
         "config_projection": list(config_projection),
         "maintenance_records": list(maintenance.records),
@@ -370,7 +389,7 @@ def probe_daily_inputs(diagnostic_date: date | str, sources: DailyDiagnosticSour
     return DailyInputProbe(
         day, fingerprint,
         {item.name: item for item in (rs485, cells, positions, configs, maintenance)},
-        position_projection, config_projection, manifest)
+        position_projection, config_projection, manifest, risk_records)
 
 
 def _component_result(result: Mapping[str, Any], rs485: SourceSlice,
@@ -443,6 +462,7 @@ def run_daily_diagnostic(diagnostic_date: date | str, sources: DailyDiagnosticSo
         daily_result_id = f"DDR-{day.diagnostic_date}-{result_hash[:16]}"
 
         analyzer_result = None
+        risk_result = None
         component_errors = []
         try:
             analyzer_result = BmsManagementEvidenceAnalyzer(parameters).analyze(
@@ -463,6 +483,29 @@ def run_daily_diagnostic(diagnostic_date: date | str, sources: DailyDiagnosticSo
 
         component = _component_result(analyzer_result, rs485, cells, positions_all,
                                       day.diagnostic_date)
+        risk_errors = []
+        try:
+            risk_result = analyze_cell_risk(
+                probe.risk_cell_records,
+                diagnostic_date=day.diagnostic_date,
+                maintenance_records=maintenance.records,
+                position_resolver=_position_resolver(positions_all.records),
+                timezone_name=timezone_name)
+        except Exception as exc:  # independent predictive analytics boundary
+            risk_errors.append({"type": type(exc).__name__, "message": str(exc)})
+        risk_component = {
+            "component_name": "cell_risk", "component_version": "2",
+            "cell_risk_algorithm_version": CELL_RISK_ALGORITHM_VERSION,
+            "status": "complete" if risk_result is not None else "failed",
+            "metrics": {"cell_count": len(risk_result["cells"]) if risk_result else 0},
+            "quality": "complete" if risk_result and risk_result["cells"] else "limited",
+            "warnings": (["no_qualifying_cell_risk_samples"]
+                         if risk_result is not None and not risk_result["cells"] else []),
+            "errors": risk_errors,
+            "provenance": {"identity": "physical_serial+cell_number",
+                           "causality": "not_determined",
+                           "score_semantics": "engineering_priority_not_soh"},
+        }
         source_map = {item.name: _source_summary(item) for item in
                       (rs485, cells, positions_all, configs_all, maintenance)}
         overall = "partial" if component["status"] == "partial" else "complete"
@@ -473,6 +516,9 @@ def run_daily_diagnostic(diagnostic_date: date | str, sources: DailyDiagnosticSo
         aggregates = [item for item in analyzer_result["daily_aggregates"]
                       if item.get("day") == day.diagnostic_date]
         store.save_daily_aggregates(aggregates)
+        risk_path = output / "aggregates" / "cell_risk" / f"{day.diagnostic_date}.json"
+        if risk_result is not None:
+            _atomic_json(risk_path, risk_result)
         component["events"]["appended"] = appended
         component["metrics"]["aggregate_store"] = str(
             aggregate_path.relative_to(output))
@@ -484,9 +530,11 @@ def run_daily_diagnostic(diagnostic_date: date | str, sources: DailyDiagnosticSo
             "day_duration_seconds": day.duration_seconds,
             "daily_result_id": daily_result_id, "input_fingerprint": fingerprint,
             "overall_status": overall, "sources": source_map,
-            "components": {"bms_management": component},
+            "components": {"bms_management": component, "cell_risk": risk_component},
             "trend_inputs": {"bms_management_aggregates":
-                             f"aggregates/bms_management/{day.diagnostic_date}.json"},
+                             f"aggregates/bms_management/{day.diagnostic_date}.json",
+                             "cell_risk_aggregates":
+                             f"aggregates/cell_risk/{day.diagnostic_date}.json"},
             "provenance": {"core_version": CORE_VERSION,
                            "component_manifest": manifest,
                            "config_history_projection": configs,

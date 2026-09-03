@@ -67,6 +67,46 @@ def api(root):
     return GuardianDiagnosticsApi(GuardianDiagnosticsRepository(root))
 
 
+def write_risk(root, day="2026-08-31", score=60.0):
+    row = {"physical_serial": "SERIAL-A", "cell_number": 8, "cell_group": "G2",
+           "rank": 1, "risk_score_v2": score, "risk_class": "DEUTLICH_AUFFÄLLIG",
+           "overall_confidence": "HIGH", "sample_count": 300,
+           "cell_risk_algorithm_version": "guardian_cell_risk_v2_1"}
+    payload = {"schema_version": 1, "diagnostic_date": day,
+               "cell_risk_algorithm_version": "guardian_cell_risk_v2_1",
+               "cells": [row], "top10": [row]}
+    path = root / "aggregates" / "cell_risk" / f"{day}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return row
+
+
+def test_cell_risk_top10_detail_and_history_are_read_only(tmp_path):
+    write_day(tmp_path, "2026-08-30", aggregates=[])
+    write_day(tmp_path, "2026-08-31", aggregates=[])
+    write_risk(tmp_path, "2026-08-30", 55)
+    write_risk(tmp_path, "2026-08-31", 60)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    top = api(tmp_path).handle("GET", "/api/diagnostics/cell-risk/top10/2026-08-31")
+    detail = api(tmp_path).handle(
+        "GET", "/api/diagnostics/cell-risk/cell/2026-08-31/SERIAL-A/8")
+    assert top.status == detail.status == 200
+    assert top.body["cells"][0]["risk_score_v2"] == 60
+    assert [item["risk_score_v2"] for item in detail.body["risk_history"]] == [55, 60]
+    assert api(tmp_path).handle(
+        "POST", "/api/diagnostics/cell-risk/top10/2026-08-31").status == 405
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+def test_daily_dto_embeds_compact_cell_risk_and_missing_is_backward_compatible(tmp_path):
+    write_day(tmp_path, "2026-08-31", aggregates=[])
+    assert api(tmp_path).handle("GET", "/api/diagnostics/daily/2026-08-31").body[
+        "cell_risk"]["cells"] == []
+    write_risk(tmp_path)
+    result = api(tmp_path).handle("GET", "/api/diagnostics/daily/2026-08-31").body
+    assert result["cell_risk"]["top10"][0]["physical_serial"] == "SERIAL-A"
+
+
 def test_overview_without_data_and_read_only_contract(tmp_path):
     service = api(tmp_path)
     response = service.handle("GET", "/api/diagnostics/overview")

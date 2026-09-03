@@ -1,6 +1,16 @@
 # Guardian Diagnostics D1
 
-Guardian Diagnostics ist die read-only Präsentationsschicht für bereits abgeschlossene, deterministisch erzeugte Daily Diagnostics. V1 berücksichtigt ausschließlich die Komponente **BMS Management Evidence**. Sie startet weder Daily Runs noch Backfills und liest keine Raw Cell- oder RS485-History.
+Guardian Diagnostics ist die read-only Präsentationsschicht für bereits abgeschlossene, deterministisch erzeugte Daily Diagnostics. Sie startet weder Daily Runs noch Backfills und liest bei UI-/API-Aufrufen keine Raw Cell- oder RS485-History.
+
+## Predictive Cell Risk V2
+
+Daily Diagnostics berechnet zusätzlich einen deterministischen Engineering-Priorisierungswert pro physischer Zelle aus bis zu 14 abgeschlossenen Guardian-Tagen. Die Identität ist ausschließlich `physical_serial + cell_number`; eine ADR- oder heutige Positionsformel wird nicht verwendet. Die zeitgültige Position ist nur eine Projektion aus Position History.
+
+`guardian_cell_risk_v2_1` kombiniert zwei getrennte Erkennungspfade: persistente relative Schwäche plus qualifizierte Lowest-Persistenz sowie relative Schwäche plus Lastempfindlichkeit. Ein 7-Tage-Trend ergänzt beide Pfade. Confidence beschreibt nur die Evidence-Abdeckung und verändert weder Score noch Rang.
+
+Der Risk Score ist ausdrücklich kein SOH, keine Ausfallwahrscheinlichkeit, keine Restlebensdauer und kein Alarm. Bestehende Cell Diagnostics, Alarmgrenzen, Modul- und Stackstatus bleiben unabhängig. Häufig „Lowest“ ist bei nur minimaler Medianabweichung kein starker Risikohinweis; umgekehrt kann eine schwache Zelle durch eine noch schwächere Zelle im Lowest-Ranking maskiert werden.
+
+Balancing wird als separate Maintenance-Evidence angezeigt. Ohne ausreichend vergleichbare Vorher-/Nachher-Daten wird keine Verbesserung behauptet. Die Komponente steuert weder Balancing noch Batterie, Wechselrichter oder Hycube. Persistiert wird nur ein kompaktes Tagesaggregat je physischer Zelle unter `aggregates/cell_risk/YYYY-MM-DD.json`. Alte Daily Results ohne Cell-Risk-Aggregat bleiben gültig und zeigen „Noch nicht ausreichend Daten“.
 
 ## Gesamtübersicht und Tagesdiagnosen
 

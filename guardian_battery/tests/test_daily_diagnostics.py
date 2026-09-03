@@ -90,6 +90,45 @@ def test_import_contract_contains_no_production_paths_or_runtime_dependencies():
         assert forbidden not in source
 
 
+def test_cell_risk_daily_component_is_compact_failure_isolated_and_uses_lookback(tmp_path):
+    timestamp = berlin_timestamp()
+    cells = [cell(timestamp + index, current=-2, c8=3200) for index in range(300)]
+    sources = source_set(tmp_path, [management(timestamp, -25)], cells,
+                         [position(datetime.fromtimestamp(timestamp - 3600,
+                                                         timezone.utc).isoformat())])
+    result = run(tmp_path, sources)
+    component = result["components"]["cell_risk"]
+    assert component["status"] == "complete" and component["metrics"]["cell_count"] == 15
+    aggregate_path = tmp_path / "output/aggregates/cell_risk/2026-08-31.json"
+    aggregate = json.loads(aggregate_path.read_text())
+    assert len(aggregate["cells"]) == 15 and len(aggregate["top10"]) == 10
+    assert aggregate["top10"][0]["physical_serial"] == SERIAL
+    assert aggregate["top10"][0]["current_position"] == 5
+    assert not list((tmp_path / "output/aggregates/cell_risk").rglob("*.jsonl"))
+    assert all("voltages_mv" not in row for row in aggregate["cells"])
+
+
+def test_cell_risk_no_history_is_not_a_daily_failure(tmp_path):
+    timestamp = berlin_timestamp()
+    result = run(tmp_path, source_set(tmp_path, [management(timestamp, -25)]))
+    assert result["overall_status"] == "partial"
+    assert result["components"]["cell_risk"]["status"] == "complete"
+    assert result["components"]["cell_risk"]["warnings"] == [
+        "no_qualifying_cell_risk_samples"]
+
+
+def test_cell_risk_exception_isolated_from_existing_daily_component(tmp_path, monkeypatch):
+    timestamp = berlin_timestamp()
+    sources = source_set(tmp_path, [management(timestamp, -25)], [cell(timestamp)])
+    monkeypatch.setattr(daily, "analyze_cell_risk",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("risk failed")))
+    result = run(tmp_path, sources)
+    assert result["components"]["bms_management"]["status"] == "partial"
+    assert result["components"]["cell_risk"]["status"] == "failed"
+    assert result["components"]["cell_risk"]["errors"][0]["type"] == "RuntimeError"
+    assert result["persisted"] is True
+
+
 @pytest.mark.parametrize("day,hours", [("2026-02-01", 24),
                                         ("2026-03-29", 23),
                                         ("2026-10-25", 25)])
