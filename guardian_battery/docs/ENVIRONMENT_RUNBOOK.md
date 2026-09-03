@@ -1,6 +1,33 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-09-02
+Stand: 2026-09-03
+
+## Guardian Battery 0.7.22 – SOC UI Cleanup + Predictive Cell Risk V2
+
+### Versions- und Datenvertrag
+
+- Guardian/Add-on: `0.7.22`; Diagnostic Engine unverändert `0.4.12`.
+- Cell Risk: Algorithmus `guardian_cell_risk_v2_1`, Formel `2.0.0`, Klassifikation `1.0.0`.
+- Zellidentität ist `physical_serial + cell_number`. Positionen werden ausschließlich zeitbezogen aus Position History projiziert, nie aus ADR oder heutiger Position abgeleitet.
+- Daily Derived Data liegt kompakt unter `SHARE_DIR / "diagnostics" / "aggregates" / "cell_risk" / "YYYY-MM-DD.json"`. Raw Cell History wird nicht verändert und nicht bei UI-Aufrufen gescannt.
+
+Read-only API innerhalb des bestehenden dynamischen Guardian-Ingress:
+
+```text
+GET api/diagnostics/cell-risk/top10/YYYY-MM-DD
+GET api/diagnostics/cell-risk/cell/YYYY-MM-DD/<physical_serial>/<cell_number>
+```
+
+POST, PUT, PATCH und DELETE bleiben unzulässig. Cell Risk hat keine Steuer- oder Alarmwirkung und sendet keine Befehle an Pylontech, Hycube, Wechselrichter, Wallbox oder Home-Assistant-Aktoren. Der Score ist kein SOH, keine Ausfallwahrscheinlichkeit und keine Restlebensdauer.
+
+### Source, Installation und produktive Daten getrennt prüfen
+
+1. Source und Add-on-Metadaten müssen `0.7.22` ausweisen.
+2. Die installierte Add-on-Version ändert sich erst durch einen separaten Build beziehungsweise eine separate Installation.
+3. Produktive Risk-Aggregate entstehen erst nach abgeschlossenen Daily Runs. Fehlende ältere Aggregate bedeuten „Noch nicht ausreichend Daten“ und nicht Nullrisiko.
+4. Nach separater Installation SOC-Einzel/Vergleich, Tooltips, gruppierte Legende, Top-10, Zelldetail, Risk History und Rücknavigation auf Desktop und Smartphone real abnehmen.
+
+Der synthetische Entwicklungs-Audit mit 37.061 Modulstichproben ergab etwa 11,105 s initiale Analysezeit, 212,41 MiB Peak-RAM und 149,04 KiB Aggregatgröße; Top-10- und Detail-API lagen bei etwa 0,934 ms beziehungsweise 1,914 ms. Diese Werte sind nicht produktiv gemessen und ersetzen keine kontrollierte Abnahme.
 
 ## Guardian Battery 0.7.21 – Hycube Policy Boundaries + SOC Timeline
 

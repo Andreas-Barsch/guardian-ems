@@ -1,4 +1,4 @@
 """Central Guardian Battery software and diagnostic engine versions."""
 
-GUARDIAN_VERSION = "0.7.21"
+GUARDIAN_VERSION = "0.7.22"
 DIAGNOSTIC_ENGINE_VERSION = "0.4.12"

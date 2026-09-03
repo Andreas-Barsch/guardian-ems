@@ -1,5 +1,17 @@
 # Guardian Battery Changelog
 
+## 0.7.22 – SOC UI Cleanup + Predictive Cell Risk V2
+
+- Bereinigt die SOC-History-Ansichten: „Einzel“ zeigt nur das gewählte Pylontech-Modul, „Vergleich“ alle vorhandenen Modul-SOCs. Beide Ansichten behalten Hycube Battery Capacity, drei zeitgültige Policy-Bereichsgrenzen, Phasenflächen und Maintenance-Marker. Die Modulauswahl bleibt im reinen SOC-Vergleich verborgen, intern aber für die Rückkehr zur Einzelansicht erhalten.
+- Korrigiert messgrößenspezifische Tooltips und gruppiert die SOC-Legende nach Pylontech, Hycube und Hycube-Bereichsgrenzen. Modul-SOC, Modulstrom und Hycube-Werte erhalten keine Zellbezeichnung; Policy-Grenzen zeigen vollständigen Namen, Grenzwert und vier Policywerte ohne Abschaltbehauptung.
+- Ergänzt Predictive Cell Risk V2 (`guardian_cell_risk_v2_1`, Formel `2.0.0`, Klassifikation `1.0.0`) mit deterministischer Top-10 und Detailansicht. Primäridentität ist `physical_serial + cell_number`; Positionen stammen ausschließlich zeitbezogen aus Position History. Die Zellgruppen sind G1/Z1–5, G2/Z6–10 und G3/Z11–15.
+- Kombiniert relative Modul-/Gruppenabweichung, qualifizierte Lowest-Persistenz, Lastempfindlichkeit und Verschlechterungstrend über zwei unveränderte Erkennungspfade. Confidence beschreibt nur die Datenqualität und beeinflusst weder Score noch Rang.
+- Persistiert kompakte Daily-Risk-History unter `aggregates/cell_risk/YYYY-MM-DD.json`. API und Guardian Diagnostics lesen Top-10, Zelldetails und Risk History aus Derived Data, ohne bei UI-Aufrufen Raw Cell History zu scannen oder zu verändern.
+- Zeigt Balancing-/Maintenance-Kontext separat. Es gibt kein automatisches Balancing, keinen Score-Abzug allein wegen Maintenance und keine Verbesserungsbehauptung ohne vergleichbare Vorher-/Nachher-Evidence.
+- Der Risk Score ist ein Guardian-Engineering-Priorisierungswert, ausdrücklich kein SOH, keine Ausfallwahrscheinlichkeit, keine Restlebensdauer, kein Herstellerwert und kein bestehender Alarmstatus. Cell-, Modul- und Stackstatus, Alarmgrenzen, MQTT, BMS Management, Hycube Policy und Kausalitätsentscheidung bleiben unverändert; die Diagnostic Engine bleibt `0.4.12`.
+- Der synthetische Entwicklungs-Audit mit 37.061 Modulstichproben ergab etwa 11,105 s initiale Analysezeit, 212,41 MiB Peak-RAM, 149,04 KiB Risk-Aggregat sowie etwa 0,934 ms Top-10- und 1,914 ms Detail-API-Latenz. Dies sind keine produktiven Messwerte.
+- Guardian Battery und Add-on sind `0.7.22`.
+
 ## 0.7.21 – Hycube Policy Boundaries + SOC Timeline
 
 - Zeigt Hycube Battery Capacity weiterhin als separate, read-only erfasste Systemangabe im SOC-Zeitverlauf; sie wird nicht als Stack-SOC oder automatisch als Mittelwert der Modul-SOCs interpretiert (`aggregation_rule=not_verified`).
