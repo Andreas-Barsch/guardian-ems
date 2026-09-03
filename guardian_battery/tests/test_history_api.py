@@ -2,6 +2,8 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from event_overlay import EventOverlayAdapter
 from history_api import HistoryApi
 from history_series import CellHistorySeries
@@ -69,7 +71,7 @@ def test_series_without_maintenance_is_unchanged_and_has_no_markers(tmp_path):
     assert response.body["overlays"] == []
 
 
-def test_soc_timeline_projects_six_modules_and_hycube_received_at(tmp_path):
+def test_soc_timeline_single_projects_selected_module_and_hycube_received_at(tmp_path):
     maintenance, _, timeline = build(tmp_path)
     cell_directory = tmp_path / "cell_history"
     hycube_directory = tmp_path / "hycube_history"
@@ -89,7 +91,7 @@ def test_soc_timeline_projects_six_modules_and_hycube_received_at(tmp_path):
     response = api.handle("GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z&to=2026-09-02T09:00:00Z&module_number=3")
     assert response.status == 200
     projected = response.body["soc_timeline"]
-    assert [item["module_number"] for item in projected["module_series"]] == list(range(1, 7))
+    assert [item["module_number"] for item in projected["module_series"]] == [3]
     assert projected["hycube_series"]["points"] == [{
         "timestamp": "2026-09-02T08:00:20+00:00", "value": 82.0,
         "source": "hycube", "source_field": "BatteryCapacity",
@@ -101,6 +103,15 @@ def test_soc_timeline_projects_six_modules_and_hycube_received_at(tmp_path):
     assert projected["policy_evidence"] == "unavailable"
     assert projected["aggregation_rule"] == "not_verified"
 
+    comparison = api.handle(
+        "GET", "/api/history/series?metrics=soc&from=2026-09-02T08:00:00Z"
+        "&to=2026-09-02T09:00:00Z&module_number=3")
+    assert comparison.status == 200
+    assert [item["module_number"] for item in
+            comparison.body["soc_timeline"]["module_series"]] == list(range(1, 7))
+    assert (comparison.body["soc_timeline"]["hycube_series"]["points"] ==
+            projected["hycube_series"]["points"])
+
 
 def test_soc_timeline_omits_hycube_series_when_history_is_missing(tmp_path):
     maintenance, directory, timeline = build(tmp_path)
@@ -111,6 +122,20 @@ def test_soc_timeline_omits_hycube_series_when_history_is_missing(tmp_path):
     response = api.handle("GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z&to=2026-09-02T09:00:00Z&module_number=1")
     assert response.status == 200
     assert response.body["soc_timeline"]["hycube_series"] is None
+
+
+@pytest.mark.parametrize("selected", [1, 6])
+def test_soc_timeline_single_keeps_only_requested_edge_module(tmp_path, selected):
+    _, directory, api = api_env(tmp_path)
+    timestamp = datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp()
+    for module in range(1, 7):
+        append_sample(directory, timestamp + module, module, 70 + module)
+    response = api.handle(
+        "GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z"
+        f"&to=2026-09-02T09:00:00Z&module_number={selected}")
+    assert response.status == 200
+    assert [item["module_number"] for item in
+            response.body["soc_timeline"]["module_series"]] == [selected]
 
 
 def test_soc_timeline_projects_time_valid_policy_segments_without_backdating(tmp_path):

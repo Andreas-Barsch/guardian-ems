@@ -205,7 +205,9 @@ class HistoryApi:
                           "relative_endpoints": "observation_only",
                           "bms_limit_requires_direct_evidence": True},
             "soc_timeline": {
-                "module_series": bundle.get("soc_module_series", []),
+                "module_series": (bundle.get("soc_module_series", []) if combined else
+                                  [item for item in bundle.get("soc_module_series", [])
+                                   if item.get("module_number") == module_number]),
                 "hycube_series": hycube if hycube and hycube["points"] else None,
                 "policy_series": policy_series,
                 "policy_evidence": ("observed" if any(

@@ -287,7 +287,8 @@ def test_policy_http_failures_preserve_raw_and_do_not_replace_valid_policy(tmp_p
                                 opener=Opener(Response(b'{"error":"unavailable"}', status=status)))
     with pytest.raises(ValueError, match="http_status"):
         collector.collect_policy_once()
-    records = [json.loads(line) for line in next((tmp_path / "policy").glob("*.jsonl")).read_text().splitlines()]
+    records = [json.loads(line) for path in sorted((tmp_path / "policy").glob("*.jsonl"))
+               for line in path.read_text().splitlines()]
     assert records[-1]["http_status"] == status
     assert records[-1]["raw_response"] == '{"error":"unavailable"}'
     assert policy_history._latest_valid()["normalMode"] == 82

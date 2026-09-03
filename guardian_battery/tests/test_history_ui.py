@@ -35,6 +35,48 @@ def test_soc_projection_distinguishes_module_hycube_and_policy_sources():
     assert "Normalbetrieb: ${policy.normal_operation_pct}" in html
     assert "Batterieschutz: ${policy.battery_protection_pct}" in html
     assert "Kausalität nicht bestimmt" in html
+    assert "series.source==='pylontech'?'module_soc'" in html
+    assert "series.source==='hycube'?'hycube_capacity':'policy_boundary'" in html
+
+
+def test_soc_single_filters_selected_module_and_comparison_keeps_all_modules():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert "comparison||series.module_number===selected" in html
+    assert "selected=Number(byId('module').value)" in html
+    assert "const all=socLabels(data)" in html
+    assert "byId('module-control').hidden=combined&&metrics.every(metric=>metric==='soc')" in html
+    assert '<label id="module-control">Modul<select id="module"></select></label>' in html
+    assert "byId('module').value" in html
+    assert "byId('view-mode').onchange=updateControlState" in html
+
+
+def test_soc_tooltips_use_series_semantics_not_synthetic_cell_numbers():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert "function pointTooltip(point,metric,step)" in html
+    assert "point._series_type==='module_soc'" in html
+    assert "Modul ${moduleNumber}\\nSOC:" in html
+    assert "point._series_type==='hycube_capacity'" in html
+    assert "Hycube Battery Capacity\\n${value} %\\nQuelle: Hycube /data_row/" in html
+    assert "point._series_type==='policy_boundary'" in html
+    assert "${point._series_label}" in html
+    assert "Hycube-Konfiguration:" in html
+    assert "Kausalität nicht bestimmt" in html
+    assert "point._series_type==='cell_value'" in html
+    assert "Modul ${moduleNumber} · Zelle ${point.cell_number}" in html
+    assert "metric==='current'?'Strom'" in html
+    assert "p.cell_number?' · Zelle '" not in html
+    assert "point.cell_number?' · Zelle '" not in html
+
+
+def test_soc_legend_is_grouped_and_uses_compact_labels():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert "legendGroup('Pylontech')" in html
+    assert "legendGroup('Hycube')" in html
+    assert "legendGroup('Hycube-Bereichsgrenzen')" in html
+    assert "`Modul ${label.module_number}`" in html
+    assert "?'Battery Capacity':label.label.replace('Bereichsgrenze ','')" in html
+    assert ".legend-group{display:flex" in html
+    assert "flex-wrap:wrap" in html
 
 
 def test_overlay_uses_server_deep_link_and_safe_text_rendering():
@@ -174,7 +216,7 @@ def test_multicell_controls_are_wired_to_dom_and_query():
 
 def test_single_is_default_and_combined_mode_has_independent_stacked_tracks():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
-    assert '<option value="single">Einzel</option><option value="combined">Gemeinsam</option>' in html
+    assert '<option value="single">Einzel</option><option value="combined">Vergleich</option>' in html
     assert '<fieldset id="metric-picker" hidden>' in html
     assert "Alle Messgrößen" in html and 'id="metrics-none"' in html
     for metric in ("soc", "current", "cell_voltage", "cell_temperature"):
