@@ -1,5 +1,20 @@
 # Guardian Battery Changelog
 
+## 0.7.23 – History UX/Performance + Collector Timing Recovery
+
+- Beschleunigt History-Abfragen durch frühe Modulfilterung, einen Scan für mehrere ausgewählte Module, getrennte Extrema-Sammler, einmaliges Sammeln der SOC-System-Evidence, einmaliges Lesen der Maintenance History, einen abfragespezifischen Cache und begrenztes extrema-erhaltendes Downsampling. Der lokale Referenzbenchmark lag bei etwa 0,020 s für einen, 0,053 s für drei, 0,132 s für sieben und 0,555 s für 30 Tage; dies sind keine produktiven Messwerte.
+- Vereinheitlicht Einzel- und Vergleichsfilter: SOC unterstützt ein Modul oder alle Module, zellbezogene Einzelansichten erfordern ein konkretes Modul und Vergleiche verwenden explizit ausgewählte Messgrößen, Module und Zellen. Hycube Battery Capacity und Hycube Policy bleiben davon unabhängige System-Evidence.
+- Überarbeitet die History UX mit breiter Messgrößenauswahl, konsistenten Controls, Modul-Mehrfachauswahl sowie den Zuständen CURRENT, DIRTY und LOADING. Beim Laden erscheinen Spinner und Overlay unmittelbar, während vorhandene Diagramme sichtbar bleiben.
+- Sortiert normale Diagnostics-Modulkarten numerisch. Predictive Risk Top-10 bleibt score-basiert und ergänzt eine sichtbare Detailaktion, Maus-/Touch-/Tastaturbedienung, Rücknavigation, deutsche Balancing- und Confidence-Texte sowie verständliche Trenddarstellung.
+- Priorisiert die Messwerterfassung: erfolgreiche sequenzielle BAT-Abfragen werden mit individueller Samplezeit und zeitgültiger physischer Identität unmittelbar append-only in Raw Cell History geschrieben, bevor rekonstruierbarer Derived State verarbeitet wird. Raw Evidence wird weder koalesziert noch verworfen.
+- Ersetzt dauerhafte Poll-Drift durch getrennte monotonic Deadlines für Haupt- und Cell-Poll. Verpasste Slots werden ohne Catch-up-Kaskade übersprungen; Pylontech Console und alle PWR-/STAT-/INFO-/BAT-Kommandos bleiben single-owner und strikt sequenziell.
+- Lädt Position History einmal je Cell-Runde und löst alle Module weiterhin zum jeweiligen historischen Samplezeitpunkt auf. Es gibt keine ADR→Position-Abkürzung und keine rückwirkende Verwendung heutiger Positionen.
+- Verlegt große Diagnostic- und Aggregate-Snapshot-Persistierung in einen bounded Single-Writer mit höchstens einer pending Derived Generation. Persistierung bleibt atomar und restartfähig; Fehlerstatus und begrenzter Shutdown sind sichtbar. Cell-Diagnostic-, Alarm-, MQTT- und Risk-Semantik bleiben unverändert.
+- Ergänzt bounded Process-Lifetime-Observability für Cycle-/Cell-Intervalle, Deadline-Lateness, Overruns, PWR-/STAT-/INFO-/BAT-Dauern, Raw-History-, Identity-, Analyse-, Store-, Aggregate-, MQTT- und Topology-Zeiten, Stack-Sample-Spread sowie effektive Cell-Intervalle je physischer Seriennummer. Diese Werte sind Betriebs-Evidence und keine Batteriediagnose.
+- Vor dem Fix zeigte die produktive read-only Cell History einen Mediananstieg von etwa 69 s am 03.–04.09.2026 auf etwa 101–102 s am 05.–07.09.2026; M5 stieg von 68,97 auf 101,88 s und M6 von 68,98 auf 101,57 s. Die Verschlechterung ist verifiziert, ihr konkreter synchroner Verursacher nicht abschließend bestimmt.
+- **Noch produktiv zu verifizieren:** Nach Installation müssen effektives Cell-Sampling, Hauptpoll und Overrun-Verteilung über mehrere Stunden gemessen werden. Zielwerte sind Cell-Median ≤70 s, Cell-P95 ≤90 s und Hauptpoll-Median ohne Cell-Runde ≤11 s. Vor dieser Abnahme wird nicht behauptet, das Samplingproblem sei vollständig behoben.
+- Guardian Battery und Add-on sind `0.7.23`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.22 – SOC UI Cleanup + Predictive Cell Risk V2
 
 - Bereinigt die SOC-History-Ansichten: „Einzel“ zeigt nur das gewählte Pylontech-Modul, „Vergleich“ alle vorhandenen Modul-SOCs. Beide Ansichten behalten Hycube Battery Capacity, drei zeitgültige Policy-Bereichsgrenzen, Phasenflächen und Maintenance-Marker. Die Modulauswahl bleibt im reinen SOC-Vergleich verborgen, intern aber für die Rückkehr zur Einzelansicht erhalten.

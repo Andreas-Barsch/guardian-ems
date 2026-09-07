@@ -1,6 +1,43 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-09-03
+Stand: 2026-09-07
+
+## Guardian Battery 0.7.23 – History UX/Performance + Collector Timing Recovery
+
+### Versionen und unveränderte Fachverträge
+
+- Guardian/Add-on: `0.7.23`; Diagnostic Engine: `0.4.12`.
+- Cell Risk bleibt `guardian_cell_risk_v2_1`, Formel `2.0.0`, Klassifikation `1.0.0`. Scores, Klassen, Cell-/Modul-/Stackstatus, Alarmgrenzen, MQTT, Hycube Policy und RS485-Protokoll bleiben unverändert.
+- Pylontech Console bleibt single-owner. PWR, STAT, INFO und BAT werden niemals parallel oder über eine zweite Console-Instanz ausgeführt.
+
+### Scheduler und Measurement-first
+
+- Hauptpoll-Default: 10 Sekunden. Cell-/BAT-Default: 60 Sekunden Start→Start.
+- Beide Scheduler verwenden monotonic Deadlines. Nach einem Overrun wird die nächste zukünftige Deadline gewählt; es gibt keine Busy Loop oder Catch-up-Kaskade.
+- Priorität ist P0 Acquisition/Raw Persistence, P1 notwendiger Live-State und bestehende Live-Alarme, P2 Derived Cell Diagnostics, P3 Aggregate/Convenience Persistence.
+- Jede erfolgreiche BAT-Antwort behält ihren individuellen `cell_sample_at` sowie unveränderte `pwr_sample_at`-, `pwr_age_seconds`- und Qualitätsprovenienz. Sie wird nach Parsing und zeitgültiger Identitätsauflösung unmittelbar append-only geschrieben. Raw Cell History ist Source of Truth und wird nicht koalesziert.
+- Position History wird einmal je Cell-Runde vorbereitet, gilt nur für diese Runde und wird je Samplezeit ausgewertet. Heutige Positionen und ADR→Position werden nicht rückwirkend verwendet.
+- Diagnostic- und Aggregate-Snapshots schreibt ein bounded Single-Writer atomar. Höchstens eine wartende Derived Generation wird gehalten; ältere noch nicht gestartete Derived Snapshots dürfen zugunsten des neuesten rekonstruierten Zustands koalesziert werden. Raw Evidence ist davon ausgeschlossen. Beim Shutdown wird begrenzt auf den Writer gewartet; Fehler werden sichtbar und beenden die Acquisition nicht.
+
+### Process-Lifetime Timing Observability
+
+`collector_timing` enthält einen aktuellen Zustand und Rolling-Summaries über höchstens 60 Beobachtungen, darunter Cycle-/Cell-Dauer, effektive Poll-/Cell-Intervalle, Cell-Deadline-Lateness, Overrun Count/Maximum, PWR-/STAT-/INFO-/BAT-Timing, BAT-Median/Maximum, Identity-, Raw-History-, Analyse-, Store-, Aggregate-, MQTT- und Topology-Zeit, Stack-Sample-Spread sowie effektive Cell-Intervalle je `physical_serial`.
+
+Die Werte beginnen bei jedem Add-on-Start neu. Sie sind keine persistente Langzeitmetrik, verändern keinen Batterie-, Alarm- oder Diagnosestatus und dürfen nicht als Ursache interpretiert werden.
+
+### Produktive Sampling-Abnahme nach separatem Deployment
+
+1. Add-on mit unveränderten Poll-/Cell-Intervallen normal starten.
+2. Mindestens drei Stunden, bevorzugt sechs bis zwölf Stunden normalen Betrieb abwarten.
+3. `collector_timing` ausschließlich read-only prüfen.
+4. Cell History je `physical_serial` auswerten und Samples, Samples/h, Median, P90, P95, P99, Maximum sowie Anteile über 75, 90 und 120 Sekunden berichten.
+5. Mit der Vor-Fix-Baseline von etwa 101–102 Sekunden Median vergleichen. Ziel: Median ≤70 Sekunden, P95 ≤90 Sekunden; Hauptpoll ohne Cell-Runde Median ≤11 Sekunden.
+6. Bei Zielverfehlung nicht die Intervalle kaschierend reduzieren. Zuerst BAT-Median/-Maximum, Stack-Sample-Spread, Deadline-Lateness, Cycle-/Cell-Dauer, Diagnostic Store Save, Cell Analysis, MQTT und Position/Topology auswerten.
+7. Einzelne BAT-Timeouts dürfen eine Runde verlängern. Danach muss sich der Scheduler auf zukünftige Deadlines stabilisieren; mehrere Timeouts dürfen keinen Catch-up-Sturm erzeugen.
+
+Vor dem Fix zeigte die read-only Produktionsauswertung am 03.–04.09.2026 rund 69 Sekunden Median und am 05.–07.09.2026 rund 101–102 Sekunden. M5 änderte sich von 68,97 auf 101,88 Sekunden, M6 von 68,98 auf 101,57 Sekunden. Die Verschlechterung ist verifiziert; der konkrete synchrone Verursacher bleibt offen. Die Samplingverbesserung von 0.7.23 ist bis zur obigen produktiven Abnahme **noch nicht produktiv verifiziert**.
+
+Raw Cell History bleibt auch bei verzögertem oder fehlerhaftem Derived Writer und bei BAT-Timeout eines anderen Moduls für alle erfolgreichen Modulabfragen prioritär erhalten. Dieses Source-Release führt kein Deployment und keinen produktiven `/share`- oder `/config`-Zugriff aus.
 
 ## Guardian Battery 0.7.22 – SOC UI Cleanup + Predictive Cell Risk V2
 
