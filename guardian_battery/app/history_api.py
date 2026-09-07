@@ -7,7 +7,7 @@ import json
 import time
 from urllib.parse import parse_qs, urlsplit
 
-from event_overlay import EventOverlayAdapter, OverlayContext
+from event_overlay import EventOverlayAdapter, OverlayContext, matches_chart
 from history_series import CellHistorySeries, SERIES_METRICS, SeriesHistoryError
 from rs485_evidence import RS485_SERIES_METRICS, Rs485HistorySeries
 from hycube_evidence import (HycubeBatteryCapacitySeries, HycubeHistoryError,
@@ -23,7 +23,8 @@ from maintenance_diagnostics import project_maintenance_boundaries
 LOG = logging.getLogger(__name__)
 HISTORY_API_ROUTE = "/api/history/series"
 HISTORY_FILTERS = frozenset(
-    {"metric", "metrics", "from", "to", "module_number", "cell_number", "cell_numbers",
+    {"metric", "metrics", "from", "to", "module_number", "selected_modules",
+     "cell_number", "cell_numbers",
      "voltage_cell_numbers", "temperature_cell_numbers", "include_archived", "active",
      "analysis_mode", "what_if_low_soc_percent", "what_if_high_soc_percent",
      "what_if_charge_current_a", "what_if_discharge_current_a"}
@@ -81,7 +82,7 @@ class HistoryApi:
         if any(len(values) != 1 for values in raw.values()):
             raise HistoryApiProblem("query parameters must occur once")
         values = {key: items[0] for key, items in raw.items()}
-        missing = {"from", "to", "module_number"} - set(values)
+        missing = {"from", "to"} - set(values)
         if missing:
             raise HistoryApiProblem(f"missing query parameters: {', '.join(sorted(missing))}")
         if ("metric" in values) == ("metrics" in values):
@@ -95,7 +96,18 @@ class HistoryApi:
         timestamp_to = self._timestamp(values["to"], "to")
         if timestamp_from > timestamp_to:
             raise HistoryApiProblem("from must not exceed to")
-        module_number = self._integer(values["module_number"], "module_number", 1, 6)
+        module_number = self._integer(values.get("module_number"), "module_number", 1, 6)
+        selected_modules = self._integers(values.get("selected_modules"),
+                                          "selected_modules", 1, 6)
+        if module_number is None and selected_modules is None:
+            raise HistoryApiProblem("one of module_number or selected_modules is required")
+        if module_number is not None and selected_modules is not None:
+            raise HistoryApiProblem("module_number and selected_modules are mutually exclusive")
+        modules = selected_modules or (module_number,)
+        if combined and selected_modules is None and metrics == ("soc",):
+            # Preserve the pre-0.7.23 comparison contract for external callers.
+            modules = tuple(range(1, 7))
+        module_number = module_number or modules[0]
         cell_number = self._integer(values.get("cell_number"), "cell_number", 1, 15)
         cell_numbers = self._integers(values.get("cell_numbers"), "cell_numbers", 1, 15)
         voltage_cells = self._integers(values.get("voltage_cell_numbers"),
@@ -110,6 +122,8 @@ class HistoryApi:
             raise HistoryApiProblem("metric-specific cell selections require combined mode")
         if cell_numbers is not None and metrics[0] not in {"cell_voltage", "cell_temperature"}:
             raise HistoryApiProblem("cell_numbers requires a cell metric")
+        if not combined and len(modules) > 1 and metrics[0] != "soc":
+            raise HistoryApiProblem("single view supports multiple modules only for soc")
         if voltage_cells is not None and "cell_voltage" not in metrics:
             raise HistoryApiProblem("voltage_cell_numbers requires cell_voltage")
         if temperature_cells is not None and "cell_temperature" not in metrics:
@@ -130,36 +144,55 @@ class HistoryApi:
         bundle = self.series.query_bundles(
             requests=cell_requests or [{"metric": "soc", "cell_number": None, "cell_numbers": None}],
             timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-            module_number=module_number, include_all_module_soc="soc" in metrics)
+            module_number=module_number, module_numbers=modules,
+            include_all_module_soc="soc" in metrics)
         hycube = (self.hycube_series.query(timestamp_from=timestamp_from,
                                            timestamp_to=timestamp_to,
                                            max_points=max(4, 6000 // 7))
                   if "soc" in metrics and self.hycube_series is not None else None)
+        policy_started = time.perf_counter()
         policy_series = (self.hycube_policy_history.query(
             timestamp_from=timestamp_from, timestamp_to=timestamp_to)
             if "soc" in metrics and self.hycube_policy_history is not None else [])
+        policy_seconds = time.perf_counter() - policy_started
         projected_series = list(bundle["series"] if cell_requests else [])
         if any(item["metric"] in RS485_SERIES_METRICS for item in requests):
             if self.rs485_series is None:
                 raise HistoryApiProblem("RS485 history is unavailable")
             rs485_requests = [item for item in requests if item["metric"] in RS485_SERIES_METRICS]
-            projected_series.extend(self.rs485_series.query_bundles(
-                rs485_requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-                module_number=module_number))
+            for selected_module in modules:
+                items = self.rs485_series.query_bundles(
+                    rs485_requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                    module_number=selected_module)
+                for item in items:
+                    target = next((existing for existing in projected_series
+                                   if existing["metric"] == item["metric"]), None)
+                    points = [{**point, "module_number": selected_module}
+                              for point in item["points"]]
+                    if target is None:
+                        projected_series.append({**item, "points": points})
+                    else:
+                        target["points"].extend(points)
+                        target["raw_points"] = target.get("raw_points", 0) + item.get(
+                            "raw_points", len(points))
         by_metric = {item["metric"]: item for item in projected_series}
         projected_series = [by_metric[metric] for metric in metrics]
         marker_cells = (tuple(sorted(set((voltage_cells or ()) + (temperature_cells or ()))))
                         or (None,)) if combined else cell_numbers or (cell_number,)
-        projected = [marker for selected_cell in marker_cells
-                     for marker in self.overlays.markers(OverlayContext(
-                         timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-                         module_number=module_number, cell_number=selected_cell,
-                         event_types=("maintenance",), include_archived=include_archived,
-                         active=active))]
+        maintenance_started = time.perf_counter()
+        candidates = self.overlays.markers(OverlayContext(
+            timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+            event_types=("maintenance",), include_archived=include_archived,
+            active=active))
+        projected = [marker for marker in candidates if any(
+            matches_chart(marker, module_number=selected_module,
+                          cell_number=selected_cell)
+            for selected_module in modules for selected_cell in marker_cells)]
         markers = list({(marker.event_type, marker.maintenance_event_id, marker.timestamp,
                          marker.title): marker for marker in projected}.values())
         markers.sort(key=lambda marker: (marker.timestamp, marker.event_type,
                                          marker.maintenance_event_id or marker.title))
+        maintenance_seconds = time.perf_counter() - maintenance_started
         maintenance_boundaries = project_maintenance_boundaries(
             [{**marker.to_dict(), "occurred_at": marker.timestamp}
              for marker in markers if marker.event_type == "maintenance"]
@@ -191,11 +224,13 @@ class HistoryApi:
             visual_parameters = analysis["visual_parameters"]
         response = {
             "series": [{**{key: value for key, value in item.items() if key != "raw_points"},
-                        "module_number": module_number} for item in bundle["series"]]
+                          "module_number": module_number,
+                          "selected_modules": list(modules)} for item in bundle["series"]]
                       if combined else {
                           **{key: value for key, value in bundle["series"][0].items()
                              if key != "raw_points"},
                           "module_number": module_number,
+                          "selected_modules": list(modules),
                       },
             "overlays": [marker.to_dict() for marker in markers],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
@@ -205,9 +240,7 @@ class HistoryApi:
                           "relative_endpoints": "observation_only",
                           "bms_limit_requires_direct_evidence": True},
             "soc_timeline": {
-                "module_series": (bundle.get("soc_module_series", []) if combined else
-                                  [item for item in bundle.get("soc_module_series", [])
-                                   if item.get("module_number") == module_number]),
+                "module_series": bundle.get("soc_module_series", []),
                 "hycube_series": hycube if hycube and hycube["points"] else None,
                 "policy_series": policy_series,
                 "policy_evidence": ("observed" if any(
@@ -226,18 +259,42 @@ class HistoryApi:
                                "raw_measurements_unchanged": True,
                                "diagnostic_phase_unchanged": True},
         }
-        response["series"] = ([{**item, "module_number": module_number} for item in projected_series]
-                              if combined else {**projected_series[0], "module_number": module_number})
+        response["series"] = ([{**item, "module_number": module_number,
+                                "selected_modules": list(modules)}
+                               for item in projected_series]
+                              if combined else {**projected_series[0],
+                                                "module_number": module_number,
+                                                "selected_modules": list(modules)})
         response["performance"] = {
             "raw_records": bundle["raw_records"] + (hycube["raw_records"] if hycube else 0),
+            "raw_file_records": bundle.get("raw_file_records", bundle["raw_records"]),
+            "files": bundle.get("file_count", 0),
+            "selected_modules": list(modules),
+            "series_count": len(projected_series),
             "raw_points": sum(item.get("raw_points", len(item["points"])) for item in projected_series),
             "display_points": sum(len(item["points"]) for item in projected_series),
             "history_read_seconds": round(bundle["read_seconds"] + (hycube["read_seconds"] if hycube else 0), 6),
             "downsample_seconds": round(bundle["downsample_seconds"] + (hycube["downsample_seconds"] if hycube else 0), 6),
             "phase_projection_seconds": round(phase_seconds, 6), "cache_hit": bundle["cache_hit"],
+            "policy_seconds": round(policy_seconds, 6),
+            "maintenance_seconds": round(maintenance_seconds, 6),
             "backend_seconds": round(time.perf_counter() - backend_started, 6),
         }
-        response["performance"]["payload_bytes"] = len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode())
+        serialization_started = time.perf_counter()
+        response["performance"]["payload_bytes"] = len(json.dumps(
+            response, ensure_ascii=False, separators=(",", ":")).encode())
+        response["performance"]["serialization_seconds"] = round(
+            time.perf_counter() - serialization_started, 6)
+        LOG.debug("History performance window=%s..%s files=%d raw_records=%d "
+                  "selected_modules=%s series=%d points_before=%d points_after=%d "
+                  "cache=%s total_ms=%.1f",
+                  timestamp_from, timestamp_to, response["performance"]["files"],
+                  response["performance"]["raw_records"], list(modules),
+                  response["performance"]["series_count"],
+                  response["performance"]["raw_points"],
+                  response["performance"]["display_points"],
+                  "hit" if response["performance"]["cache_hit"] else "miss",
+                  1000 * (time.perf_counter() - backend_started))
         return ApiResponse(200, response)
 
     @staticmethod

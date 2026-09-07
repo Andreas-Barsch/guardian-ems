@@ -13,8 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from cell_diagnostics import CellDiagnosticStore, CellSample, DIAGNOSTIC_PARAMETER_META
-from cell_history import CellHistoryWriter, cell_history_timing
+from cell_diagnostics import CellDiagnosticStore, DIAGNOSTIC_PARAMETER_META
+from cell_acquisition import acquire_cell_round
+from cell_history import CellHistoryWriter
+from collector_timing import CollectorTiming, PeriodicDeadline
+from derived_persistence import DerivedPersistenceWorker
 from diagnostic_aggregates import DiagnosticAggregateStore
 from diagnostic_backfill import DiagnosticAggregateBackfill
 from current_condition_backfill import CurrentConditionBackfill
@@ -30,7 +33,7 @@ from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
 from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_text)
-from position_history import (DEFAULT_POSITION_HISTORY_FILE, documented_identity_at,
+from position_history import (DEFAULT_POSITION_HISTORY_FILE, DocumentedIdentityResolver,
                               current_presence, history_observation_ready,
                               missing_expected_positions,
                               resolve_maintenance_event_identities, update_observed_stack,
@@ -1166,6 +1169,10 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
 
     options = load_options()
+    timing = CollectorTiming(
+        float(options["poll_interval_seconds"]),
+        float(options["cell_diagnostics_interval_seconds"]),
+    )
     config_server = start_config_server()
     LOG.info("Guardian Konfigurationsmenü auf Port 8099 gestartet")
     config_history = ConfigHistory(CONFIG_HISTORY_FILE)
@@ -1200,7 +1207,8 @@ def main() -> None:
                       rs485_reader.management(), rs485_reader.identities(),
                       position_history_path=DEFAULT_POSITION_HISTORY_FILE),
                   "identities": rs485_reader.identities(),
-                  "history": rs485_writer.status() if rs485_writer else {}})
+                  "history": rs485_writer.status() if rs485_writer else {},
+                  "collector_timing": timing.snapshot()})
         if rs485_reader else None)
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
     try:
@@ -1238,11 +1246,16 @@ def main() -> None:
         )
     except Exception as exc:
         LOG.warning("Diagnostic aggregate backfill fehlgeschlagen: %s", exc)
+    poll_deadline = PeriodicDeadline(float(options["poll_interval_seconds"]))
+    cell_deadline = PeriodicDeadline(
+        float(options["cell_diagnostics_interval_seconds"]))
+    persistence_worker = DerivedPersistenceWorker(
+        cell_store, aggregate_store, timing=timing)
+    persistence_worker.start()
     maintenance_log = MaintenanceEventLog(DEFAULT_MAINTENANCE_EVENT_FILE)
     maintenance_events = ()
     maintenance_mtime_ns = None
     cell_history = CellHistoryWriter(CELL_HISTORY_DIR)
-    last_cell_poll = 0.0
     last_stat_poll = 0.0
     last_info_poll = 0.0
     bms_stat = {}
@@ -1283,11 +1296,16 @@ def main() -> None:
     try:
         while RUNNING:
             started = time.monotonic()
+            timing.cycle_started(time.time(), started)
+            poll_deadline.consume(started)
             modules: list[Module] = []
             try:
+                section_started = time.monotonic()
                 raw = console.command(options["command"])
+                timing.duration("pwr_request", time.monotonic() - section_started)
                 pwr_sample_at = time.time()
 
+                section_started = time.monotonic()
                 if options["raw_log"]:
                     (SHARE_DIR / "last_raw_pwr.txt").write_text(raw, encoding="utf-8")
 
@@ -1310,10 +1328,14 @@ def main() -> None:
                 trends = update_trends(modules, options)
                 incident = update_incident_state(status, alarms, options)
                 log_result(modules, status, alarms, bool(options["detailed_log"]))
+                timing.duration("pwr_processing", time.monotonic() - section_started)
                 now_wall=time.time(); cell_results={}
+                section_started = time.monotonic()
                 if modules and now_wall-last_stat_poll >= int(options["bms_stat_interval_seconds"]):
                     try:
+                        command_started = time.monotonic()
                         parsed=parse_stat(console.command("stat"))
+                        timing.duration("stat_request", time.monotonic() - command_started)
                         if parsed: bms_stat=parsed
                     except Exception as exc: LOG.warning("BMS stat: %s",exc)
                     last_stat_poll=now_wall
@@ -1322,14 +1344,19 @@ def main() -> None:
                 # werden sie mit dem bereits vorhandenen langsamen BMS-Stat-Intervall
                 # abgefragt und im Speicher zwischengespeichert.
                 if modules and now_wall-last_info_poll >= int(options["bms_stat_interval_seconds"]):
+                    info_started = time.monotonic()
                     for module in modules:
                         try:
+                            command_started = time.monotonic()
                             parsed_info = parse_info(console.command(f"info {module.module}"))
+                            timing.duration("info_request", time.monotonic() - command_started)
                             if parsed_info:
                                 module_infos[module.module] = parsed_info
                         except Exception as exc:
                             LOG.warning("BMS info Modul %s: %s", module.module, exc)
+                    timing.duration("info_requests_total", time.monotonic() - info_started)
                     last_info_poll = now_wall
+                timing.duration("stat_info", time.monotonic() - section_started)
 
                 update_observed_stack(
                     module_infos, present_positions={module.module for module in modules},
@@ -1372,39 +1399,41 @@ def main() -> None:
                 # Identity is resolved before a new raw sample is persisted, so
                 # the first sample after a confirmed swap cannot inherit the
                 # physical serial previously installed at this position.
-                if options["cell_diagnostics_enabled"] and modules and now_wall-last_cell_poll >= int(options["cell_diagnostics_interval_seconds"]):
-                    for module in modules:
-                        try:
-                            rows=parse_bat(console.command(f"bat {module.module}"))
-                            if rows:
-                                sample_time = time.time()
-                                try:
-                                    serial, position_history_id = documented_identity_at(
-                                        DEFAULT_POSITION_HISTORY_FILE, module.module,
-                                        datetime.fromtimestamp(sample_time, timezone.utc),
-                                    )
-                                except Exception as identity_exc:
-                                    LOG.warning("Physische Identität Modul %s unklar: %s", module.module, identity_exc)
-                                    serial, position_history_id = None, None
-                                sample = CellSample(
-                                    sample_time, module.module,
-                                    [r['voltage_mv'] for r in rows], module.current_a,
-                                    module.soc_percent, [r['temperature_c'] for r in rows],
-                                    [r['balancing'] for r in rows], serial, position_history_id,
-                                )
-                                cell_store.add(sample)
-                                aggregate_store.add(sample, options)
-                                try:
-                                    cell_history.append({**asdict(sample), "module_serial": serial,
-                                                         "position_history_id": position_history_id,
-                                                         "identity_source": "position_history" if serial else "unknown",
-                                                         **cell_history_timing(
-                                                             sample_time,
-                                                             module.pwr_sample_at)})
-                                except Exception as history_exc:
-                                    LOG.warning("Cell History Modul %s: %s", module.module, history_exc)
-                        except Exception as exc: LOG.warning("Zelldiagnostik Modul %s: %s",module.module,exc)
-                    last_cell_poll=now_wall; cell_store.save(); aggregate_store.save()
+                if (options["cell_diagnostics_enabled"] and modules
+                        and cell_deadline.due()):
+                    cell_started = time.monotonic()
+                    timing.cell_started(time.time(), cell_started,
+                                        cell_deadline.next_deadline)
+                    cell_deadline.consume(cell_started)
+                    try:
+                        identity_started = time.monotonic()
+                        identity_resolver = DocumentedIdentityResolver.from_path(
+                            DEFAULT_POSITION_HISTORY_FILE)
+                        identity_load_seconds = time.monotonic() - identity_started
+                    except Exception as identity_exc:
+                        identity_resolver = None
+                        identity_load_seconds = time.monotonic() - identity_started
+                        LOG.warning("Position History für Cell-Runde unklar: %s",
+                                    identity_exc)
+                    acquired_samples = acquire_cell_round(
+                        modules, console, identity_resolver, cell_history,
+                        parse_bat_fn=parse_bat, timing=timing,
+                        identity_resolution_base=identity_load_seconds)
+                    # Derived state follows durable append-only raw evidence. Its
+                    # expensive JSON serialization is handled by one coalescing
+                    # single-writer worker; Console ownership remains here.
+                    for sample in acquired_samples:
+                        cell_store.add(sample)
+                        aggregate_store.add(sample, options)
+                    persistence_worker.submit(
+                        cell_store.persistence_payload(),
+                        aggregate_store.persistence_payload(),
+                    )
+                    timing.cell_finished(time.monotonic() - cell_started)
+                    # If this round crossed another cell slot, skip that missed
+                    # slot instead of launching an immediate catch-up round.
+                    if cell_deadline.due():
+                        cell_deadline.consume()
 
                 try:
                     current_mtime_ns = maintenance_log.path.stat().st_mtime_ns if maintenance_log.path.exists() else None
@@ -1416,6 +1445,7 @@ def main() -> None:
                 except Exception as exc:
                     LOG.warning("Maintenance-Kontext nicht lesbar: %s", exc)
                     maintenance_events = ()
+                section_started = time.monotonic()
                 for module in modules:
                     latest_serial = cell_store.current_serial(module.module)
                     analysis = cell_store.analyse(
@@ -1425,6 +1455,8 @@ def main() -> None:
                     cell_results[module.module] = {
                         **analysis, "physical_module_serial": latest_serial
                     }
+                timing.duration("cell_analysis", time.monotonic() - section_started)
+                section_started = time.monotonic()
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
                     cell_results, bms_stat, module_infos,
@@ -1437,10 +1469,12 @@ def main() -> None:
                     rs485_mqtt.publish(rs485_reader.status(),
                                        rs485_management,
                                        rs485_writer.status())
+                timing.duration("mqtt_projection", time.monotonic() - section_started)
 
                 # Durable topology confirmation happens only after the complete
                 # poll and every projection/publish step succeeded. Live presence
                 # above remains immediate and independent.
+                section_started = time.monotonic()
                 update_observed_stack(
                     module_infos, present_positions={module.module for module in modules},
                     communication_healthy=bool(modules),
@@ -1455,6 +1489,7 @@ def main() -> None:
                         record_stable_observed_positions()
                     except Exception as exc:
                         LOG.warning("Positionshistorie konnte nicht fortgeschrieben werden: %s", exc)
+                timing.duration("topology_position", time.monotonic() - section_started)
 
             except Exception as exc:
                 LOG.exception("Abfrage fehlgeschlagen: %s", exc)
@@ -1469,8 +1504,34 @@ def main() -> None:
                     pass
 
             elapsed = time.monotonic() - started
-            time.sleep(max(1, int(options["poll_interval_seconds"]) - elapsed))
+            measured = timing.snapshot()
+            accounted = sum(float(measured.get(f"{name}_duration_seconds", 0.0) or 0.0)
+                            for name in ("pwr_request", "pwr_processing", "stat_info",
+                                         "cell_cycle", "cell_analysis",
+                                         "mqtt_projection", "topology_position"))
+            timing.duration("remaining_other", max(0.0, elapsed - accounted))
+            timing.cycle_finished(elapsed)
+            state = timing.snapshot()
+            if elapsed > float(options["poll_interval_seconds"]):
+                LOG.warning(
+                    "Collector timing overrun: cycle=%.2fs target=%ss "
+                    "cell_interval=%s target=%ss",
+                    elapsed, options["poll_interval_seconds"],
+                    ("unknown" if state.get("effective_cell_sampling_interval_seconds") is None
+                     else f'{state["effective_cell_sampling_interval_seconds"]:.2f}s'),
+                    options["cell_diagnostics_interval_seconds"],
+                )
+            # Move an elapsed deadline to the first future slot. This avoids the
+            # former permanent drift and also avoids an immediate catch-up poll.
+            if poll_deadline.due():
+                poll_deadline.consume()
+            time.sleep(poll_deadline.delay())
     finally:
+        try:
+            if not persistence_worker.stop():
+                LOG.warning("Derived diagnostic persistence did not stop within timeout")
+        except Exception as exc:
+            LOG.warning("Derived diagnostic persistence stop failed: %s", exc)
         if hycube_collector is not None:
             try:
                 hycube_collector.stop()

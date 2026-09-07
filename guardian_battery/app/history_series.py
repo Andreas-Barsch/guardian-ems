@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ DEFAULT_CELL_HISTORY_DIR = Path("/share/guardian_battery/cell_history")
 SERIES_METRICS = frozenset({"soc", "current", "cell_voltage", "cell_temperature",
                             *STACK_SOC_METRICS})
 DEFAULT_MAX_DISPLAY_POINTS = 6000
+_MODULE_TOKEN = re.compile(r'"module"\s*:\s*(\d+)')
 
 
 class SeriesHistoryError(RuntimeError):
@@ -102,9 +104,17 @@ class CellHistorySeries:
             "cache_hit": result["cache_hit"],
         }
 
-    def query_bundles(self, *, requests, timestamp_from, timestamp_to, module_number,
-                      max_points=DEFAULT_MAX_DISPLAY_POINTS, include_all_module_soc=False):
+    def query_bundles(self, *, requests, timestamp_from, timestamp_to, module_number=None,
+                      module_numbers=None, max_points=DEFAULT_MAX_DISPLAY_POINTS,
+                      include_all_module_soc=False):
         """Project several metrics from one JSONL scan and one shared sample set."""
+        selected_modules = tuple(sorted(set(module_numbers or (
+            (module_number,) if module_number is not None else ()))))
+        if not selected_modules:
+            raise ValueError("at least one module is required")
+        if any(not 1 <= number <= 6 for number in selected_modules):
+            raise ValueError("module numbers must be between 1 and 6")
+        primary_module = module_number if module_number in selected_modules else selected_modules[0]
         normalized = []
         for request in requests:
             metric = request["metric"]
@@ -127,8 +137,8 @@ class CellHistorySeries:
                                   and self.position_history_path.exists() else None)
         except OSError as exc:
             raise SeriesHistoryError("cell history is unavailable") from exc
-        key = (signature, position_signature, tuple(normalized), timestamp_from, timestamp_to, module_number,
-               max_points, include_all_module_soc)
+        key = (signature, position_signature, tuple(normalized), timestamp_from, timestamp_to,
+               selected_modules, primary_module, max_points, include_all_module_soc)
         if key in self._cache:
             self._cache.move_to_end(key)
             return {**self._cache[key], "cache_hit": True}
@@ -138,19 +148,29 @@ class CellHistorySeries:
         end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
         collectors = []
         for metric, cell_number, selected_cells in normalized:
-            group_count = len(selected_cells) if selected_cells else (
+            group_count = len(selected_modules) * (len(selected_cells) if selected_cells else (
                 15 if metric in {"cell_voltage", "cell_temperature"}
-                and cell_number is None else 1)
+                and cell_number is None else 1))
             collectors.append((max(4, max_points // group_count), {}))
-        samples, raw_records, stack_records = [], 0, []
-        soc_collectors = ({number: _ExtremaCollector(max(4, max_points // 7), start_epoch, end_epoch)
-                           for number in range(1, 7)} if include_all_module_soc else {})
+        samples, raw_records, raw_file_records, stack_records = [], 0, 0, []
+        soc_collectors = ({number: _ExtremaCollector(
+            max(4, max_points // max(1, len(selected_modules))), start_epoch, end_epoch)
+                           for number in selected_modules} if include_all_module_soc else {})
         raw_points = [0] * len(normalized)
+        soc_metric_indexes = [index for index, item in enumerate(normalized)
+                              if item[0] == "soc"]
+        needs_stack_context = any(metric in STACK_SOC_METRICS
+                                  for metric, _, _ in normalized)
         try:
             for path in paths:
                 with path.open(encoding="utf-8") as handle:
                     for line_number, line in enumerate(handle, 1):
                         if not line.strip():
+                            continue
+                        raw_file_records += 1
+                        module_token = _MODULE_TOKEN.search(line)
+                        if (not needs_stack_context and module_token is not None
+                                and int(module_token.group(1)) not in selected_modules):
                             continue
                         record = json.loads(line)
                         if record.get("schema_version") != 1:
@@ -165,23 +185,31 @@ class CellHistorySeries:
                             point["module_number"] = record_module
                             point["source"] = "pylontech"
                             soc_collectors[record_module].add(point)
-                        if any(metric in STACK_SOC_METRICS for metric, _, _ in normalized):
+                            for index in soc_metric_indexes:
+                                raw_points[index] += 1
+                        if needs_stack_context:
                             stack_records.append(record)
-                        if record_module != module_number:
+                        if record_module not in selected_modules:
                             continue
                         timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
                         raw_records += 1
-                        samples.append({"timestamp": timestamp, "current_a": float(record["current_a"]),
-                                        "soc_percent": float(record["soc_percent"]),
-                                        "voltages_mv": [float(value) for value in record["voltages_mv"]],
-                                        "module_serial": record.get("module_serial")})
+                        if record_module == primary_module:
+                            samples.append({"timestamp": timestamp,
+                                            "current_a": float(record["current_a"]),
+                                            "soc_percent": float(record["soc_percent"]),
+                                            "voltages_mv": [float(value) for value in record["voltages_mv"]],
+                                            "module_serial": record.get("module_serial")})
                         for index, (metric, cell_number, selected_cells) in enumerate(normalized):
                             per_group, metric_collectors = collectors[index]
                             if metric in STACK_SOC_METRICS:
                                 continue
+                            if metric == "soc" and include_all_module_soc:
+                                continue
                             for point in self._points(record, metric, cell_number, timestamp,
                                                       epoch, selected_cells):
-                                group = point.get("cell_number", 0)
+                                if len(selected_modules) > 1:
+                                    point["module_number"] = record_module
+                                group = (record_module, point.get("cell_number", 0))
                                 metric_collectors.setdefault(
                                     group,
                                     _ExtremaCollector(per_group, start_epoch, end_epoch),
@@ -196,14 +224,17 @@ class CellHistorySeries:
                     per_group, metric_collectors = collectors[index]
                     key_name = "stack_soc_median" if metric == "stack_soc_median" else "soc_deviation_pp"
                     for item in projected_soc:
-                        if item["module"] != module_number:
+                        if item["module"] not in selected_modules:
                             continue
                         point = {"timestamp": item["timestamp"], "_epoch": item["_epoch"],
                                  "value": item[key_name],
                                  "module_serial": item["module_serial"],
                                  "active_module_count": item["active_module_count"]}
+                        if len(selected_modules) > 1:
+                            point["module_number"] = item["module"]
                         metric_collectors.setdefault(
-                            0, _ExtremaCollector(per_group, start_epoch, end_epoch)).add(point)
+                            (item["module"], 0),
+                            _ExtremaCollector(per_group, start_epoch, end_epoch)).add(point)
                         raw_points[index] += 1
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError) as exc:
             raise SeriesHistoryError(f"cell history is invalid: {exc}") from exc
@@ -212,8 +243,16 @@ class CellHistorySeries:
         downsample_started = time.perf_counter()
         projected = []
         for index, (metric, cell_number, selected_cells) in enumerate(normalized):
-            points = [point for collector in collectors[index][1].values()
-                      for point in collector.points()]
+            if metric == "soc" and include_all_module_soc:
+                points = [point for collector in soc_collectors.values()
+                          for point in collector.points()]
+                if len(selected_modules) == 1:
+                    points = [{key: value for key, value in point.items()
+                               if key not in {"module_number", "source"}}
+                              for point in points]
+            else:
+                points = [point for collector in collectors[index][1].values()
+                          for point in collector.points()]
             points.sort(key=lambda point: (point["timestamp"], point.get("cell_number", 0)))
             projected.append({"metric": metric, "cell_number": cell_number,
                               "cell_numbers": list(selected_cells or ()), "points": points,
@@ -226,6 +265,9 @@ class CellHistorySeries:
             for number, collector in soc_collectors.items() if collector.points()
         ]
         result = {"series": projected, "samples": samples, "raw_records": raw_records,
+                  "raw_file_records": raw_file_records,
+                  "file_count": len(paths),
+                  "selected_modules": list(selected_modules),
                   "soc_module_series": soc_module_series,
                   "read_seconds": scan_seconds,
                   "downsample_seconds": downsample_seconds,

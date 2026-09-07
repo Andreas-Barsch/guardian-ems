@@ -33,6 +33,30 @@ def test_diagnostics_ui_structure_semantics_and_escaping():
     assert "3195b09a_guardian_battery" not in html
 
 
+def test_predictive_risk_ui_localizes_evidence_and_has_accessible_details():
+    html = render_guardian_diagnostics_html()
+    for text in (
+        "Details ›", "Zurück zu Top 10", "Kein Balancing dokumentiert",
+        "Balancing-Gelegenheit unzureichend",
+        "Balancing durchgeführt – Bewertung läuft", "Nach Balancing verbessert",
+        "Keine nachhaltige Verbesserung", "Nicht verfügbar", "Hoch", "Mittel",
+        "Niedrig", "Verbessernd", "Stabil", "Verschlechternd",
+        "Deutlich verschlechternd", "Nicht genügend Historie",
+    ):
+        assert text in html
+    assert 'role="button" class="risk-row"' in html
+    assert "e.key==='Enter'||e.key===' '" in html
+    assert "risk-mobile" in html and "@media(max-width:700px)" in html
+    assert "overflow-wrap:anywhere" in html
+
+
+def test_diagnostics_module_cards_are_sorted_by_position_then_serial():
+    html = render_guardian_diagnostics_html()
+    assert "cards.sort" in html
+    assert "Modul\\/Position\\s+(\\d+)" in html
+    assert "Infinity" in html and "localeCompare" in html
+
+
 def test_home_assistant_source_has_no_static_diagnostics_ingress_dashboard():
     root = Path(__file__).resolve().parents[2]
     loader = type("HomeAssistantLoader", (yaml.SafeLoader,), {})

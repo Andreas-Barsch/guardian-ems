@@ -7,6 +7,7 @@ of UTC days.  Duplicate sample timestamps are ignored per aggregate key.
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -156,17 +157,30 @@ class DiagnosticAggregateStore:
     def save(self):
         if not self._dirty:
             return False
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps({
+        payload = self.persistence_payload()
+        self.persist_payload(payload)
+        self._dirty = False
+        return True
+
+    def persistence_payload(self):
+        if not self._dirty:
+            return None
+        return {
             "schema_version": AGGREGATE_SCHEMA_VERSION,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "retention_days": self.retention_days,
-            "backfill_sources": self.backfill_sources,
-            "records": self.records,
-        }, ensure_ascii=False, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+            "backfill_sources": copy.deepcopy(self.backfill_sources),
+            "records": copy.deepcopy(self.records),
+        }
+
+    def persist_payload(self, payload):
+        if payload is None:
+            return False
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                                  sort_keys=True), encoding="utf-8")
         tmp.replace(self.path)
-        self._dirty = False
         return True
 
     @staticmethod

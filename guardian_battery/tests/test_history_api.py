@@ -113,6 +113,83 @@ def test_soc_timeline_single_projects_selected_module_and_hycube_received_at(tmp
             projected["hycube_series"]["points"])
 
 
+def test_comparison_projects_only_explicit_selected_modules_in_one_scan(tmp_path,
+                                                                        monkeypatch):
+    _, directory, api = api_env(tmp_path)
+    timestamp = datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp()
+    for module in range(1, 7):
+        append_sample(directory, timestamp + module, module, 60 + module)
+    opened = []
+    original_open = type(directory).open
+
+    def counted_open(path, *args, **kwargs):
+        if path.parent == directory and path.suffix == ".jsonl":
+            opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(directory), "open", counted_open)
+    response = api.handle(
+        "GET", "/api/history/series?metrics=soc,cell_voltage"
+        "&from=2026-09-02T08:00:00Z&to=2026-09-02T09:00:00Z"
+        "&selected_modules=5,6&voltage_cell_numbers=5,8")
+    assert response.status == 200
+    assert opened == [directory / "2026-09-02.jsonl"]
+    assert response.body["series"][0]["selected_modules"] == [5, 6]
+    assert {point["module_number"] for point in response.body["series"][0]["points"]} == {5, 6}
+    cells = response.body["series"][1]["points"]
+    assert {(point["module_number"], point["cell_number"]) for point in cells} == {
+        (5, 5), (5, 8), (6, 5), (6, 8)}
+    assert [item["module_number"] for item in
+            response.body["soc_timeline"]["module_series"]] == [5, 6]
+    assert response.body["performance"]["raw_records"] == 2
+    assert response.body["performance"]["raw_file_records"] == 6
+
+
+def test_single_multi_module_is_limited_to_soc(tmp_path):
+    _, _, api = api_env(tmp_path)
+    base = ("&from=2026-09-02T08:00:00Z&to=2026-09-02T09:00:00Z"
+            "&selected_modules=5,6")
+    assert api.handle("GET", "/api/history/series?metric=soc" + base).status == 200
+    assert api.handle("GET", "/api/history/series?metric=current" + base).status == 400
+
+
+def test_selected_module_cache_semantics_and_per_module_extrema(tmp_path):
+    directory = tmp_path / "cell_history"
+    start = datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp()
+    for minute in range(80):
+        append_sample(directory, start + minute * 60, 5, 5 if minute == 31 else 55)
+        append_sample(directory, start + minute * 60 + 1, 6, 99 if minute == 47 else 66)
+    series = CellHistorySeries(directory)
+    args = dict(requests=({"metric": "soc"},),
+                timestamp_from="2026-09-02T08:00:00+00:00",
+                timestamp_to="2026-09-02T10:00:00+00:00", max_points=20)
+    first = series.query_bundles(**args, module_numbers=(5, 6))
+    same = series.query_bundles(**args, module_numbers=(6, 5))
+    different = series.query_bundles(**args, module_numbers=(6,))
+    values = {(point["module_number"], point["value"])
+              for point in first["series"][0]["points"]}
+    assert {(5, 5.0), (6, 99.0)} <= values
+    assert same["cache_hit"] is True
+    assert different["cache_hit"] is False
+
+
+def test_history_performance_projection_is_compact_and_structured(tmp_path, caplog):
+    _, directory, api = api_env(tmp_path)
+    append_sample(directory, datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp(),
+                  6, 66)
+    with caplog.at_level("DEBUG", logger="history_api"):
+        response = api.handle(
+            "GET", "/api/history/series?metric=soc&from=2026-09-02T08:00:00Z"
+            "&to=2026-09-02T09:00:00Z&module_number=6")
+    performance = response.body["performance"]
+    assert performance["files"] == 1
+    assert performance["selected_modules"] == [6]
+    assert performance["series_count"] == 1
+    assert performance["raw_file_records"] == 1
+    assert performance["serialization_seconds"] >= 0
+    assert "raw_records=1" in caplog.text and "selected_modules=[6]" in caplog.text
+
+
 def test_soc_timeline_omits_hycube_series_when_history_is_missing(tmp_path):
     maintenance, directory, timeline = build(tmp_path)
     timestamp = datetime(2026, 9, 2, 8, tzinfo=timezone.utc).timestamp()

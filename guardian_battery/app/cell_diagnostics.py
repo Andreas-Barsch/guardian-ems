@@ -293,24 +293,25 @@ class CellDiagnosticStore:
         return True
 
     def save(self):
+        self.persist_payload(self.persistence_payload())
+
+    def persistence_payload(self):
+        """Take a bounded immutable-enough snapshot before background JSON work."""
+        return {
+            "identity_samples": {
+                serial: list(values) for serial, values in self.identity_samples.items()
+            },
+            "unknown_samples": {
+                str(module): list(values) for module, values in self.unknown_samples.items()
+            },
+            "raw_history_sources": dict(self.rebuild_sources),
+            "expected_materialized_coverage": dict(self.expected_materialized_coverage),
+        }
+
+    def persist_payload(self, payload):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-
-        tmp.write_text(
-            json.dumps(
-                {
-                    "identity_samples": {
-                        serial: list(values) for serial, values in self.identity_samples.items()
-                    },
-                    "unknown_samples": {
-                        str(module): list(values) for module, values in self.unknown_samples.items()
-                    },
-                    "raw_history_sources": self.rebuild_sources,
-                    "expected_materialized_coverage": self.expected_materialized_coverage,
-                },
-                separators=(",", ":"),
-            )
-        )
+        tmp.write_text(json.dumps(payload, separators=(",", ":")))
 
         tmp.replace(self.path)
 

@@ -539,6 +539,26 @@ def documented_identity_at(path: Path | str, position: int, timestamp: datetime 
     return snapshot.positions[str(position)], snapshot.position_history_id
 
 
+class DocumentedIdentityResolver:
+    """One immutable history read supporting time-correct resolution for a round."""
+
+    def __init__(self, snapshots):
+        self.snapshots = sorted(snapshots, key=lambda item: (
+            item.effective_at, item.created_at, item.position_history_id))
+
+    @classmethod
+    def from_path(cls, path: Path | str):
+        return cls(PositionHistoryLog(path).read_all())
+
+    def identity_at(self, position: int, timestamp: datetime | str):
+        target = normalize_utc_timestamp(timestamp, "timestamp")
+        matches = [item for item in self.snapshots if item.effective_at <= target]
+        if not matches:
+            return None, None
+        snapshot = matches[-1]
+        return snapshot.positions[str(position)], snapshot.position_history_id
+
+
 def documented_position_at(path: Path | str, serial: str,
                            timestamp: datetime | str) -> tuple[int | None, str | None]:
     """Resolve a physical serial only in the snapshot effective at timestamp."""

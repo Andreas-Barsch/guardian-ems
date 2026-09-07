@@ -39,14 +39,14 @@ def test_soc_projection_distinguishes_module_hycube_and_policy_sources():
     assert "series.source==='hycube'?'hycube_capacity':'policy_boundary'" in html
 
 
-def test_soc_single_filters_selected_module_and_comparison_keeps_all_modules():
+def test_module_and_metric_selections_are_orthogonal():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
-    assert "comparison||series.module_number===selected" in html
-    assert "selected=Number(byId('module').value)" in html
-    assert "const all=socLabels(data)" in html
-    assert "byId('module-control').hidden=combined&&metrics.every(metric=>metric==='soc')" in html
+    assert "selected_modules" in html and "selectedModules()" in html
+    assert "Mindestens ein Modul auswählen" in html
+    assert "Alle Module sind in der Einzelansicht nur für SOC verfügbar" in html
+    assert "modulePicker.hidden=!combined" in html
     assert '<label id="module-control">Modul<select id="module"></select></label>' in html
-    assert "byId('module').value" in html
+    assert "module_number" in html
     assert "byId('view-mode').onchange=updateControlState" in html
 
 
@@ -62,7 +62,7 @@ def test_soc_tooltips_use_series_semantics_not_synthetic_cell_numbers():
     assert "Hycube-Konfiguration:" in html
     assert "Kausalität nicht bestimmt" in html
     assert "point._series_type==='cell_value'" in html
-    assert "Modul ${moduleNumber} · Zelle ${point.cell_number}" in html
+    assert "Modul ${moduleNumber} · Zelle ${cell}" in html
     assert "metric==='current'?'Strom'" in html
     assert "p.cell_number?' · Zelle '" not in html
     assert "point.cell_number?' · Zelle '" not in html
@@ -226,3 +226,27 @@ def test_single_is_default_and_combined_mode_has_independent_stacked_tracks():
     assert "for(const series of data.series)renderTrack(series,data)" in html
     assert "syncTracks(time)" in html and "class:'sync-cursor'" in html
     assert "unit=UNITS[metric]" in html
+
+
+def test_explicit_apply_loading_dirty_and_error_states_preserve_charts():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    for text in ("AKTUELL", "AUSWAHL GEÄNDERT", "WIRD GELADEN",
+                 "Wird geladen …", "Daten werden geladen …"):
+        assert text in html
+    assert "queryStatus==='LOADING'" in html
+    assert "submitButton.disabled=active" in html
+    assert "const generation=++requestGeneration" in html
+    assert "if(generation!==requestGeneration)return" in html
+    assert "Zeitverlauf konnte nicht geladen werden. Bitte erneut versuchen." in html
+    assert "currentData=null" not in html.split("load=async function", 1)[1]
+
+
+def test_comparison_module_picker_and_responsive_grouped_controls():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert "module-picker" in html and "module-options" in html
+    assert "modules-all" in html and "modules-none" in html
+    assert "grid-template-columns:repeat(3,minmax(150px,1fr))" in html
+    assert "@media(max-width:620px){.metric-options{grid-template-columns:1fr}" in html
+    assert "moduleAware" in html and "_actual_cell_number" in html
+    assert "Modul ${point.module_number} · Zelle ${point.cell_number}" in html
+    assert "relabelModuleLegend" in html
