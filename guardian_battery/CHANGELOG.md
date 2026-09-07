@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.24 – Collector Timing Visibility
+
+- Ergänzt in den Modulinformationen einen read-only Bereich für die bereits vorhandene `collector_timing`-Evidence aus `/api/rs485/status`. Er zeigt Ziel, letzte Dauer und effektives Intervall für Hauptpoll und Cell-Sampling sowie Deadline-Lateness, Overrun-Zähler/-Maximum und Stack-Sample-Spread.
+- Macht die gemessenen Komponentenlaufzeiten für PWR Request/Processing, STAT/INFO, BAT Requests, Identity Resolution, Cell History Write, Cell Analysis, Diagnostic Store Save, Aggregate Write, MQTT Projection, Topology/Position und ausdrücklich `Remaining Other` sichtbar. Fehlende Werte bleiben „nicht verfügbar“ und werden nicht als null Sekunden dargestellt.
+- Zeigt BAT Count, Median und Maximum sowie das letzte effektive Cell-Intervall je physischer Seriennummer, nach dokumentierter Modulposition und danach Seriennummer sortiert.
+- Die Timingwerte sind prozesslokale technische Betriebs-Evidence. Rolling- und Overrun-Werte beginnen nach einem Neustart neu; sie sind weder Batteriequalitätsbewertung noch Alarmstatus und verändern keinen Stack- oder Modulstatus.
+- Gegenüber 0.7.23 wurden Collector, Scheduler, Deadlines, Console, RS485, MQTT, History und Diagnosealgorithmen nicht verändert. Der bestehende Home-Assistant-Ingress-Schutz bleibt unverändert.
+- Guardian Battery und Add-on sind `0.7.24`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.23 – History UX/Performance + Collector Timing Recovery
 
 - Beschleunigt History-Abfragen durch frühe Modulfilterung, einen Scan für mehrere ausgewählte Module, getrennte Extrema-Sammler, einmaliges Sammeln der SOC-System-Evidence, einmaliges Lesen der Maintenance History, einen abfragespezifischen Cache und begrenztes extrema-erhaltendes Downsampling. Der lokale Referenzbenchmark lag bei etwa 0,020 s für einen, 0,053 s für drei, 0,132 s für sieben und 0,555 s für 30 Tage; dies sind keine produktiven Messwerte.

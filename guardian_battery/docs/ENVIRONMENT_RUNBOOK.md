@@ -2,6 +2,16 @@
 
 Stand: 2026-09-07
 
+## Guardian Battery 0.7.24 – Collector Timing Visibility
+
+### Auswertung nach separatem Deployment
+
+- Guardian/Add-on: `0.7.24`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Bei weiterhin hohen Collector-Zeiten zuerst unter **Modulinformationen → Collector Timing** die bereits vorhandene prozesslokale Evidence lesen. Rolling- und Overrun-Werte beginnen nach jedem Add-on-Neustart neu und sind weder Batteriequalitätsbewertung noch Alarmstatus.
+- Zur Ursachenabgrenzung prioritär `BAT Requests gesamt`, `Cell Analysis`, `Diagnostic Store Save`, `Aggregate Write`, `MQTT Projection`, `Topology / Position` und `Remaining Other` vergleichen. Ziel-/Ist-Abweichungen und große Einzelanteile zunächst dokumentieren; daraus nicht ohne weitere Evidence eine Ursache ableiten.
+- Erst nach dieser Messung über mehrere vollständige Collector- und Cell-Zyklen eine Sourceänderung erwägen. 0.7.24 verändert gegenüber 0.7.23 weder Collector noch Scheduler, Deadlines, Console, RS485, MQTT, History oder Diagnosealgorithmen.
+- Dieses Source-Release führt kein Deployment und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.23 – History UX/Performance + Collector Timing Recovery
 
 ### Versionen und unveränderte Fachverträge
