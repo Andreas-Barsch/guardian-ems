@@ -29,8 +29,11 @@ class Rs485MqttProjection:
             payload["device_class"] = device_class
         if icon:
             payload["icon"] = icon
+        encode = getattr(self.mqtt, "json_payload", None)
+        encoded = (encode(payload, group="discovery", separators=(",", ":"))
+                   if encode else json.dumps(payload, separators=(",", ":")))
         self.mqtt._publish(f"homeassistant/sensor/guardian_battery/{key}/config",
-                           json.dumps(payload, separators=(",", ":")), retain=True)
+                           encoded, retain=True)
         self._discovered[key] = name
 
     def publish(self, status: dict, latest: dict[int, dict], writer_status=None):

@@ -123,6 +123,10 @@ class CollectorTiming:
                              "cycle_started_at": float(wall_time),
                              "effective_poll_interval_seconds": interval}
 
+    def current_cycle_id(self):
+        with self._lock:
+            return self._current.get("cycle_id")
+
     def cell_started(self, wall_time: float, monotonic_time: float,
                      planned_deadline: float | None = None) -> None:
         with self._lock:
@@ -322,6 +326,21 @@ class CollectorTiming:
                         or float(details.get(
                             "other_thread_cpu_seconds", 0.0) or 0.0) < -0.001):
                     self._observability_errors += 1
+
+    def mqtt_details(self, details):
+        """Attach the completed main-thread MQTT profile to this cycle."""
+        try:
+            value = dict(details)
+        except Exception:
+            return
+        with self._lock:
+            self._current["mqtt_subtiming"] = value
+            if self._current_cell is not None:
+                self._current_cell["mqtt_subtiming"] = value
+            if (float(value.get("mqtt_other_wall_seconds", 0.0) or 0.0) < -0.001
+                    or float(value.get(
+                        "mqtt_other_thread_cpu_seconds", 0.0) or 0.0) < -0.001):
+                self._observability_errors += 1
 
     def snapshot(self) -> dict:
         with self._lock:

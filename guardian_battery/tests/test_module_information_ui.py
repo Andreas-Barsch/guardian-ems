@@ -132,6 +132,23 @@ def test_cycle_accurate_timing_separates_workers_and_missing_semantics():
     assert "timing.cell_analysis_worker" in html
 
 
+def test_mqtt_subtiming_ui_shows_wall_cpu_groups_and_return_codes():
+    html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
+    assert "MQTT Subtiming" in html
+    assert 'id="mqtt-subtiming"' in html
+    assert 'id="mqtt-subtiming-groups"' in html
+    assert 'id="mqtt-subtiming-returns"' in html
+    assert "mqtt_projection_wall_seconds" in html
+    assert "mqtt_projection_thread_cpu_seconds" in html
+    assert "mqtt_build_wall_seconds" in html
+    assert "mqtt_json_wall_seconds" in html and "mqtt_json_count" in html
+    assert "mqtt_publish_wall_seconds" in html and "mqtt_publish_count" in html
+    assert "Stack/Battery" in html and "Cell Diagnostics" in html and "RS485" in html
+    assert "success_count" in html and "no_conn_count" in html
+    assert "queue_full_count" in html and "other_error_count" in html
+    assert "mqtt_publish_max_group" in html
+
+
 def test_collector_cell_intervals_sort_numerically_by_position_then_serial():
     html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
     assert "effective_cell_intervals_by_serial||{}" in html

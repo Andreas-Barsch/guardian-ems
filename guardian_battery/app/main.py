@@ -36,6 +36,7 @@ from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
 from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_text)
+from mqtt_observability import MqttCycleProfiler, mqtt_group
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, DocumentedIdentityResolver,
                               current_presence, history_observation_ready,
                               missing_expected_positions,
@@ -630,6 +631,29 @@ class Mqtt:
         self.client.loop_start()
         self._publish(f"{self.prefix}/battery/availability", "online", retain=True)
         self.maintenance_events = MaintenanceMqttPublisher(self.client, self.prefix)
+        self._cycle_profiler = None
+
+    def begin_cycle_profile(self, cycle_id):
+        self._cycle_profiler = MqttCycleProfiler(cycle_id, self.client)
+        return self._cycle_profiler
+
+    def finish_cycle_profile(self, total_wall, total_cpu):
+        if self._cycle_profiler is None:
+            return None
+        result = self._cycle_profiler.finish(total_wall, total_cpu)
+        self._cycle_profiler = None
+        return result
+
+    def json_payload(self, value, *, group, **kwargs):
+        started = time.monotonic(); cpu_started = time.thread_time()
+        result = json.dumps(value, **kwargs)
+        wall = time.monotonic() - started
+        cpu = time.thread_time() - cpu_started
+        profiler = getattr(self, "_cycle_profiler", None)
+        if profiler is not None:
+            profiler.json_record(
+                group, wall, cpu, len(result.encode("utf-8")))
+        return result
 
     def close(self) -> None:
         self._publish(f"{self.prefix}/battery/availability", "offline", retain=True)
@@ -764,21 +788,28 @@ class Mqtt:
             return
         if isinstance(value, float):
             value = f"{value:.4f}".rstrip("0").rstrip(".")
+        topic = f"{self.prefix}/battery/sensor/{name}/state"
         self._publish(
-            f"{self.prefix}/battery/sensor/{name}/state",
+            topic,
             compact_text(value, 4096),
             retain=True,
+            group=mqtt_group(topic),
         )
 
     def attributes(self, name: str, attributes: dict) -> None:
+        topic = f"{self.prefix}/battery/sensor/{name}/attributes"
+        group = mqtt_group(topic)
         self._publish(
-            f"{self.prefix}/battery/sensor/{name}/attributes",
-            json.dumps(attributes, ensure_ascii=False),
+            topic,
+            self.json_payload(attributes, group=group,
+                              ensure_ascii=False),
             retain=True,
             limit=MQTT_MAX_ATTRIBUTE_BYTES,
+            group=group,
         )
 
-    def _publish(self, topic: str, payload, *, retain: bool, limit: int = MQTT_MAX_PAYLOAD_BYTES):
+    def _publish(self, topic: str, payload, *, retain: bool,
+                 limit: int = MQTT_MAX_PAYLOAD_BYTES, group=None):
         encoded = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
         packet_size = len(encoded) + len(topic.encode("utf-8")) + 7
         if packet_size > limit:
@@ -786,7 +817,14 @@ class Mqtt:
                 f"MQTT packet exceeds {limit} bytes for {topic}: "
                 f"payload={len(encoded)}, packet<={packet_size}"
             )
-        return self.client.publish(topic, payload, retain=retain)
+        started = time.monotonic(); cpu_started = time.thread_time()
+        result = self.client.publish(topic, payload, retain=retain)
+        profiler = getattr(self, "_cycle_profiler", None)
+        if profiler is not None:
+            profiler.publish_record(
+                group or mqtt_group(topic), time.monotonic() - started,
+                time.thread_time() - cpu_started, len(encoded), result)
+        return result
 
     @staticmethod
     def _diag_meta(metric: str, phase: str | None = None) -> dict:
@@ -815,6 +853,7 @@ class Mqtt:
         module_infos: dict[int, dict] | None = None,
         live_topology: dict[int, dict] | None = None,
     ) -> None:
+        guardian_started = time.monotonic(); guardian_cpu = time.thread_time()
         soc_peers = current_stack_soc(modules)
         median_soc = soc_peers["median"] if soc_peers["median"] is not None else 0
         cell_results = cell_results or {}
@@ -935,8 +974,10 @@ class Mqtt:
             "module_info": module_infos,
             "live_topology": live_topology,
         }
-        self._publish(f"{self.prefix}/battery/state", json.dumps(payload, ensure_ascii=False), retain=True)
-        self._publish(f"{self.prefix}/battery/alarms", json.dumps(alarms, ensure_ascii=False), retain=True)
+        self._publish(f"{self.prefix}/battery/state", self.json_payload(
+            payload, group="stack_battery", ensure_ascii=False), retain=True)
+        self._publish(f"{self.prefix}/battery/alarms", self.json_payload(
+            alarms, group="stack_battery", ensure_ascii=False), retain=True)
 
         for position, topology in sorted(live_topology.items()):
             presence_status = topology.get("status", topology.get("presence_status", "unknown"))
@@ -1098,6 +1139,11 @@ class Mqtt:
                 self.attributes(f"{cp}_discharge_lowest", self._diag_meta("lowest", "discharge"))
                 self.attributes(f"{cp}_charge_highest", self._diag_meta("highest", "charge"))
                 self.attributes(f"{cp}_high_highest", self._diag_meta("highest", "high"))
+        profiler = getattr(self, "_cycle_profiler", None)
+        if profiler is not None:
+            profiler.guardian_finished(
+                time.monotonic() - guardian_started,
+                time.thread_time() - guardian_cpu)
 
 
 def update_events(status: str, alarms: list[dict], persistent: dict) -> None:
@@ -1521,20 +1567,29 @@ def main() -> None:
                 except Exception:
                     LOG.debug("Cell analysis profiling projection unavailable", exc_info=True)
                 section_started = time.monotonic(); section_cpu = time.thread_time()
+                mqtt_profile = publisher.begin_cycle_profile(timing.current_cycle_id())
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
                     cell_results, bms_stat, module_infos,
                     current_presence(expected_module_count=int(options["module_count"])),
                 )
                 if rs485_reader is not None:
+                    rs485_started = time.monotonic(); rs485_cpu = time.thread_time()
                     rs485_management = project_current_management(
                         rs485_reader.management(), rs485_reader.identities(),
                         position_history_path=DEFAULT_POSITION_HISTORY_FILE)
                     rs485_mqtt.publish(rs485_reader.status(),
                                        rs485_management,
                                        rs485_writer.status())
-                timing.duration("mqtt_projection", time.monotonic() - section_started,
-                                cpu_seconds=time.thread_time() - section_cpu)
+                    mqtt_profile.rs485_finished(
+                        time.monotonic() - rs485_started,
+                        time.thread_time() - rs485_cpu)
+                mqtt_wall = time.monotonic() - section_started
+                mqtt_cpu = time.thread_time() - section_cpu
+                timing.mqtt_details(publisher.finish_cycle_profile(
+                    mqtt_wall, mqtt_cpu))
+                timing.duration("mqtt_projection", mqtt_wall,
+                                cpu_seconds=mqtt_cpu)
 
                 # Durable topology confirmation happens only after the complete
                 # poll and every projection/publish step succeeded. Live presence

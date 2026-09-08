@@ -343,3 +343,70 @@ def test_hard_payload_guards_fail_before_client_publish():
     with pytest.raises(ValueError, match="exceeds"):
         publisher.attributes("too_large", {"value": "x" * MQTT_MAX_ATTRIBUTE_BYTES})
     assert publisher.client.calls == []
+
+
+def test_full_diagnostics_mqtt_profile_counts_bytes_and_preserves_output():
+    results = {module: diagnostic_result(module) for module in range(1, 7)}
+    infos = {module: {"device_name": "US2000C", "barcode": f"SN-{module}"}
+             for module in range(1, 7)}
+    args = (modules(), "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+            {"active": False, "last_summary": "kein Incident"}, results,
+            {"soh_percent": 95, "cycles": 123}, infos)
+    plain_client = FakeClient()
+    plain = Mqtt.__new__(Mqtt)
+    plain.prefix = "guardian"; plain.client = plain_client
+    plain.discovery_enabled = False
+    plain.maintenance_events = MaintenanceMqttPublisher(plain_client, "guardian")
+    plain._cycle_profiler = None
+    plain.publish(*args)
+
+    profiled_client = FakeClient()
+    profiled = Mqtt.__new__(Mqtt)
+    profiled.prefix = "guardian"; profiled.client = profiled_client
+    profiled.discovery_enabled = False
+    profiled.maintenance_events = MaintenanceMqttPublisher(
+        profiled_client, "guardian")
+    profiled._cycle_profiler = None
+    profiled.begin_cycle_profile(42)
+    started = __import__("time").monotonic()
+    cpu_started = __import__("time").thread_time()
+    profiled.publish(*args)
+    profile = profiled.finish_cycle_profile(
+        __import__("time").monotonic() - started,
+        __import__("time").thread_time() - cpu_started)
+
+    assert [(call["topic"], call["retain"]) for call in profiled_client.calls] == \
+        [(call["topic"], call["retain"]) for call in plain_client.calls]
+    for profiled_call, plain_call in zip(profiled_client.calls, plain_client.calls):
+        if profiled_call["topic"] == "guardian/battery/state":
+            profiled_payload = json.loads(profiled_call["payload"])
+            plain_payload = json.loads(plain_call["payload"])
+            profiled_payload.pop("timestamp")
+            plain_payload.pop("timestamp")
+            assert profiled_payload == plain_payload
+        else:
+            assert profiled_call["payload"] == plain_call["payload"]
+    assert profile["cycle_id"] == 42
+    assert profile["mqtt_publish_count"] == len(profiled_client.calls)
+    assert profile["mqtt_payload_bytes"] == sum(call["size"] for call in profiled_client.calls)
+    assert profile["groups"]["cell_diagnostics"]["publish_count"] > \
+        profile["groups"]["modules"]["publish_count"]
+    assert sum(item["publish_count"] for item in profile["groups"].values()) == \
+        profile["mqtt_publish_count"]
+    assert sum(item["payload_bytes"] for item in profile["groups"].values()) == \
+        profile["mqtt_payload_bytes"]
+
+
+def test_before_analysis_has_lower_profiled_publish_count():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    publisher._cycle_profiler = None
+    publisher.begin_cycle_profile(1)
+    publisher.publish(
+        modules(), "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"}, {}, {}, {})
+    profile = publisher.finish_cycle_profile(.1, .1)
+    assert 0 < profile["mqtt_publish_count"] < 1000
