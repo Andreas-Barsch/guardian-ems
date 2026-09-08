@@ -1,6 +1,20 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-09-07
+Stand: 2026-09-08
+
+## Guardian Battery 0.7.26 – Asynchronous Cell Analysis / Acquisition Recovery
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.26`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Mehrere vollständige Cell-Runden beobachten. Das effektive Raw-Cell-Intervall je `physical_serial` sowie Median, P90, P95 und Maximum dokumentieren. Akzeptanzziele: Cell-Median höchstens 70 Sekunden, P95 höchstens 90 Sekunden und Hauptpoll-Median ohne Cell-Runde höchstens 11 Sekunden.
+- Zusätzlich Hauptpoll, Cell Cycle Duration, Analysis Snapshot Build, Analysis Submit und Worker Duration erfassen. Eine Worker-Analyse darf weiterhin 70 Sekunden oder länger benötigen, ohne das Raw-Cell-Sampling entsprechend zu blockieren.
+- Im Collector Timing Worker `active`/`pending`, aktive, abgeschlossene und neueste Raw-Generation, letzte Dauer, Abschlusszeit und Analysis Age prüfen. Die Profilwerte gehören zur ausgewiesenen letzten abgeschlossenen Generation und nicht zwingend zur neuesten Raw-Generation.
+- Bei Backlog den Coalesced Count beobachten. Es bleibt höchstens eine neueste Pending-Generation; ausschließlich rekonstruierbarer Derived State wird koalesziert. Raw Cell History wird weder verworfen noch koalesziert.
+- Bei Workerfehlern den Failure Count prüfen. Acquisition, Raw History, Live State und bestehende Live-Alarme müssen weiterlaufen. Der letzte gute Derived State darf sichtbar bleiben, muss aber anhand Generation und Alter als verzögert erkennbar sein.
+- P1-Livewerte und -Alarme bleiben synchron; P2 Cell Diagnostics sind asynchron. MQTT Topics und Discovery-IDs bleiben unverändert. Ein älteres Ergebnis darf nach einem physischen Identitätswechsel nicht auf das neue Modul projiziert werden.
+- Die produktive Samplingverbesserung erst nach der Messung als erreicht bewerten. Falls Raw Sampling weiter über 90–100 Sekunden liegt, PWR, BAT, Snapshot Build, MQTT, Topology, Remaining Other und mögliche CPU-/Contention-Effekte getrennt prüfen; den Worker nicht ohne neue Evidence wieder synchronisieren.
+- Dieses Source-Release führt kein Deployment, keinen Add-on-Neustart und keinen produktiven `/share`- oder `/config`-Zugriff aus. Das History-Minutenproblem bleibt separat offen.
 
 ## Guardian Battery 0.7.25 – Cell Analysis Productive Profiling
 

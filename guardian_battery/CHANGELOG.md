@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.26 – Asynchronous Cell Analysis / Acquisition Recovery
+
+- Entkoppelt die schwere historische Cell Analysis vom zeitkritischen Acquisition-Pfad. PWR/BAT-Erfassung, Raw Cell History, Live State und bestehende Live-Alarme bleiben synchron; Current Condition, Confidence, Evidence, Trend, Resistance, Capacity/Curves, Rest, Balancing, Maintenance Analysis und ICA Readiness werden als Derived State verarbeitet.
+- Führt genau einen bounded Analysis Worker mit höchstens einem aktiven und einem neuesten Pending-Job ein. Neuere Generationen ersetzen ausschließlich wartende Derived Jobs; Raw Evidence wird weder koalesziert noch verworfen.
+- Übernimmt vollständige Derived Results atomar und generation-aware. Jeder Job hält Erstellungszeit, Source-Sample-Zeit, Config-ID, Modul-/Seriennummernbezug und Snapshotgröße fest; Ergebnisse einer inzwischen ersetzten physischen Identität werden nicht auf das neue Modul projiziert.
+- MQTT behält Topics und Discovery-IDs bei. Livewerte werden weiterhin im regulären Collector-Zyklus publiziert; Derived Diagnosewerte zeigen den letzten vollständig abgeschlossenen Stand mit Generation, Source-Zeit, Analysezeit und Alter.
+- Isoliert Workerfehler von Acquisition, Raw History, Live-Alarmen und MQTT. Der letzte gute Derived State bleibt erhalten und altert sichtbar; spätere Generationen können ohne Add-on-Neustart wieder erfolgreich laufen. Shutdown bleibt bounded und verwirft rekonstruierbare Pending-Jobs.
+- Erweitert die prozesslokale Collector-Observability um Snapshot-/Submit-Zeit, Worker active/pending, aktive/abgeschlossene/eingereichte Generation, letzte Laufzeit, Abschlusszeit, Alter, Coalesced Count und Failure Count. Das 0.7.25 Cell Analysis Profiling bleibt erhalten und ist der letzten abgeschlossenen Generation zugeordnet.
+- Diagnose-, Evidence-, Maintenance-, Balancing- und Risk-Algorithmen, Live-Alarmgrenzen, Scheduler-Zielwerte, Console/BAT-Protokoll, Raw Evidence, History, RS485 und Hycube bleiben unverändert. Die produktive Samplingverbesserung muss nach Deployment noch über mehrere Cell-Runden verifiziert werden.
+- Guardian Battery und Add-on sind `0.7.26`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.25 – Cell Analysis Productive Profiling
 
 - Ergänzt bounded, prozesslokale Laufzeit-Evidence für die bestehende Cell Analysis: Gesamtzeit je Modul sowie Main-Unterzeiten für Identitätsauflösung, Aggregateprojektion, Store-Analyse und Ergebnisaufbau.
