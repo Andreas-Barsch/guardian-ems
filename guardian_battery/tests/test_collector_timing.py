@@ -300,17 +300,44 @@ def test_main_keeps_console_single_owner_and_raw_history_before_derived_state():
     assert "time.sleep(max(1" not in source
 
 
-def test_main_cell_analysis_profiling_wraps_only_existing_module_path():
+def test_analysis_worker_observability_is_flat_and_not_counted_as_main_duration():
+    timing = CollectorTiming(10, 60)
+    timing.cycle_started(100, 10)
+    timing.analysis_worker_status({
+        "active": True, "pending": True, "generation_active": 2,
+        "generation_latest": 1, "last_duration_seconds": 75,
+        "last_completed_at": 90, "age_seconds": 10,
+        "coalesced_count": 3, "failure_count": 1,
+    })
+    state = timing.snapshot()
+    assert state["analysis_worker_active"] is True
+    assert state["analysis_worker_pending"] is True
+    assert state["analysis_worker_generation_active"] == 2
+    assert state["analysis_worker_generation_latest"] == 1
+    assert state["analysis_worker_last_duration_seconds"] == 75
+    assert state["analysis_coalesced_count"] == 3
+    assert state["analysis_failure_count"] == 1
+    assert "cell_analysis_duration_seconds" not in state
+
+
+def test_cell_analysis_profiling_moves_to_bounded_worker_path():
     source = (Path(__file__).parents[1] / "app" / "main.py").read_text(
         encoding="utf-8")
-    start = source.index("analysis_profiles = []")
-    end = source.index('section_started = time.monotonic()', start + 50)
-    block = source[start:end]
+    worker = (Path(__file__).parents[1] / "app" / "cell_analysis_worker.py").read_text(
+        encoding="utf-8")
+    start = worker.index("def analyse_cell_snapshot(")
+    end = worker.index("\n\nclass CellAnalysisWorker", start)
+    block = worker[start:end]
     assert "current_serial" in block
     assert "aggregate_for_identity" in block
     assert "store_analyse" in block
     assert "module_analysis_total" in block
     assert "cell_analysis_profiles" in source
-    assert "aggregate_records_global" in source
-    assert "derived_writer_active" in source and "derived_writer_pending" in source
+    assert "aggregate_records_global" in worker
+    assert "derived_writer_active" in worker and "derived_writer_pending" in worker
     assert "voltages_mv" not in block and "raw_samples" not in block
+    assert "analysis_worker.submit(" in source
+    assert source.index("cell_history") < source.index("analysis_worker.submit(")
+    assert "console" not in worker.lower()
+    assert "console.command" not in worker
+    assert "acquire_cell_round" not in worker

@@ -179,6 +179,24 @@ class CellDiagnosticStore:
 
         self._load()
 
+    @classmethod
+    def in_memory(cls, max_samples_per_module: int = 8640):
+        """Create a non-persistent store for an isolated analysis snapshot."""
+        instance = cls.__new__(cls)
+        instance.path = None
+        instance.max_samples = max_samples_per_module
+        instance.identity_samples = defaultdict(
+            lambda: deque(maxlen=max_samples_per_module))
+        instance.unknown_samples = defaultdict(
+            lambda: deque(maxlen=max_samples_per_module))
+        instance._latest_by_position = {}
+        instance._documented_current_identity = {}
+        instance._analysis_cache = {}
+        instance.rebuild_sources = {}
+        instance.expected_materialized_coverage = {}
+        instance.load_error = False
+        return instance
+
     def _load(self):
         try:
             if self.path.exists():

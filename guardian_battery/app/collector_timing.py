@@ -104,6 +104,7 @@ class CollectorTiming:
         self._cell_overrun_max = 0.0
         self._cell_analysis_profiles = []
         self._cell_analysis_global = {}
+        self._analysis_worker = {}
 
     def cycle_started(self, wall_time: float, monotonic_time: float) -> None:
         with self._lock:
@@ -186,6 +187,27 @@ class CollectorTiming:
             self._cell_analysis_profiles = bounded
             self._cell_analysis_global = global_value
 
+    def analysis_worker_status(self, status) -> None:
+        """Publish the latest bounded worker lifecycle counters."""
+        try:
+            value = dict(status)
+        except Exception:
+            return
+        with self._lock:
+            self._analysis_worker = value
+            for source, target in (
+                ("active", "analysis_worker_active"),
+                ("pending", "analysis_worker_pending"),
+                ("generation_active", "analysis_worker_generation_active"),
+                ("generation_latest", "analysis_worker_generation_latest"),
+                ("last_duration_seconds", "analysis_worker_last_duration_seconds"),
+                ("last_completed_at", "analysis_worker_last_completed_at"),
+                ("age_seconds", "analysis_worker_age_seconds"),
+                ("coalesced_count", "analysis_coalesced_count"),
+                ("failure_count", "analysis_failure_count"),
+            ):
+                self._current[target] = value.get(source)
+
     def snapshot(self) -> dict:
         with self._lock:
             result = dict(self._current)
@@ -207,4 +229,5 @@ class CollectorTiming:
                 "modules": list(self._cell_analysis_profiles),
                 "global": dict(self._cell_analysis_global),
             }
+            result["cell_analysis_worker"] = dict(self._analysis_worker)
             return result

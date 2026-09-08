@@ -144,6 +144,11 @@ def test_cell_analysis_profiling_ui_is_bounded_and_read_only():
     assert "Identity Buffer Count" in html and "Unknown Buffer Count" in html
     assert "Aggregate Records global" in html and "Maintenance Events" in html
     assert "Derived Writer aktiv" in html and "Derived Writer pending" in html
+    assert "Analysis Worker aktiv" in html and "Analysis Worker pending" in html
+    assert "generation_active" in html and "generation_latest" in html
+    assert "generation_submitted" in html and "Profiling Generation" in html
+    assert "coalesced_count" in html and "failure_count" in html
+    assert "Analysis Snapshot Build" in html and "Analysis Worker Submit" in html
     assert "module_analysis_total_seconds" in html
     assert "values_and_validation_seconds" in html
     assert "capacity_and_curves_seconds" in html

@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Optional
 
 from cell_diagnostics import CellDiagnosticStore, DIAGNOSTIC_PARAMETER_META
+from cell_analysis_worker import (CellAnalysisWorker, analyse_cell_snapshot,
+                                  build_analysis_snapshot,
+                                  project_latest_analysis)
 from cell_acquisition import acquire_cell_round
 from cell_history import CellHistoryWriter
 from collector_timing import CollectorTiming, PeriodicDeadline, ProfilingTimer
@@ -1252,6 +1255,9 @@ def main() -> None:
     persistence_worker = DerivedPersistenceWorker(
         cell_store, aggregate_store, timing=timing)
     persistence_worker.start()
+    analysis_worker = CellAnalysisWorker(analyse_cell_snapshot)
+    analysis_worker.start()
+    analysis_generation = 0
     maintenance_log = MaintenanceEventLog(DEFAULT_MAINTENANCE_EVENT_FILE)
     maintenance_events = ()
     maintenance_mtime_ns = None
@@ -1329,7 +1335,7 @@ def main() -> None:
                 incident = update_incident_state(status, alarms, options)
                 log_result(modules, status, alarms, bool(options["detailed_log"]))
                 timing.duration("pwr_processing", time.monotonic() - section_started)
-                now_wall=time.time(); cell_results={}
+                now_wall=time.time(); cell_results={}; analysis_source_sample_at = None
                 section_started = time.monotonic()
                 if modules and now_wall-last_stat_poll >= int(options["bms_stat_interval_seconds"]):
                     try:
@@ -1429,6 +1435,9 @@ def main() -> None:
                         cell_store.persistence_payload(),
                         aggregate_store.persistence_payload(),
                     )
+                    if acquired_samples:
+                        analysis_source_sample_at = max(
+                            sample.timestamp for sample in acquired_samples)
                     timing.cell_finished(time.monotonic() - cell_started)
                     # If this round crossed another cell slot, skip that missed
                     # slot instead of launching an immediate catch-up round.
@@ -1445,48 +1454,34 @@ def main() -> None:
                 except Exception as exc:
                     LOG.warning("Maintenance-Kontext nicht lesbar: %s", exc)
                     maintenance_events = ()
-                section_started = time.monotonic()
-                analysis_profiles = []
-                for module in modules:
-                    module_profiler = ProfilingTimer()
-                    module_started = module_profiler.start()
-                    stage_started = module_profiler.start()
-                    latest_serial = cell_store.current_serial(module.module)
-                    module_profiler.finish("current_serial", stage_started)
-                    stage_started = module_profiler.start()
-                    aggregate_records = aggregate_store.for_identity(
-                        module.module, latest_serial)
-                    module_profiler.finish("aggregate_for_identity", stage_started)
-                    store_profiler = module_profiler.child()
-                    stage_started = module_profiler.start()
-                    analysis = cell_store.analyse(
-                        module.module, options, maintenance_events,
-                        aggregate_records, profiler=store_profiler,
-                    )
-                    module_profiler.finish("store_analyse", stage_started)
-                    stage_started = module_profiler.start()
-                    cell_results[module.module] = {
-                        **analysis, "physical_module_serial": latest_serial
-                    }
-                    module_profiler.finish("result_assembly", stage_started)
-                    module_profiler.finish("module_analysis_total", module_started)
-                    module_profiler.counter("module_position", int(module.module))
-                    module_profiler.counter("physical_serial", latest_serial)
-                    module_profiler.counter("sample_count", analysis.get("sample_count"))
-                    module_profiler.counter("aggregate_record_count", len(aggregate_records))
-                    module_profiler.section("store", store_profiler.snapshot())
-                    analysis_profiles.append(module_profiler.snapshot())
-                timing.duration("cell_analysis", time.monotonic() - section_started)
+                if analysis_source_sample_at is not None:
+                    snapshot_started = time.monotonic()
+                    analysis_generation += 1
+                    analysis_payload = build_analysis_snapshot(
+                        cell_store, aggregate_store,
+                        [module.module for module in modules], options,
+                        maintenance_events, persistence_worker.status())
+                    timing.duration("analysis_snapshot_build",
+                                    time.monotonic() - snapshot_started)
+                    submit_started = time.monotonic()
+                    analysis_worker.submit(
+                        analysis_generation, analysis_source_sample_at,
+                        analysis_payload)
+                    timing.duration("analysis_submit",
+                                    time.monotonic() - submit_started)
+                latest_analysis = analysis_worker.latest()
+                cell_results = project_latest_analysis(
+                    latest_analysis, cell_store.current_serial)
                 try:
-                    writer_profile = persistence_worker.status()
-                    global_profile = {
-                        **cell_store.profiling_counts(),
-                        "aggregate_records_global": len(aggregate_store.records),
-                        "maintenance_event_count": len(maintenance_events),
-                        "derived_writer_active": bool(writer_profile.get("active")),
-                        "derived_writer_pending": bool(writer_profile.get("pending")),
-                    }
-                    timing.cell_analysis_profiles(analysis_profiles, global_profile)
+                    worker_status = analysis_worker.status()
+                    timing.analysis_worker_status(worker_status)
+                    if latest_analysis is not None:
+                        timing.cell_analysis_profiles(
+                            latest_analysis["profiles"],
+                            {**latest_analysis["global_profile"],
+                             "analysis_generation": latest_analysis["generation"],
+                             "analysis_source_sample_at": latest_analysis["source_sample_at"],
+                             "analysis_analyzed_at": latest_analysis["analyzed_at"]})
                 except Exception:
                     LOG.debug("Cell analysis profiling projection unavailable", exc_info=True)
                 section_started = time.monotonic()
@@ -1540,7 +1535,8 @@ def main() -> None:
             measured = timing.snapshot()
             accounted = sum(float(measured.get(f"{name}_duration_seconds", 0.0) or 0.0)
                             for name in ("pwr_request", "pwr_processing", "stat_info",
-                                         "cell_cycle", "cell_analysis",
+                                         "cell_cycle", "analysis_snapshot_build",
+                                         "analysis_submit",
                                          "mqtt_projection", "topology_position"))
             timing.duration("remaining_other", max(0.0, elapsed - accounted))
             timing.cycle_finished(elapsed)
@@ -1560,6 +1556,11 @@ def main() -> None:
                 poll_deadline.consume()
             time.sleep(poll_deadline.delay())
     finally:
+        try:
+            if not analysis_worker.stop():
+                LOG.warning("Cell analysis worker did not stop within timeout")
+        except Exception as exc:
+            LOG.warning("Cell analysis worker stop failed: %s", exc)
         try:
             if not persistence_worker.stop():
                 LOG.warning("Derived diagnostic persistence did not stop within timeout")

@@ -139,6 +139,10 @@ def compact_module_state(module: int, result: Mapping[str, Any] | None,
         "maintenance_risk": result.get("maintenance_risk"),
         "trend_risk_confidence": result.get("trend_risk_confidence"),
         "provenance_id": provenance_id,
+        "analysis_generation": result.get("analysis_generation"),
+        "analysis_source_sample_at": result.get("analysis_source_sample_at"),
+        "analysis_analyzed_at": result.get("analysis_analyzed_at"),
+        "analysis_age_seconds": result.get("analysis_age_seconds"),
     }
 
 

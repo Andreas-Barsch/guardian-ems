@@ -138,6 +138,20 @@ def test_projection_is_compact_and_excludes_internal_structures():
     } <= set(cell_projection)
     assert not (set(walk_keys(module_projection)) | set(walk_keys(cell_projection))) & FORBIDDEN
     assert len(json.dumps(cell_projection, ensure_ascii=False).encode()) <= MQTT_MAX_ATTRIBUTE_BYTES
+
+
+def test_module_projection_exposes_derived_analysis_freshness():
+    result = diagnostic_result(1) | {
+        "analysis_generation": 12,
+        "analysis_source_sample_at": 100.0,
+        "analysis_analyzed_at": 105.0,
+        "analysis_age_seconds": 7.5,
+    }
+    projected = compact_battery_diagnostics({1: result}, {})[0]
+    assert projected["analysis_generation"] == 12
+    assert projected["analysis_source_sample_at"] == 100.0
+    assert projected["analysis_analyzed_at"] == 105.0
+    assert projected["analysis_age_seconds"] == 7.5
     assert "advanced_diagnostics" in result
     assert "transported_charge_ah" in set(walk_keys(result))
 
