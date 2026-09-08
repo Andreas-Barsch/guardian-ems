@@ -147,6 +147,12 @@ def test_mqtt_subtiming_ui_shows_wall_cpu_groups_and_return_codes():
     assert "success_count" in html and "no_conn_count" in html
     assert "queue_full_count" in html and "other_error_count" in html
     assert "mqtt_publish_max_group" in html
+    assert "derived_publish_performed" in html
+    assert "derived_publish_skipped" in html
+    assert "derived_publish_generation" in html
+    assert "last_successfully_published_generation" in html
+    assert "derived_publish_failure_count" in html
+    assert "derived_publish_invalidated_by_reconnect" in html
 
 
 def test_collector_cell_intervals_sort_numerically_by_position_then_serial():

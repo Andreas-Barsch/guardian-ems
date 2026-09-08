@@ -36,6 +36,31 @@ class FakeClient:
         return FakeResult()
 
 
+def managed_result(module=1, generation=7, serial="SN-1", config="cfg-1"):
+    result = diagnostic_result(module)
+    result["physical_module_serial"] = serial
+    result["advanced_diagnostics"]["config_id"] = config
+    result.update({
+        "analysis_generation": generation,
+        "analysis_source_sample_at": 100.0,
+        "analysis_analyzed_at": 105.0,
+        "analysis_age_seconds": 5.0,
+    })
+    context = {
+        "generation": generation, "config_id": config,
+        "module_identities": {module: serial},
+    }
+    return result, context
+
+
+def publish_managed(publisher, module, result, context, *, status="ok"):
+    publisher.publish(
+        [module], status, [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"},
+        {module.module: result}, {}, {module.module: {"barcode": "SN-1"}},
+        analysis_context=context)
+
+
 def method(status="BEWERTBAR"):
     return {
         "status": status, "quality": "HIGH", "trend": "stabil", "valid_data": 8640,
@@ -195,6 +220,197 @@ def test_six_module_ninety_cell_worst_case_all_mqtt_packets_are_bounded_and_reta
     assert not set(walk_keys(state)) & FORBIDDEN
     discovery = [call for call in client.calls if call["topic"].startswith("homeassistant/")]
     assert discovery and all(call["retain"] for call in discovery)
+
+
+def test_same_analysis_generation_skips_only_derived_and_keeps_live_projection():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    result, context = managed_result()
+    first_module = modules()[0]
+    publish_managed(publisher, first_module, result, context)
+    first_count = len(client.calls)
+    client.calls.clear()
+    changed = Module(**(first_module.__dict__ | {"soc_percent": 54}))
+    publish_managed(publisher, changed, result, context)
+    topics = [call["topic"] for call in client.calls]
+    assert len(client.calls) < first_count
+    assert "guardian/battery/sensor/module_1_soc/state" in topics
+    assert "guardian/battery/sensor/module_1_cell_delta/state" in topics
+    assert "guardian/battery/sensor/module_1_cell_diag_live/state" in topics
+    assert "guardian/battery/sensor/module_1_cell_1_status/state" not in topics
+    assert "guardian/battery/sensor/module_1_cell_diag_status/state" not in topics
+    assert client.calls[topics.index("guardian/battery/sensor/module_1_soc/state")]["payload"] == "54"
+
+
+def test_same_generation_keeps_new_live_alarm_and_mixed_battery_state_current():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    result, context = managed_result()
+    module = modules()[0]
+    publish_managed(publisher, module, result, context)
+    client.calls.clear()
+    alarm = {"level": "critical", "code": "cell_delta_critical",
+             "module": 1, "message": "critical live delta"}
+    publisher.publish(
+        [module], "critical", [alarm], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"}, {1: result}, {},
+        {1: {"barcode": "SN-1"}}, analysis_context=context)
+    calls = {item["topic"]: item["payload"] for item in client.calls}
+    assert json.loads(calls["guardian/battery/alarms"]) == [alarm]
+    assert json.loads(calls["guardian/battery/state"])["status"] == "critical"
+    assert calls["guardian/battery/sensor/stack_status/state"] == "critical"
+    assert "guardian/battery/sensor/module_1_cell_1_status/state" not in calls
+
+
+def test_new_generation_config_identity_and_reconnect_each_republish_derived():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    module = modules()[0]
+    result, context = managed_result()
+    publish_managed(publisher, module, result, context)
+    derived_topic = "guardian/battery/sensor/module_1_cell_1_status/state"
+    client.calls.clear(); publish_managed(publisher, module, result, context)
+    assert derived_topic not in [call["topic"] for call in client.calls]
+    for changed_result, changed_context in (
+        managed_result(generation=8),
+        managed_result(generation=8, config="cfg-2"),
+        managed_result(generation=8, serial="SN-2", config="cfg-2"),
+    ):
+        client.calls.clear()
+        publish_managed(publisher, module, changed_result, changed_context)
+        assert derived_topic in [call["topic"] for call in client.calls]
+    publisher._on_mqtt_connect(None, None, None, 0)
+    client.calls.clear()
+    publisher.begin_cycle_profile(9)
+    publish_managed(publisher, module, changed_result, changed_context)
+    profile = publisher.finish_cycle_profile(1, .1)
+    assert derived_topic in [call["topic"] for call in client.calls]
+    assert profile["derived_publish_invalidated_by_reconnect"] is True
+
+
+def test_connection_loss_during_derived_publish_does_not_mark_success():
+    class Disconnecting(FakeClient):
+        def __init__(self):
+            super().__init__(); self.connected = True
+
+        def is_connected(self):
+            return self.connected
+
+        def publish(self, topic, payload, retain=False):
+            result = super().publish(topic, payload, retain)
+            if topic.endswith("cell_1_status/state"):
+                self.connected = False
+            return result
+
+    client = Disconnecting()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    result, context = managed_result()
+    publish_managed(publisher, modules()[0], result, context)
+    assert publisher._last_successfully_published_derived_key is None
+    assert publisher._derived_publish_failure_count == 1
+
+
+def test_failed_derived_return_code_does_not_mark_generation_complete():
+    class RcClient(FakeClient):
+        def publish(self, topic, payload, retain=False):
+            super().publish(topic, payload, retain)
+            result = FakeResult()
+            result.rc = 4 if topic.endswith("cell_1_status/state") else 0
+            return result
+
+    client = RcClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    result, context = managed_result()
+    publish_managed(publisher, modules()[0], result, context)
+    assert publisher._last_successfully_published_derived_key is None
+    first = len(client.calls); client.calls.clear()
+    publish_managed(publisher, modules()[0], result, context)
+    assert len(client.calls) == first
+    assert publisher._derived_publish_failure_count == 2
+
+
+def test_managed_first_publish_preserves_legacy_topics_payload_order_and_retain():
+    result, context = managed_result()
+    module = modules()[0]
+    clients = [FakeClient(), FakeClient()]
+    publishers = []
+    for client in clients:
+        value = Mqtt.__new__(Mqtt)
+        value.prefix = "guardian"; value.client = client
+        value.discovery_enabled = False
+        value.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+        publishers.append(value)
+    publishers[0].publish(
+        [module], "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"}, {1: result}, {},
+        {1: {"barcode": "SN-1"}})
+    publish_managed(publishers[1], module, result, context)
+    assert [(item["topic"], item["retain"]) for item in clients[1].calls] == \
+        [(item["topic"], item["retain"]) for item in clients[0].calls]
+    for managed, legacy in zip(clients[1].calls, clients[0].calls):
+        if managed["topic"] == "guardian/battery/state":
+            managed_payload = json.loads(managed["payload"])
+            legacy_payload = json.loads(legacy["payload"])
+            managed_payload.pop("timestamp"); legacy_payload.pop("timestamp")
+            assert managed_payload == legacy_payload
+        elif managed["topic"].endswith("/last_update/state"):
+            assert managed["payload"] and legacy["payload"]
+        else:
+            assert managed["payload"] == legacy["payload"]
+
+
+def test_derived_exception_retries_and_cycle_observability_is_bounded():
+    class BrokenOnce(FakeClient):
+        def __init__(self):
+            super().__init__(); self.broken = True
+
+        def publish(self, topic, payload, retain=False):
+            if self.broken and topic.endswith("cell_1_status/state"):
+                self.broken = False
+                raise OSError("derived broken")
+            return super().publish(topic, payload, retain)
+
+    client = BrokenOnce()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    result, context = managed_result()
+    publisher.begin_cycle_profile(1)
+    with pytest.raises(OSError, match="derived broken"):
+        publish_managed(publisher, modules()[0], result, context)
+    assert publisher._last_successfully_published_derived_key is None
+    publisher.finish_cycle_profile(1, .1)
+    publisher.begin_cycle_profile(2)
+    publish_managed(publisher, modules()[0], result, context)
+    profile = publisher.finish_cycle_profile(1, .1)
+    assert profile["derived_publish_performed"] is True
+    assert profile["derived_publish_skipped"] is False
+    assert profile["derived_publish_generation"] == 7
+    assert profile["last_successfully_published_generation"] == 7
+    assert profile["derived_publish_performed_count"] == 1
+    assert profile["derived_publish_failure_count"] == 1
+    publisher.begin_cycle_profile(3)
+    publish_managed(publisher, modules()[0], result, context)
+    skipped = publisher.finish_cycle_profile(1, .1)
+    assert skipped["derived_publish_skipped"] is True
+    assert skipped["groups"]["cell_diagnostics"]["publish_count"] < \
+        profile["groups"]["cell_diagnostics"]["publish_count"]
 
 
 def test_live_topology_projects_four_of_five_and_invalidates_retained_live_values():

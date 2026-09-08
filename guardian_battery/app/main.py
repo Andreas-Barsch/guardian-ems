@@ -623,6 +623,15 @@ class Mqtt:
         self.prefix = options["mqtt_topic_prefix"].rstrip("/")
         self.discovery_enabled = bool(options["publish_discovery"])
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="guardian_battery")
+        self._derived_reconnect_epoch = 0
+        self._last_successfully_published_derived_key = None
+        self._derived_publish_performed_count = 0
+        self._derived_publish_skipped_count = 0
+        self._derived_publish_failure_count = 0
+        self._derived_attempt_active = False
+        self._derived_attempt_failed = False
+        self._derived_republish_required_by_reconnect = False
+        self.client.on_connect = self._on_mqtt_connect
         if username:
             self.client.username_pw_set(username, password)
 
@@ -632,6 +641,70 @@ class Mqtt:
         self._publish(f"{self.prefix}/battery/availability", "online", retain=True)
         self.maintenance_events = MaintenanceMqttPublisher(self.client, self.prefix)
         self._cycle_profiler = None
+
+    def _on_mqtt_connect(self, _client, _userdata, _flags, _reason_code,
+                         _properties=None):
+        # Includes the initial connection. The epoch is process-local and only
+        # invalidates the bounded derived-publish key; discovery behavior stays
+        # under Paho/Guardian's existing lifecycle.
+        self._derived_reconnect_epoch += 1
+        if self._last_successfully_published_derived_key is not None:
+            self._derived_republish_required_by_reconnect = True
+
+    def _ensure_derived_publish_state(self):
+        # Tests and small projections construct Mqtt via __new__.
+        defaults = {
+            "_derived_reconnect_epoch": 0,
+            "_last_successfully_published_derived_key": None,
+            "_derived_publish_performed_count": 0,
+            "_derived_publish_skipped_count": 0,
+            "_derived_publish_failure_count": 0,
+            "_derived_attempt_active": False,
+            "_derived_attempt_failed": False,
+            "_derived_republish_required_by_reconnect": False,
+        }
+        for name, value in defaults.items():
+            if not hasattr(self, name):
+                setattr(self, name, value)
+
+    def _derived_publish_key(self, cell_results, analysis_context):
+        if not cell_results or not analysis_context:
+            return None
+        generation = analysis_context.get("generation")
+        if generation is None:
+            return None
+        identities = tuple(sorted(
+            (int(position), result.get("physical_module_serial"))
+            for position, result in cell_results.items()))
+        return (int(generation), analysis_context.get("config_id"), identities,
+                self._derived_reconnect_epoch)
+
+    def _record_derived_publish(self, *, performed, skipped, failed,
+                                generation, invalidated_by_reconnect=False):
+        if performed:
+            self._derived_publish_performed_count += 1
+        if skipped:
+            self._derived_publish_skipped_count += 1
+        if failed:
+            self._derived_publish_failure_count += 1
+        profiler = getattr(self, "_cycle_profiler", None)
+        if profiler is not None:
+            profiler.derived_publish_record(
+                performed=performed, skipped=skipped, failed=failed,
+                generation=generation,
+                last_successful=(None if self._last_successfully_published_derived_key is None
+                                 else self._last_successfully_published_derived_key[0]),
+                performed_count=self._derived_publish_performed_count,
+                skipped_count=self._derived_publish_skipped_count,
+                failure_count=self._derived_publish_failure_count)
+            profiler.derived_publish["invalidated_by_reconnect"] = bool(
+                invalidated_by_reconnect)
+
+    def _mqtt_is_connected(self):
+        try:
+            return bool(self.client.is_connected())
+        except Exception:
+            return None
 
     def begin_cycle_profile(self, cycle_id):
         self._cycle_profiler = MqttCycleProfiler(cycle_id, self.client)
@@ -819,6 +892,10 @@ class Mqtt:
             )
         started = time.monotonic(); cpu_started = time.thread_time()
         result = self.client.publish(topic, payload, retain=retain)
+        if (getattr(self, "_derived_attempt_active", False)
+                and getattr(result, "rc", mqtt.MQTT_ERR_SUCCESS)
+                not in (None, mqtt.MQTT_ERR_SUCCESS)):
+            self._derived_attempt_failed = True
         profiler = getattr(self, "_cycle_profiler", None)
         if profiler is not None:
             profiler.publish_record(
@@ -852,6 +929,68 @@ class Mqtt:
         bms_stat: dict | None = None,
         module_infos: dict[int, dict] | None = None,
         live_topology: dict[int, dict] | None = None,
+        analysis_context: dict | None = None,
+    ) -> None:
+        self._ensure_derived_publish_state()
+        results = cell_results or {}
+        key = self._derived_publish_key(results, analysis_context)
+        # Callers without an analysis context retain the historical projection
+        # contract. The production loop always supplies the worker result.
+        unmanaged = bool(results) and analysis_context is None
+        publish_derived = unmanaged or (key is not None
+                                        and key != self._last_successfully_published_derived_key)
+        generation = None if key is None else key[0]
+        skipped = key is not None and not publish_derived
+        invalidated_by_reconnect = bool(
+            self._derived_republish_required_by_reconnect)
+        self._derived_attempt_active = publish_derived
+        self._derived_attempt_failed = False
+        try:
+            self._publish_cycle(
+                modules, status, alarms, options, persistent, trends, incident,
+                results, bms_stat, module_infos, live_topology,
+                publish_derived=publish_derived)
+        except Exception:
+            self._derived_attempt_active = False
+            if not unmanaged:
+                self._record_derived_publish(
+                    performed=False, skipped=False, failed=publish_derived,
+                    generation=generation,
+                    invalidated_by_reconnect=invalidated_by_reconnect)
+            raise
+        self._derived_attempt_active = False
+        failed = publish_derived and self._derived_attempt_failed
+        if publish_derived and self._mqtt_is_connected() is False:
+            failed = True
+        if key is not None and publish_derived and not failed:
+            # A callback may have advanced the reconnect epoch during the
+            # multi-topic projection. Such a burst is deliberately retried.
+            if key[-1] == self._derived_reconnect_epoch:
+                self._last_successfully_published_derived_key = key
+                self._derived_republish_required_by_reconnect = False
+            else:
+                failed = True
+        if not unmanaged:
+            self._record_derived_publish(
+                performed=publish_derived and not failed, skipped=skipped,
+                failed=failed, generation=generation,
+                invalidated_by_reconnect=invalidated_by_reconnect)
+
+    def _publish_cycle(
+        self,
+        modules: list[Module],
+        status: str,
+        alarms: list[dict],
+        options: dict,
+        persistent: dict,
+        trends: dict[int, dict],
+        incident: dict,
+        cell_results: dict[int, dict] | None = None,
+        bms_stat: dict | None = None,
+        module_infos: dict[int, dict] | None = None,
+        live_topology: dict[int, dict] | None = None,
+        *,
+        publish_derived: bool = True,
     ) -> None:
         guardian_started = time.monotonic(); guardian_cpu = time.thread_time()
         soc_peers = current_stack_soc(modules)
@@ -1058,21 +1197,9 @@ class Mqtt:
                 f"{base}_min_cell": module.min_cell_v,
                 f"{base}_max_cell": module.max_cell_v,
                 f"{base}_cell_delta": module.delta_mv,
-                f"{base}_cell_median": None,
                 f"{base}_mos_temperature": module.mos_temperature_c,
             }
             diag = cell_results.get(module.module, {})
-            values[f"{base}_cell_median"] = diag.get("current_median_mv")
-            values.update({
-                f"{base}_cell_diag_status": diag.get("status"),
-                f"{base}_cell_diag_confidence": diag.get("confidence"),
-                f"{base}_cell_diag_samples": diag.get("sample_count"),
-                f"{base}_cell_diag_worst_cell": diag.get("evidence_worst_cell"),
-                f"{base}_cell_diag_evidence": diag.get("evidence_deviation_mv"),
-                f"{base}_cell_diag_trend": diag.get("trend"),
-                f"{base}_cell_diag_maintenance_risk": diag.get("maintenance_risk"),
-                f"{base}_cell_diag_trend_risk_confidence": diag.get("trend_risk_confidence"),
-            })
             for key, value in values.items(): self.state(key, value)
             self.attributes(f"{base}_soc_peer_deviation", {
                 "definition": "Modul-SOC minus Median der gleichzeitig vorhandenen Stackmodule.",
@@ -1080,7 +1207,20 @@ class Mqtt:
                 "physical_identity": module_info.get("barcode") if module_info else None,
                 "evidence_level": "observation", "causality": "not_determined",
             })
-            if diag.get("current_median_mv") is not None:
+            if publish_derived:
+                derived_values = {
+                    f"{base}_cell_median": diag.get("current_median_mv"),
+                    f"{base}_cell_diag_status": diag.get("status"),
+                    f"{base}_cell_diag_confidence": diag.get("confidence"),
+                    f"{base}_cell_diag_samples": diag.get("sample_count"),
+                    f"{base}_cell_diag_worst_cell": diag.get("evidence_worst_cell"),
+                    f"{base}_cell_diag_evidence": diag.get("evidence_deviation_mv"),
+                    f"{base}_cell_diag_trend": diag.get("trend"),
+                    f"{base}_cell_diag_maintenance_risk": diag.get("maintenance_risk"),
+                    f"{base}_cell_diag_trend_risk_confidence": diag.get("trend_risk_confidence"),
+                }
+                for key, value in derived_values.items(): self.state(key, value)
+            if publish_derived and diag.get("current_median_mv") is not None:
                 self.attributes(
                     f"{base}_cell_median",
                     {
@@ -1093,7 +1233,7 @@ class Mqtt:
                         "soh_hinweis": "Kein SOH-Wert und keine eigenständige Zellgesundheitsbewertung.",
                     },
                 )
-            for cell in diag.get("cells", []):
+            for cell in diag.get("cells", []) if publish_derived else ():
                 cp=f"{base}_cell_{cell['cell']}"
                 self.state(f"{cp}_status", cell.get("status")); self.state(f"{cp}_confidence", cell.get("confidence"))
                 self.state(f"{cp}_voltage", cell.get("current_voltage_mv")); self.state(f"{cp}_deviation", cell.get("current_deviation_mv")); self.state(f"{cp}_evidence", cell.get("evidence_deviation_mv"))
@@ -1572,6 +1712,7 @@ def main() -> None:
                     modules, status, alarms, options, persistent, trends, incident,
                     cell_results, bms_stat, module_infos,
                     current_presence(expected_module_count=int(options["module_count"])),
+                    analysis_context=latest_analysis,
                 )
                 if rs485_reader is not None:
                     rs485_started = time.monotonic(); rs485_cpu = time.thread_time()

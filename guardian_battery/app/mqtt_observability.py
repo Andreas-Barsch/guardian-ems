@@ -69,6 +69,10 @@ class MqttCycleProfiler:
         self.max_publish_wall = 0.0
         self.max_publish_cpu = 0.0
         self.connected_before = self._connected()
+        self.derived_publish = None
+
+    def derived_publish_record(self, **values):
+        self.derived_publish = dict(values)
 
     def _connected(self):
         try:
@@ -145,7 +149,7 @@ class MqttCycleProfiler:
         # its remaining projection work therefore stays in MQTT Other.
         accounted_wall = build_wall + self.json_wall + self.publish_wall
         accounted_cpu = build_cpu + self.json_cpu + self.publish_cpu
-        return {
+        result = {
             "cycle_id": self.cycle_id,
             "mqtt_projection_wall_seconds": float(total_wall),
             "mqtt_projection_thread_cpu_seconds": float(total_cpu),
@@ -181,3 +185,16 @@ class MqttCycleProfiler:
             "connected_after": self._connected(),
             "queue_evidence": "unavailable_private_paho_state",
         }
+        if self.derived_publish is not None:
+            result.update({
+                "derived_publish_performed": self.derived_publish["performed"],
+                "derived_publish_skipped": self.derived_publish["skipped"],
+                "derived_publish_generation": self.derived_publish["generation"],
+                "last_successfully_published_generation": self.derived_publish["last_successful"],
+                "derived_publish_performed_count": self.derived_publish["performed_count"],
+                "derived_publish_skipped_count": self.derived_publish["skipped_count"],
+                "derived_publish_failure_count": self.derived_publish["failure_count"],
+                "derived_publish_invalidated_by_reconnect": self.derived_publish[
+                    "invalidated_by_reconnect"],
+            })
+        return result
