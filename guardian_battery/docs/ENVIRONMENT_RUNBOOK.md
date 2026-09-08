@@ -2,6 +2,21 @@
 
 Stand: 2026-09-08
 
+## Guardian Battery 0.7.29 – Generation-Aware Derived MQTT Projection
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.29`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Mindestens einen Poll mit neuem Derived Result und die darauffolgenden Polls mit derselben Generation getrennt erfassen. Je Poll Cycle ID, MQTT Wall/CPU, Publish Count, Payload Bytes, Cell Diagnostics Calls und Publish Wall/CPU dokumentieren.
+- Zusätzlich `derived_publish_performed`, `derived_publish_skipped`, `derived_publish_generation`, `last_successfully_published_generation`, process-lokale Performed-/Skipped-/Failure-Zähler und `derived_publish_invalidated_by_reconnect` prüfen.
+- Bei einer unveränderten erfolgreich publizierten Generation muss Derived Publish als skipped erscheinen; Cell-Diagnostics-Calls und MQTT Wall sollen auf den tatsächlich notwendigen Live-/Mixed-Anteil sinken. Keine absolute produktive Zeit vorgeben.
+- Bei einer neuen Generation muss Derived Publish als performed erscheinen. Ein großer synchroner Cell-Diagnostic-Burst bleibt möglich und darf weiterhin deutlich langsamer sein; 0.7.29 beseitigt nur redundante Wiederholungen und führt keinen MQTT Worker oder Batching ein.
+- Einen MQTT-Reconnect prüfen: Der aktuelle Analysis Result State bleibt erhalten, die Derived-Projektion wird invalidiert und beim nächsten sicheren Poll vollständig erneut publiziert. Exception, Returncode ungleich Success oder Connection Loss dürfen keinen Erfolgsmarker erzeugen.
+- Nach mehreren Zyklen Hauptpoll-Intervalle, Cell Sampling, Per-Serial Cell Interval sowie Cycle- und Cell-Overruns erfassen. Zielwerte bleiben Cell-Median höchstens 70 Sekunden und P95 höchstens 90 Sekunden; sie werden durch diesen Patch nicht garantiert.
+- Nach stabiler 0.7.29-Messung die Zeitverläufe erneut laden und deren Wall-Time messen. History selbst bleibt in diesem Release unverändert.
+- Live-/Mixed-Cadence, Topics, Payloads, Reihenfolge, QoS, Retain, Discovery, Scheduler, Acquisition, Analysis Worker, Derived Persistence, Raw Evidence, Diagnostics, Risk, Alarme, RS485 und Hycube bleiben unverändert.
+- Dieses Source-Release führt kein Deployment, keinen Add-on-Neustart und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.28 – MQTT Per-Publish Production Observability
 
 ### Produktive Ursachenmessung nach separatem Deployment

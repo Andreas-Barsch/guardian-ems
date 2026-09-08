@@ -1,5 +1,18 @@
 # Guardian Battery Changelog
 
+## 0.7.29 – Generation-Aware Derived MQTT Projection
+
+- Publiziert ausschließlich verifizierte Derived-only Cell Diagnostics bei einer neuen vollständig abgeschlossenen Analysis Generation. Modul-Zellmedian, Diagnosezustände, Confidence, Evidence, Trend, Maintenance Risk sowie Zell-Diagnose-States und -Attribute werden bei unveränderter bereits erfolgreich publizierter Generation nicht redundant wiederholt.
+- Live- und gemischte MQTT-Werte bleiben in ihrer bisherigen Poll-Cadence: Spannung, Strom, SOC, Temperatur, aktuelle Zell-Min/Max, Zellspreizung, Live-Trends, Alarme, `cell_diag_config`, `module_*_cell_diag_live` und `battery/state` werden weiterhin regulär aktualisiert.
+- Der bounded process-lokale Publish-Schlüssel verwendet die vorhandene Analysis Generation und Config-ID sowie die kanonische Position-zu-`physical_module_serial`-Provenienz und eine Reconnect-Epoche. Positionen werden nicht als physische Identität behandelt; es gibt keinen persistenten Dedup-State, Topic-Cache, Payload-Hash oder Payloadvergleich.
+- Ein erfolgreicher MQTT-Reconnect invalidiert den Derived-Publish-State und löst beim nächsten sicheren Poll einen vollständigen Republish des aktuellen Derived State aus. Der Analysis Result State selbst bleibt erhalten.
+- Eine Generation gilt erst nach dem vollständigen vorgesehenen Derived-Burst als erfolgreich publiziert. Exception, MQTT-Returncode ungleich Success oder Connection Loss verhindern den Marker; ein partieller Burst wird beim nächsten geeigneten Poll vollständig erneut versucht.
+- Das MQTT-Per-Publish-Subtiming aus 0.7.28 bleibt erhalten und ergänzt performed/skipped, aktuelle und zuletzt erfolgreich publizierte Generation, process-lokale Erfolgs-/Skip-/Failure-Zähler sowie Reconnect-Invalidierung.
+- Produktiv wurden zuvor in einem problematischen Poll 4.014 Publishes beobachtet, davon 3.692 Cell-Diagnostics-Publishes mit 47,18 Sekunden Publish Wall. Lokal reduzierte die unveränderte bereits publizierte Generation den repräsentativen Ein-Modul-Pfad von 649 auf 69 Calls und von 303.792 auf 5.629 Payload-Bytes; dies ist keine produktive Laufzeitgarantie.
+- Der einmalige Burst einer neuen Analysis Generation bleibt synchron und kann weiterhin mehrere tausend Publishes und erhebliche Wall-Time verursachen. Dieser Release führt keinen MQTT Worker, kein Batching und keine weitere Performanceoptimierung ein.
+- Topics, Payloads, Reihenfolge, QoS, Retain und Discovery eines tatsächlich ausgeführten Derived-Bursts bleiben unverändert. Scheduler, Acquisition, Analysis Worker, Derived Persistence, Raw Evidence, Diagnostics, Risk, Alarme, RS485, Hycube und History bleiben unverändert.
+- Guardian Battery und Add-on sind `0.7.29`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.28 – MQTT Per-Publish Production Observability
 
 - Ergänzt cycle-accurate MQTT-Subtiming für den letzten vollständig abgeschlossenen Collector-Zyklus: MQTT Projection, Guardian Build, JSON-Serialisierung, Publish Invocation und Remaining Other werden jeweils als Wall- und Thread-CPU-Zeit ausgewiesen. RS485 MQTT bleibt eine zusätzliche diagnostische Grenze; seine JSON-/Publish-Anteile werden in der überschneidungsfreien Gesamtrechnung nicht doppelt bilanziert.
