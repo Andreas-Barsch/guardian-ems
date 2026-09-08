@@ -2,6 +2,21 @@
 
 Stand: 2026-09-08
 
+## Guardian Battery 0.7.27 – Cycle-Accurate Collector Observability
+
+### Produktive Root-Cause-Messung nach separatem Deployment
+
+- Guardian/Add-on: `0.7.27`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Für einen auffälligen vollständigen Collector-Zyklus Cycle ID, Start, Total und Remaining Other erfassen. Current Cycle und Last Completed Cycle nicht miteinander vermischen.
+- Für die zugehörige Cell-Runde Generation, Target Deadline, Actual Start, Lateness, Effective Start-to-Start, Acquisition, Post Processing, Total Main Thread, Cell Remaining Other, Next Deadline und Skipped Slots dokumentieren.
+- Als synchrone Main-Thread-Anteile Cell Store Add, Aggregate Store Add, beide Persistence Payload Builds, Persistence Submit, Maintenance Refresh, Snapshot Build, Analysis Submit, Result Adoption, MQTT und Topology erfassen.
+- Für Analysis Snapshot Total Wall und Total Thread CPU sowie Identity, Samples, Aggregates, Maintenance, Options/Config und Other dokumentieren. Je Modul Sample-/Aggregate-Projektion, Counts und Wall-/CPU-Zeit vergleichen.
+- Analysis Worker und Derived Persistence Worker ausschließlich anhand ihrer eigenen Generation, Created/Started/Completed, Wall-/CPU-Dauer und Success/Failure bewerten. Diagnostic Store Save und Aggregate Write sind Background-Persistence und keine Collector-Komponenten.
+- Wall deutlich größer als Thread CPU ist manuell als Hinweis für weitere Contention-/Descheduling-Untersuchung zu behandeln. Wall ungefähr gleich Thread CPU ist manuell als Hinweis auf tatsächliche Main-Thread-CPU-Arbeit zu untersuchen. Daraus wird keine automatische Diagnose oder Kausalität abgeleitet.
+- Negative Remaining-Other-Werte nicht ignorieren: Sie bleiben sichtbar und erhöhen den Observability Error Count. „Nicht ausgeführt“ bezeichnet einen bewusst ausgelassenen Schritt; „nicht verfügbar“ eine fehlende Instrumentierung oder Evidence.
+- 0.7.27 enthält keine Performanceoptimierung und keine Scheduleränderung. Das History-Minutenproblem bleibt separat offen.
+- Dieses Source-Release führt kein Deployment, keinen Add-on-Neustart und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.26 – Asynchronous Cell Analysis / Acquisition Recovery
 
 ### Produktive Abnahme nach separatem Deployment

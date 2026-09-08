@@ -1,5 +1,17 @@
 # Guardian Battery Changelog
 
+## 0.7.27 – Cycle-Accurate Collector Observability
+
+- Trennt den aktuell laufenden Collector-Zyklus strikt vom letzten vollständig abgeschlossenen Zyklus. Prozesslokal monotone Cycle IDs und die atomare Übernahme beim Zyklusabschluss verhindern zeitlich gemischte Timinganzeigen.
+- Ergänzt eine eigene vollständige Cell-Cycle-Evidence mit Collector Cycle ID, Cell Generation, Deadline, tatsächlichem Start, Lateness, Start-zu-Start-Intervall, Acquisition-, Post-Processing- und Main-Thread-Gesamtdauer sowie übersprungenen Slots.
+- Trennt Analysis Worker und Derived Persistence Worker in generation-aware Statusbereiche. Background-Laufzeiten verändern abgeschlossene Collector-Zyklen nicht; Diagnostic Store Save und Aggregate Write werden ausschließlich der Persistence-Generation zugeordnet.
+- Misst synchrone Payload-Erzeugung für Cell Store und Aggregate Store separat von der Background-Persistierung. Maintenance Refresh, Analysis Snapshot Build/Submit, Result Adoption, MQTT Projection und Topology/Position bleiben eindeutig dem Main Thread zugeordnet.
+- Zerlegt den unveränderten Analysis Snapshot Build in Identity-, Sample-, Aggregate-, Maintenance-, Options/Config- und sonstige Laufzeit. Bounded Modulwerte enthalten Position, Seriennummer, Samplezahl, Aggregatezahl sowie Wall- und Thread-CPU-Zeit.
+- Ergänzt Wall-vs-Thread-CPU-Evidence ohne automatische Interpretation oder Diagnoseklassifikation. Negative Collector- oder Cell-Accounting-Differenzen werden nicht kaschiert, sondern bleiben sichtbar und erhöhen den Observability Error Count.
+- Gliedert Collector Timing in letzten vollständigen Collector-Zyklus, letzte vollständige Cell-Runde, Analysis Worker, Derived Persistence Worker und bestehendes Cell Analysis Profiling. Die UI unterscheidet Messwert, „nicht ausgeführt“ und „nicht verfügbar“.
+- Dieser Release enthält keine Performanceoptimierung und keine Scheduleränderung. Er dient der produktiven Root-Cause-Messung; Acquisition, Console, Raw Evidence, History, MQTT-Semantik, Diagnose- und Risk-Algorithmen bleiben unverändert.
+- Guardian Battery und Add-on sind `0.7.27`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.26 – Asynchronous Cell Analysis / Acquisition Recovery
 
 - Entkoppelt die schwere historische Cell Analysis vom zeitkritischen Acquisition-Pfad. PWR/BAT-Erfassung, Raw Cell History, Live State und bestehende Live-Alarme bleiben synchron; Current Condition, Confidence, Evidence, Trend, Resistance, Capacity/Curves, Rest, Balancing, Maintenance Analysis und ICA Readiness werden als Derived State verarbeitet.
