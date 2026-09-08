@@ -8,6 +8,7 @@ from config_ui import DEFAULTS
 from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_diagnostic_method_summary)
+from derived_mqtt_projection import publish_derived_results
 
 
 with patch("pathlib.Path.mkdir", return_value=None):
@@ -411,6 +412,45 @@ def test_derived_exception_retries_and_cycle_observability_is_bounded():
     assert skipped["derived_publish_skipped"] is True
     assert skipped["groups"]["cell_diagnostics"]["publish_count"] < \
         profile["groups"]["cell_diagnostics"]["publish_count"]
+
+
+def test_extracted_worker_projection_matches_legacy_derived_burst_exactly():
+    result, _context = managed_result()
+    clients = [FakeClient(), FakeClient()]
+    publishers = []
+    for client in clients:
+        value = Mqtt.__new__(Mqtt); value.prefix = "guardian"; value.client = client
+        value.discovery_enabled = False; value._cycle_profiler = None
+        value.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+        publishers.append(value)
+    publishers[0]._publish_cycle(
+        [modules()[0]], "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "kein Incident"}, {1: result}, {},
+        {1: {"barcode": "SN-1"}}, publish_derived=True)
+    publish_derived_results(publishers[1], (1,), {1: result})
+    worker_calls = clients[1].calls
+    legacy = {item["topic"]: item for item in clients[0].calls}
+    assert worker_calls
+    assert [legacy[item["topic"]] for item in worker_calls] == worker_calls
+    assert len({item["topic"] for item in worker_calls}) == len(worker_calls)
+
+
+def test_runtime_live_projection_excludes_all_worker_owned_topics():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt); publisher.prefix = "guardian"
+    publisher.client = client; publisher.discovery_enabled = False
+    publisher.maintenance_events = MaintenanceMqttPublisher(client, "guardian")
+    result, context = managed_result()
+    publisher.publish(
+        [modules()[0]], "ok", [], DEFAULTS, {"alarm_counts": {}}, {},
+        {"active": False, "last_summary": "none"}, {1: result}, {},
+        {1: {"barcode": "SN-1"}}, analysis_context=context,
+        include_derived=False)
+    topics = {item["topic"] for item in client.calls}
+    assert "guardian/battery/sensor/module_1_soc/state" in topics
+    assert "guardian/battery/sensor/module_1_cell_diag_live/state" in topics
+    assert "guardian/battery/sensor/module_1_cell_1_status/state" not in topics
+    assert "guardian/battery/sensor/module_1_cell_diag_status/state" not in topics
 
 
 def test_live_topology_projects_four_of_five_and_invalidates_retained_live_values():

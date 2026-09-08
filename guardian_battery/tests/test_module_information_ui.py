@@ -153,6 +153,10 @@ def test_mqtt_subtiming_ui_shows_wall_cpu_groups_and_return_codes():
     assert "last_successfully_published_generation" in html
     assert "derived_publish_failure_count" in html
     assert "derived_publish_invalidated_by_reconnect" in html
+    assert "Derived MQTT Worker" in html
+    assert 'id="timing-derived-mqtt-worker"' in html
+    assert "generation_pending" in html
+    assert "publish_wall_seconds" in html
 
 
 def test_collector_cell_intervals_sort_numerically_by_position_then_serial():

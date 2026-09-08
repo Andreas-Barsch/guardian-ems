@@ -21,6 +21,8 @@ from cell_acquisition import acquire_cell_round
 from cell_history import CellHistoryWriter
 from collector_timing import CollectorTiming, PeriodicDeadline, ProfilingTimer
 from derived_persistence import DerivedPersistenceWorker
+from derived_mqtt_projection import publish_derived_results
+from derived_mqtt_worker import DerivedMqttWorker
 from diagnostic_aggregates import DiagnosticAggregateStore
 from diagnostic_backfill import DiagnosticAggregateBackfill
 from current_condition_backfill import CurrentConditionBackfill
@@ -650,6 +652,48 @@ class Mqtt:
         self._derived_reconnect_epoch += 1
         if self._last_successfully_published_derived_key is not None:
             self._derived_republish_required_by_reconnect = True
+        worker = getattr(self, "derived_mqtt_worker", None)
+        if worker is not None:
+            worker.invalidate_reconnect()
+
+    def derived_sink(self):
+        sink = Mqtt.__new__(Mqtt)
+        sink.prefix = self.prefix
+        sink.client = self.client
+        sink.discovery_enabled = False
+        sink._cycle_profiler = None
+        sink._ensure_derived_publish_state()
+        return sink
+
+    def publish_derived_job(self, job):
+        self.begin_cycle_profile(job["generation"])
+        self._derived_attempt_active = True
+        self._derived_attempt_failed = False
+        started = time.monotonic(); cpu_started = time.thread_time()
+        try:
+            publish_derived_results(self, job["positions"], job["results"])
+        finally:
+            self._derived_attempt_active = False
+        wall = time.monotonic() - started
+        cpu = time.thread_time() - cpu_started
+        self._cycle_profiler.guardian_finished(wall, cpu)
+        profile = self.finish_cycle_profile(wall, cpu)
+        success = (not self._derived_attempt_failed
+                   and self._mqtt_is_connected() is not False)
+        group = profile["groups"]["cell_diagnostics"]
+        return {
+            "success": success,
+            "publish_count": group["publish_count"],
+            "payload_bytes": group["payload_bytes"],
+            "publish_wall_seconds": group["publish_wall_seconds"],
+            "publish_thread_cpu_seconds": group["publish_thread_cpu_seconds"],
+            "json_wall_seconds": group["json_wall_seconds"],
+            "json_thread_cpu_seconds": group["json_thread_cpu_seconds"],
+            "build_wall_seconds": profile["mqtt_build_wall_seconds"],
+            "build_thread_cpu_seconds": profile["mqtt_build_thread_cpu_seconds"],
+            "max_publish_wall_seconds": group["max_publish_wall_seconds"],
+            "max_publish_thread_cpu_seconds": group["max_publish_thread_cpu_seconds"],
+        }
 
     def _ensure_derived_publish_state(self):
         # Tests and small projections construct Mqtt via __new__.
@@ -930,6 +974,7 @@ class Mqtt:
         module_infos: dict[int, dict] | None = None,
         live_topology: dict[int, dict] | None = None,
         analysis_context: dict | None = None,
+        include_derived: bool | None = None,
     ) -> None:
         self._ensure_derived_publish_state()
         results = cell_results or {}
@@ -939,6 +984,8 @@ class Mqtt:
         unmanaged = bool(results) and analysis_context is None
         publish_derived = unmanaged or (key is not None
                                         and key != self._last_successfully_published_derived_key)
+        if include_derived is False:
+            publish_derived = False
         generation = None if key is None else key[0]
         skipped = key is not None and not publish_derived
         invalidated_by_reconnect = bool(
@@ -1443,6 +1490,10 @@ def main() -> None:
     persistence_worker.start()
     analysis_worker = CellAnalysisWorker(analyse_cell_snapshot)
     analysis_worker.start()
+    derived_mqtt_sink = publisher.derived_sink()
+    derived_mqtt_worker = DerivedMqttWorker(derived_mqtt_sink.publish_derived_job)
+    publisher.derived_mqtt_worker = derived_mqtt_worker
+    derived_mqtt_worker.start()
     analysis_generation = 0
     maintenance_log = MaintenanceEventLog(DEFAULT_MAINTENANCE_EVENT_FILE)
     maintenance_events = ()
@@ -1713,7 +1764,30 @@ def main() -> None:
                     cell_results, bms_stat, module_infos,
                     current_presence(expected_module_count=int(options["module_count"])),
                     analysis_context=latest_analysis,
+                    include_derived=False,
                 )
+                submit_started = time.monotonic(); submit_cpu = time.thread_time()
+                if latest_analysis is not None and cell_results:
+                    identities = tuple(sorted(
+                        (int(position), result.get("physical_module_serial"))
+                        for position, result in cell_results.items()))
+                    derived_mqtt_worker.submit({
+                        "key": (int(latest_analysis["generation"]),
+                                latest_analysis.get("config_id"), identities,
+                                publisher._derived_reconnect_epoch),
+                        "generation": int(latest_analysis["generation"]),
+                        "config_id": latest_analysis.get("config_id"),
+                        "identities": identities,
+                        "reconnect_epoch": publisher._derived_reconnect_epoch,
+                        "positions": tuple(module.module for module in modules
+                                           if module.module in cell_results),
+                        "results": cell_results,
+                        "created_at": time.time(),
+                    })
+                timing.duration("derived_mqtt_submit",
+                                time.monotonic() - submit_started,
+                                cpu_seconds=time.thread_time() - submit_cpu)
+                timing.derived_mqtt_worker_status(derived_mqtt_worker.status())
                 if rs485_reader is not None:
                     rs485_started = time.monotonic(); rs485_cpu = time.thread_time()
                     rs485_management = project_current_management(
@@ -1789,7 +1863,8 @@ def main() -> None:
                 elapsed, ("pwr_request", "pwr_processing", "stat_info",
                           "cell_cycle", "maintenance_refresh",
                           "analysis_snapshot_build", "analysis_submit",
-                          "result_adoption", "mqtt_projection", "topology_position"))
+                          "result_adoption", "mqtt_projection",
+                          "derived_mqtt_submit", "topology_position"))
             timing.cycle_finished(elapsed)
             state = timing.snapshot()
             if elapsed > float(options["poll_interval_seconds"]):
@@ -1807,6 +1882,11 @@ def main() -> None:
                 poll_deadline.consume()
             time.sleep(poll_deadline.delay())
     finally:
+        try:
+            if not derived_mqtt_worker.stop():
+                LOG.warning("Derived MQTT worker did not stop within timeout")
+        except Exception as exc:
+            LOG.warning("Derived MQTT worker stop failed: %s", exc)
         try:
             if not analysis_worker.stop():
                 LOG.warning("Cell analysis worker did not stop within timeout")

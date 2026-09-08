@@ -421,3 +421,15 @@ def test_cell_analysis_profiling_moves_to_bounded_worker_path():
     assert "console" not in worker.lower()
     assert "console.command" not in worker
     assert "acquire_cell_round" not in worker
+
+
+def test_derived_mqtt_worker_status_is_separate_from_completed_cycle():
+    timing = CollectorTiming(10, 60)
+    timing.cycle_started(100, 1)
+    timing.derived_mqtt_worker_status({"active": True, "generation_active": 7})
+    timing.cycle_finished(1)
+    timing.derived_mqtt_worker_status({"active": False,
+                                       "generation_last_completed": 7})
+    state = timing.snapshot()
+    assert state["derived_mqtt_worker"]["generation_last_completed"] == 7
+    assert "derived_mqtt_worker" not in state["last_completed_cycle"]

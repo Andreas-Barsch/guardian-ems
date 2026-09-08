@@ -111,6 +111,7 @@ class CollectorTiming:
         self._cell_analysis_global = {}
         self._analysis_worker = {}
         self._persistence_worker = {}
+        self._derived_mqtt_worker = {}
 
     def cycle_started(self, wall_time: float, monotonic_time: float) -> None:
         with self._lock:
@@ -317,6 +318,14 @@ class CollectorTiming:
         with self._lock:
             self._persistence_worker = value
 
+    def derived_mqtt_worker_status(self, status) -> None:
+        try:
+            value = dict(status)
+        except Exception:
+            return
+        with self._lock:
+            self._derived_mqtt_worker = value
+
     def snapshot_details(self, details):
         """Attach bounded scalar/per-module snapshot profiling to the cell slot."""
         with self._lock:
@@ -366,6 +375,7 @@ class CollectorTiming:
             }
             result["cell_analysis_worker"] = dict(self._analysis_worker)
             result["derived_persistence_worker"] = dict(self._persistence_worker)
+            result["derived_mqtt_worker"] = dict(self._derived_mqtt_worker)
             result["current_cycle"] = dict(self._current)
             result["last_completed_cycle"] = dict(self._last_completed_cycle)
             result["last_completed_cell_cycle"] = dict(self._last_completed_cell)
