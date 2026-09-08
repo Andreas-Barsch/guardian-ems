@@ -2,6 +2,20 @@
 
 Stand: 2026-09-08
 
+## Guardian Battery 0.7.28 – MQTT Per-Publish Production Observability
+
+### Produktive Ursachenmessung nach separatem Deployment
+
+- Guardian/Add-on: `0.7.28`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Bei einem langsamen vollständigen Collector-Zyklus dessen Cycle ID sowie MQTT Total Wall/CPU, Guardian Build Wall/CPU, JSON Wall/CPU, Publish Invocation Wall/CPU und Other Wall/CPU erfassen.
+- Zusätzlich Publish Count, Payload Bytes, JSON Count/Bytes, Max Single Publish Wall/CPU samt Gruppe, Connection State vor/nach der Projektion und Returncode Counts dokumentieren.
+- Für die festen Gruppen Stack/Battery, Modules, Cell Diagnostics, RS485 und Other jeweils Calls, Bytes, Publish Wall/CPU, Max Wall/CPU sowie JSON Count/Bytes und JSON Wall/CPU erfassen. RS485 Total ist eine zusätzliche diagnostische Grenze und nicht noch einmal zur überschneidungsfreien Gesamtsumme zu addieren.
+- Wenn Publish Wall ungefähr MQTT Wall entspricht und Publish CPU deutlich kleiner ist, wiederholte Publish-, Scheduling- oder Lock-Verzögerung manuell untersuchen. Wenn Build, JSON oder Other dominieren, den jeweiligen Pfad gezielt weiter zerlegen. Ein extremes Max Single Publish ist separat von vielen kleinen Verzögerungen zu bewerten. Daraus wird keine automatische Diagnose oder Kausalität abgeleitet.
+- Die Observability persistiert keine Topics, Payloadtexte, JSON-Texte, Cell-Diagnostic-Inhalte oder Publish-History. Private Paho-Queue-Strukturen bleiben unberührt; `unavailable_private_paho_state` ist der ausdrückliche Evidence-Status.
+- Die lokale Referenzmessung betrug ohne Subtiming etwa 43,40 ms und mit Subtiming etwa 47,51 ms, entsprechend etwa 9,46 % Overhead. Diese temporäre technische Produktionsobservability ist nicht kostenlos und dient der Ursachenbestimmung der beobachteten 46,23-s-MQTT-Projektion.
+- Keine MQTT-Performanceoptimierung vornehmen, bevor produktive Evidence vorliegt. Publish-Anzahl/-Reihenfolge, Topics, Payloads, QoS, Retain, Discovery, Paho-Konfiguration, Scheduler, Analysis Worker, Raw Evidence, Diagnostics, Risk, Alarme, RS485, Hycube und History bleiben unverändert.
+- Dieses Source-Release führt kein Deployment, keinen Add-on-Neustart und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.27 – Cycle-Accurate Collector Observability
 
 ### Produktive Root-Cause-Messung nach separatem Deployment

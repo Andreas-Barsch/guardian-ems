@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.28 – MQTT Per-Publish Production Observability
+
+- Ergänzt cycle-accurate MQTT-Subtiming für den letzten vollständig abgeschlossenen Collector-Zyklus: MQTT Projection, Guardian Build, JSON-Serialisierung, Publish Invocation und Remaining Other werden jeweils als Wall- und Thread-CPU-Zeit ausgewiesen. RS485 MQTT bleibt eine zusätzliche diagnostische Grenze; seine JSON-/Publish-Anteile werden in der überschneidungsfreien Gesamtrechnung nicht doppelt bilanziert.
+- Erfasst ausschließlich bounded technische Evidence: JSON- und Publish-Anzahl, JSON- und Payload-Bytes, Maximum eines einzelnen Publish-Aufrufs sowie die feste Gruppe dieses Maximums. Topics, Payloadtexte, JSON-Texte, Cell-Diagnostic-Inhalte und Publish-History werden nicht gespeichert.
+- Gliedert Publish-Evidence in die festen Gruppen `stack_battery`, `modules`, `cell_diagnostics`, `rs485` und `other`; pro Gruppe werden Aufrufe, Bytes, Publish- und JSON-Zeiten sowie Maximalzeiten ausgewiesen.
+- Beobachtet Paho-Returncodes als Success, No Connection, Queue Full oder Other Error und verwendet ausschließlich den öffentlichen Verbindungsstatus vor und nach der MQTT-Projektion. Private Paho-Queue-Zustände bleiben ausdrücklich `unavailable_private_paho_state`; es gibt keine Retrylogik und kein `wait_for_publish`.
+- Zeigt die Evidence unter **Guardian Maintenance → Collector Timing → Letzter abgeschlossener Collector-Zyklus → MQTT Subtiming**. Alle Werte sind exakt dessen `cycle_id` zugeordnet und werden nach Zyklusabschluss nicht durch Background-Arbeit verändert.
+- Die repräsentative lokale Messung stieg von etwa 43,40 ms auf 47,51 ms beziehungsweise um etwa 9,46 %. Diese temporäre technische Produktionsobservability liegt unter der verbindlichen 10-%-Grenze, ist aber nicht kostenlos und stellt keine dauerhafte Performanceaussage dar.
+- Dieser Release enthält keine MQTT-Performanceoptimierung. Publish-Anzahl, Reihenfolge, Topics, Payloads, QoS, Retain, Discovery, Live State, Cell Diagnostics und RS485 MQTT bleiben fachlich unverändert. Zweck ist die produktive Ursachenbestimmung der beobachteten 46,23-s-MQTT-Projektion.
+- Scheduler, Analysis Worker, Raw Evidence, Diagnostics, Risk, Alarme, RS485-Semantik, Hycube und History bleiben unverändert. Guardian Battery und Add-on sind `0.7.28`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.27 – Cycle-Accurate Collector Observability
 
 - Trennt den aktuell laufenden Collector-Zyklus strikt vom letzten vollständig abgeschlossenen Zyklus. Prozesslokal monotone Cycle IDs und die atomare Übernahme beim Zyklusabschluss verhindern zeitlich gemischte Timinganzeigen.
