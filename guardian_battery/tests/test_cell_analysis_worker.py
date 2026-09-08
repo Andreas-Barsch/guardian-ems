@@ -177,6 +177,11 @@ def test_status_exposes_bounded_observability_contract():
     assert status["age_seconds"] >= 0
     assert status["coalesced_count"] == 0
     assert status["failure_count"] == 0
+    assert status["last_completed"]["generation"] == 7
+    assert status["last_completed"]["started_at"] is not None
+    assert status["last_completed"]["success"] is True
+    assert status["last_completed"]["wall_duration_seconds"] >= 0
+    assert status["last_completed"]["thread_cpu_duration_seconds"] >= 0
     assert worker.stop()
 
 
@@ -271,3 +276,15 @@ def test_snapshot_contains_only_current_identity_and_freezes_context(tmp_path):
     assert snapshot["maintenance_events"][0]["revision"] == 1
     assert snapshot["options"]["cell_diag_warning_deviation_mv"] == 20
     assert snapshot["config_id"]
+    timing = snapshot["snapshot_timing"]
+    assert timing["total_seconds"] >= 0
+    assert timing["total_thread_cpu_seconds"] >= 0
+    assert timing["other_seconds"] >= -0.001
+    assert timing["other_thread_cpu_seconds"] >= -0.001
+    assert len(timing["modules"]) == 1
+    module = timing["modules"][0]
+    assert module["position"] == 1 and module["serial"] == "CURRENT"
+    assert module["sample_count"] == 1
+    assert module["aggregate_record_count"] == 0
+    assert module["sample_projection_seconds"] >= 0
+    assert module["aggregate_projection_seconds"] >= 0

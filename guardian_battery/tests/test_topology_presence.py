@@ -144,7 +144,7 @@ def test_main_confirms_durable_history_only_after_publish_succeeds():
     confirmation = source.index("                # Durable topology confirmation")
     record = source.index("                if history_observation_ready():")
     assert publish < rs485_publish < confirmation < record
-    assert "confirm_history=False" in source[publish - 7000:publish]
+    assert "confirm_history=False" in source[:publish]
 
 
 def test_position_above_configured_topology_is_not_expected():

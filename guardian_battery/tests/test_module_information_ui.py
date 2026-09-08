@@ -92,12 +92,14 @@ def test_collector_timing_preserves_missing_values_and_zero_overruns():
 def test_collector_timing_renders_full_partial_and_empty_snapshots():
     html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
     for key in (
-        "poll_target_s", "cycle_duration_seconds", "effective_poll_interval_seconds",
-        "cycle_overrun_max_seconds", "cell_target_s", "cell_cycle_duration_seconds",
-        "effective_cell_sampling_interval_seconds", "cell_deadline_lateness_seconds",
-        "cell_overrun_max_seconds", "cell_stack_sample_spread_seconds",
+        "poll_target_s", "cycle_overrun_max_seconds", "cell_target_s",
+        "cell_overrun_max_seconds",
     ):
         assert f"timing.{key}" in html
+    assert "timing.last_completed_cycle||{}" in html
+    assert "timing.last_completed_cell_cycle||{}" in html
+    assert "cell.cell_total_main_thread_duration_seconds" in html
+    assert "cell.cell_deadline_lateness_seconds" in html
     assert "renderCollectorTiming(data)" in html
     assert "renderCollectorTiming({})" in html
     assert "nicht verfügbar" in html
@@ -106,9 +108,9 @@ def test_collector_timing_renders_full_partial_and_empty_snapshots():
 def test_collector_component_and_bat_details_are_bounded():
     html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
     for label in (
-        "PWR Request", "PWR Processing", "STAT / INFO", "BAT Requests gesamt",
-        "Identity Resolution", "Cell History Write", "Cell Analysis",
-        "Diagnostic Store Save", "Aggregate Write", "MQTT Projection",
+        "PWR Request", "PWR Processing", "STAT / INFO", "BAT Requests",
+        "Cell-Zyklus", "Maintenance Refresh", "Analysis Snapshot Build",
+        "Analysis Worker Submit", "Result Adoption", "MQTT Projection",
         "Topology / Position", "Remaining Other",
     ):
         assert label in html
@@ -116,6 +118,18 @@ def test_collector_component_and_bat_details_are_bounded():
     assert "BAT Count" in html and "BAT Median" in html and "BAT Maximum" in html
     assert "bat.count" in html and "bat.median_seconds" in html and "bat.max_seconds" in html
     assert "Object.entries(timing.rolling" not in html
+
+
+def test_cycle_accurate_timing_separates_workers_and_missing_semantics():
+    html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
+    assert "Letzter abgeschlossener Collector-Zyklus" in html
+    assert "Letzter abgeschlossener Cell-Zyklus" in html
+    assert "Derived Persistence Worker" in html
+    assert "Analysis Worker" in html
+    assert "nicht ausgeführt" in html and "nicht verfügbar" in html
+    assert "timing.current_cycle?.cycle_id" in html
+    assert "timing.derived_persistence_worker" in html
+    assert "timing.cell_analysis_worker" in html
 
 
 def test_collector_cell_intervals_sort_numerically_by_position_then_serial():

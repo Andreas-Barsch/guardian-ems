@@ -90,14 +90,16 @@ def test_timing_state_is_bounded_and_counts_overruns():
     timing.cell_finished(8)
     timing.cell_samples((("SERIAL-1", 1000), ("SERIAL-2", 1003)))
     timing.cell_samples((("SERIAL-1", 1062), ("SERIAL-2", 1066)))
+    timing.cell_post_finished(9)
 
     state = timing.snapshot()
     assert state["cycle_overrun_count"] == 1
     assert state["cycle_overrun_max_seconds"] == pytest.approx(2.5)
     assert state["cell_overrun_count"] == 1
     assert state["cell_overrun_max_seconds"] == pytest.approx(12)
-    assert state["cell_stack_sample_spread_seconds"] == pytest.approx(4)
-    assert state["effective_cell_intervals_by_serial"]["SERIAL-1"][
+    cell = state["last_completed_cell_cycle"]
+    assert cell["cell_stack_sample_spread_seconds"] == pytest.approx(4)
+    assert cell["effective_cell_intervals_by_serial"]["SERIAL-1"][
         "last_seconds"] == pytest.approx(62)
     assert state["rolling"]["bat_request"] == {
         "count": 3, "median_seconds": 0.6, "max_seconds": 5.0}
@@ -158,6 +160,14 @@ def test_background_persistence_preserves_restart_recovery(tmp_path):
     worker.submit(cells.persistence_payload(), aggregates.persistence_payload())
     assert worker.stop(timeout=5)
     assert worker.status()["persisted"] == 1
+    completed = worker.status()["last_completed"]
+    assert completed["generation"] == 1
+    assert completed["created_at"] <= completed["started_at"] <= completed["completed_at"]
+    assert completed["diagnostic_store_save_seconds"] >= 0
+    assert completed["aggregate_write_seconds"] >= 0
+    assert completed["wall_duration_seconds"] >= 0
+    assert completed["thread_cpu_duration_seconds"] >= 0
+    assert completed["success"] is True
 
     restored = CellDiagnosticStore(cells.path)
     assert len(restored.identity_samples["SERIAL-1"]) == 1
@@ -300,7 +310,7 @@ def test_main_keeps_console_single_owner_and_raw_history_before_derived_state():
     assert "time.sleep(max(1" not in source
 
 
-def test_analysis_worker_observability_is_flat_and_not_counted_as_main_duration():
+def test_analysis_worker_observability_is_separate_and_not_counted_as_main_duration():
     timing = CollectorTiming(10, 60)
     timing.cycle_started(100, 10)
     timing.analysis_worker_status({
@@ -310,14 +320,84 @@ def test_analysis_worker_observability_is_flat_and_not_counted_as_main_duration(
         "coalesced_count": 3, "failure_count": 1,
     })
     state = timing.snapshot()
-    assert state["analysis_worker_active"] is True
-    assert state["analysis_worker_pending"] is True
-    assert state["analysis_worker_generation_active"] == 2
-    assert state["analysis_worker_generation_latest"] == 1
-    assert state["analysis_worker_last_duration_seconds"] == 75
-    assert state["analysis_coalesced_count"] == 3
-    assert state["analysis_failure_count"] == 1
+    worker = state["cell_analysis_worker"]
+    assert worker["active"] is True
+    assert worker["pending"] is True
+    assert worker["generation_active"] == 2
+    assert worker["generation_latest"] == 1
+    assert worker["last_duration_seconds"] == 75
+    assert worker["coalesced_count"] == 3
+    assert worker["failure_count"] == 1
     assert "cell_analysis_duration_seconds" not in state
+
+
+def test_current_cycle_does_not_overwrite_last_completed_cycle():
+    timing = CollectorTiming(10, 60)
+    timing.cycle_started(100, 1)
+    timing.duration("pwr_request", 2, cpu_seconds=0.5)
+    timing.cycle_finished(3)
+    timing.cycle_started(110, 11)
+    timing.duration("pwr_request", 7)
+    state = timing.snapshot()
+    assert state["current_cycle"]["cycle_id"] == 2
+    assert state["current_cycle"]["state"] == "running"
+    assert state["last_completed_cycle"]["cycle_id"] == 1
+    assert state["last_completed_cycle"]["pwr_request_duration_seconds"] == 2
+    assert state["last_completed_cycle"]["pwr_request_thread_cpu_seconds"] == 0.5
+
+
+def test_cell_cycle_has_generation_deadline_accounting_and_failure_state():
+    timing = CollectorTiming(10, 60)
+    timing.cycle_started(100, 10)
+    timing.cell_started(100, 10, 9)
+    timing.cell_deadline_consumed(69, 2)
+    timing.cell_generation(4)
+    timing.duration("cell_store_add", 1, cpu_seconds=0.25)
+    timing.cell_finished(2)
+    timing.cell_aborted(3, cpu_seconds=0.75, finished_at=103)
+    cell = timing.snapshot()["last_completed_cell_cycle"]
+    assert cell["state"] == "failed"
+    assert cell["cycle_id"] == 1 and cell["cell_generation"] == 4
+    assert cell["next_deadline_after_consume"] == 69
+    assert cell["skipped_cell_slots"] == 2
+    assert cell["cell_total_main_thread_duration_seconds"] == 3
+    assert cell["cell_total_main_thread_thread_cpu_seconds"] == 0.75
+
+
+def test_background_worker_updates_cannot_mutate_completed_cycle():
+    timing = CollectorTiming(10, 60)
+    timing.cycle_started(100, 10)
+    timing.duration("mqtt_projection", 1)
+    timing.cycle_finished(2)
+    before = timing.snapshot()["last_completed_cycle"]
+    timing.analysis_worker_status({"active": True, "generation_active": 7})
+    timing.persistence_worker_status({"active": True, "generation_active": 8})
+    after = timing.snapshot()
+    assert after["last_completed_cycle"] == before
+    assert after["cell_analysis_worker"]["generation_active"] == 7
+    assert after["derived_persistence_worker"]["generation_active"] == 8
+
+
+def test_accounting_preserves_negative_difference_and_counts_error():
+    timing = CollectorTiming(10, 60)
+    timing.cycle_started(100, 1)
+    timing.duration("mqtt_projection", 3)
+    timing.cycle_accounting(2, ("mqtt_projection",))
+    timing.cycle_finished(2)
+    state = timing.snapshot()
+    assert state["last_completed_cycle"]["remaining_other_duration_seconds"] == -1
+    assert state["observability_error_count"] == 1
+
+
+def test_not_executed_is_distinct_from_missing_measurement():
+    timing = CollectorTiming(10, 60)
+    timing.cycle_started(100, 1)
+    timing.mark_not_executed("analysis_submit")
+    timing.cycle_finished(1)
+    cycle = timing.snapshot()["last_completed_cycle"]
+    assert cycle["analysis_submit_status"] == "not_executed"
+    assert "analysis_submit_duration_seconds" not in cycle
+    assert "topology_position_status" not in cycle
 
 
 def test_cell_analysis_profiling_moves_to_bounded_worker_path():

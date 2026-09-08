@@ -62,7 +62,7 @@ def test_bat_timeout_keeps_successful_raw_samples_and_command_order():
         "SERIAL-1", "SERIAL-3"]
     state = timing.snapshot()
     assert state["rolling"]["bat_request"]["count"] == 3
-    assert state["bat_requests_total_duration_seconds"] == 6.0
+    assert state["current_cycle"]["bat_requests_total_duration_seconds"] == 6.0
 
 
 def test_each_sequential_sample_keeps_its_own_time_and_pwr_age():

@@ -1305,6 +1305,8 @@ def main() -> None:
             timing.cycle_started(time.time(), started)
             poll_deadline.consume(started)
             modules: list[Module] = []
+            cell_main_started = None
+            cell_main_cpu_started = None
             try:
                 section_started = time.monotonic()
                 raw = console.command(options["command"])
@@ -1410,7 +1412,11 @@ def main() -> None:
                     cell_started = time.monotonic()
                     timing.cell_started(time.time(), cell_started,
                                         cell_deadline.next_deadline)
-                    cell_deadline.consume(cell_started)
+                    cell_main_started = cell_started
+                    cell_main_cpu_started = time.thread_time()
+                    skipped_slots = cell_deadline.consume(cell_started)
+                    timing.cell_deadline_consumed(
+                        cell_deadline.next_deadline, skipped_slots)
                     try:
                         identity_started = time.monotonic()
                         identity_resolver = DocumentedIdentityResolver.from_path(
@@ -1428,13 +1434,31 @@ def main() -> None:
                     # Derived state follows durable append-only raw evidence. Its
                     # expensive JSON serialization is handled by one coalescing
                     # single-writer worker; Console ownership remains here.
+                    stage_started = time.monotonic(); cpu_started = time.thread_time()
                     for sample in acquired_samples:
                         cell_store.add(sample)
+                    timing.duration("cell_store_add", time.monotonic() - stage_started,
+                                    cpu_seconds=time.thread_time() - cpu_started)
+                    stage_started = time.monotonic(); cpu_started = time.thread_time()
+                    for sample in acquired_samples:
                         aggregate_store.add(sample, options)
+                    timing.duration("aggregate_store_add", time.monotonic() - stage_started,
+                                    cpu_seconds=time.thread_time() - cpu_started)
+                    stage_started = time.monotonic(); cpu_started = time.thread_time()
+                    cell_payload = cell_store.persistence_payload()
+                    timing.duration("cell_persistence_payload_build",
+                                    time.monotonic() - stage_started,
+                                    cpu_seconds=time.thread_time() - cpu_started)
+                    stage_started = time.monotonic(); cpu_started = time.thread_time()
+                    aggregate_payload = aggregate_store.persistence_payload()
+                    timing.duration("aggregate_persistence_payload_build",
+                                    time.monotonic() - stage_started,
+                                    cpu_seconds=time.thread_time() - cpu_started)
+                    stage_started = time.monotonic()
                     persistence_worker.submit(
-                        cell_store.persistence_payload(),
-                        aggregate_store.persistence_payload(),
-                    )
+                        cell_payload, aggregate_payload)
+                    timing.duration("persistence_submit",
+                                    time.monotonic() - stage_started)
                     if acquired_samples:
                         analysis_source_sample_at = max(
                             sample.timestamp for sample in acquired_samples)
@@ -1444,6 +1468,7 @@ def main() -> None:
                     if cell_deadline.due():
                         cell_deadline.consume()
 
+                maintenance_started = time.monotonic(); maintenance_cpu = time.thread_time()
                 try:
                     current_mtime_ns = maintenance_log.path.stat().st_mtime_ns if maintenance_log.path.exists() else None
                     if current_mtime_ns != maintenance_mtime_ns:
@@ -1454,27 +1479,38 @@ def main() -> None:
                 except Exception as exc:
                     LOG.warning("Maintenance-Kontext nicht lesbar: %s", exc)
                     maintenance_events = ()
+                timing.duration("maintenance_refresh",
+                                time.monotonic() - maintenance_started,
+                                cpu_seconds=time.thread_time() - maintenance_cpu)
                 if analysis_source_sample_at is not None:
                     snapshot_started = time.monotonic()
+                    snapshot_cpu = time.thread_time()
                     analysis_generation += 1
                     analysis_payload = build_analysis_snapshot(
                         cell_store, aggregate_store,
                         [module.module for module in modules], options,
                         maintenance_events, persistence_worker.status())
                     timing.duration("analysis_snapshot_build",
-                                    time.monotonic() - snapshot_started)
+                                    time.monotonic() - snapshot_started,
+                                    cpu_seconds=time.thread_time() - snapshot_cpu)
+                    timing.snapshot_details(analysis_payload["snapshot_timing"])
+                    timing.cell_generation(analysis_generation)
                     submit_started = time.monotonic()
                     analysis_worker.submit(
                         analysis_generation, analysis_source_sample_at,
                         analysis_payload)
                     timing.duration("analysis_submit",
                                     time.monotonic() - submit_started)
+                adoption_started = time.monotonic(); adoption_cpu = time.thread_time()
                 latest_analysis = analysis_worker.latest()
                 cell_results = project_latest_analysis(
                     latest_analysis, cell_store.current_serial)
+                timing.duration("result_adoption", time.monotonic() - adoption_started,
+                                cpu_seconds=time.thread_time() - adoption_cpu)
                 try:
                     worker_status = analysis_worker.status()
                     timing.analysis_worker_status(worker_status)
+                    timing.persistence_worker_status(persistence_worker.status())
                     if latest_analysis is not None:
                         timing.cell_analysis_profiles(
                             latest_analysis["profiles"],
@@ -1484,7 +1520,7 @@ def main() -> None:
                              "analysis_analyzed_at": latest_analysis["analyzed_at"]})
                 except Exception:
                     LOG.debug("Cell analysis profiling projection unavailable", exc_info=True)
-                section_started = time.monotonic()
+                section_started = time.monotonic(); section_cpu = time.thread_time()
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,
                     cell_results, bms_stat, module_infos,
@@ -1497,12 +1533,13 @@ def main() -> None:
                     rs485_mqtt.publish(rs485_reader.status(),
                                        rs485_management,
                                        rs485_writer.status())
-                timing.duration("mqtt_projection", time.monotonic() - section_started)
+                timing.duration("mqtt_projection", time.monotonic() - section_started,
+                                cpu_seconds=time.thread_time() - section_cpu)
 
                 # Durable topology confirmation happens only after the complete
                 # poll and every projection/publish step succeeded. Live presence
                 # above remains immediate and independent.
-                section_started = time.monotonic()
+                section_started = time.monotonic(); section_cpu = time.thread_time()
                 update_observed_stack(
                     module_infos, present_positions={module.module for module in modules},
                     communication_healthy=bool(modules),
@@ -1517,10 +1554,30 @@ def main() -> None:
                         record_stable_observed_positions()
                     except Exception as exc:
                         LOG.warning("Positionshistorie konnte nicht fortgeschrieben werden: %s", exc)
-                timing.duration("topology_position", time.monotonic() - section_started)
+                timing.duration("topology_position", time.monotonic() - section_started,
+                                cpu_seconds=time.thread_time() - section_cpu)
+                if cell_main_started is not None:
+                    timing.cell_post_finished(
+                        time.monotonic() - cell_main_started,
+                        cpu_seconds=time.thread_time() - cell_main_cpu_started,
+                        finished_at=time.time())
+                else:
+                    for component in (
+                            "cell_cycle", "cell_store_add", "aggregate_store_add",
+                            "cell_persistence_payload_build",
+                            "aggregate_persistence_payload_build",
+                            "persistence_submit", "analysis_snapshot_build",
+                            "analysis_submit"):
+                        timing.mark_not_executed(component)
 
             except Exception as exc:
                 LOG.exception("Abfrage fehlgeschlagen: %s", exc)
+                if cell_main_started is not None:
+                    timing.cell_aborted(
+                        time.monotonic() - cell_main_started,
+                        cpu_seconds=(None if cell_main_cpu_started is None else
+                                     time.thread_time() - cell_main_cpu_started),
+                        finished_at=time.time())
                 update_observed_stack(
                     {}, present_positions=set(), communication_healthy=False,
                     expected_module_count=int(options["module_count"]),
@@ -1532,13 +1589,11 @@ def main() -> None:
                     pass
 
             elapsed = time.monotonic() - started
-            measured = timing.snapshot()
-            accounted = sum(float(measured.get(f"{name}_duration_seconds", 0.0) or 0.0)
-                            for name in ("pwr_request", "pwr_processing", "stat_info",
-                                         "cell_cycle", "analysis_snapshot_build",
-                                         "analysis_submit",
-                                         "mqtt_projection", "topology_position"))
-            timing.duration("remaining_other", max(0.0, elapsed - accounted))
+            timing.cycle_accounting(
+                elapsed, ("pwr_request", "pwr_processing", "stat_info",
+                          "cell_cycle", "maintenance_refresh",
+                          "analysis_snapshot_build", "analysis_submit",
+                          "result_adoption", "mqtt_projection", "topology_position"))
             timing.cycle_finished(elapsed)
             state = timing.snapshot()
             if elapsed > float(options["poll_interval_seconds"]):
