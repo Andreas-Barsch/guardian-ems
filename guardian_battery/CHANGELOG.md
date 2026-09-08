@@ -1,5 +1,15 @@
 # Guardian Battery Changelog
 
+## 0.7.25 – Cell Analysis Productive Profiling
+
+- Ergänzt bounded, prozesslokale Laufzeit-Evidence für die bestehende Cell Analysis: Gesamtzeit je Modul sowie Main-Unterzeiten für Identitätsauflösung, Aggregateprojektion, Store-Analyse und Ergebnisaufbau.
+- Zerlegt `CellDiagnosticStore.analyse()` in reine Messabschnitte für Sampleauswahl/-validierung, Cache-Signatur und Hit/Miss, Current-Condition-Statistik/-Reduktion, Evidence-Gesamtzeit und Ergebnisaufbau. Die Cachelogik selbst bleibt unverändert.
+- Misst die bestehenden Evidence-Stufen für Sortierung, Ranking, Resistance, Segments, Capacity/Curves, Rest, Balancing, ICA Readiness, Maintenance und Assembly einzeln, ohne Diagnosealgorithmen oder Ergebnisse zu verändern.
+- Zeigt ausschließlich skalare Counts für aktuelle Samples, Store-/Identity-/Unknown-Puffer, Aggregate global/je Identität/je aktueller Config, Maintenance Events sowie Derived Writer active/pending. Es werden keine Raw Samples, Zellarrays, Aggregate- oder Maintenance-Inhalte ausgegeben.
+- Der bestehende Collector-Timing-Bereich zeigt maximal sechs aktuelle Modulprofile. Die Daten werden nicht historisiert und dienen ausschließlich der produktiven Ursachenbestimmung.
+- Dieser Release behebt die produktiv beobachteten rund 74 Sekunden Cell Analysis noch nicht. Er legt keine Ursache fest und verändert weder Scheduler, Acquisition, Console, History, Raw Evidence, MQTT, RS485 noch Risk-/Diagnosebewertung.
+- Guardian Battery und Add-on sind `0.7.25`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.24 – Collector Timing Visibility
 
 - Ergänzt in den Modulinformationen einen read-only Bereich für die bereits vorhandene `collector_timing`-Evidence aus `/api/rs485/status`. Er zeigt Ziel, letzte Dauer und effektives Intervall für Hauptpoll und Cell-Sampling sowie Deadline-Lateness, Overrun-Zähler/-Maximum und Stack-Sample-Spread.

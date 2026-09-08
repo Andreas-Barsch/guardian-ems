@@ -2,6 +2,20 @@
 
 Stand: 2026-09-07
 
+## Guardian Battery 0.7.25 – Cell Analysis Productive Profiling
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.25`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Unter **Modulinformationen → Collector Timing → Cell Analysis Profiling** einen vollständigen langsamen Collector-Zyklus erfassen. Diese Werte sind bounded, prozesslokale Laufzeit-Evidence und beginnen nach Neustart neu; sie verändern keine Batterie-, Modul-, Alarm- oder Risk-Bewertung.
+- Global dokumentieren: Cell Analysis Total, Store Samples gesamt, Identity-/Unknown-Buffer, Aggregate Records global, Maintenance Events sowie Derived Writer active/pending.
+- Je Modul dokumentieren: Samples, Module Analysis Total, Current Serial, Aggregate for Identity, Store Analyse, Main Result Assembly und Aggregate Record Count.
+- Im Store dokumentieren: Values/Validation, Cache Signature, Cache Hit/Miss, Current Condition Statistics/Reduction, Evidence Total und Result Assembly. In Evidence dokumentieren: Sort, Ranking, Resistance, Segments, Capacity/Curves, Rest, Balancing, ICA, Maintenance und Assembly.
+- Dominiert ein Modul, wird anschließend dessen modulspezifischer Pfad untersucht. Sind alle Module ähnlich langsam, ist ein gemeinsamer Analyzer-/Systemeffekt zu prüfen. Dominiert Evidence Total, gelten die Evidence-Unterzeiten; dominiert Store Analyse außerhalb Evidence, sind Current Condition, Validation und Cache zu prüfen.
+- Erklären die Unterzeiten die gemessene Gesamtzeit nicht, CPU/GIL/Contention oder eine weitere Accounting-Lücke untersuchen. Noch keine Ursache vorgeben und keine Optimierung allein aus einem einzelnen Timingwert ableiten.
+- 0.7.25 behebt die produktiv beobachteten rund 74 Sekunden Cell Analysis noch nicht. History-Minutenproblem, Scheduler, Acquisition, Console, Raw Evidence, MQTT, RS485 und Diagnosealgorithmen bleiben unverändert.
+- Dieses Source-Release führt kein Deployment, keinen Add-on-Neustart und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.24 – Collector Timing Visibility
 
 ### Auswertung nach separatem Deployment
