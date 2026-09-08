@@ -7,6 +7,55 @@ import time
 from collections import defaultdict, deque
 
 
+class ProfilingTimer:
+    """Best-effort monotonic subtimings that never affect measured work."""
+
+    def __init__(self, *, clock=time.monotonic, enabled=True):
+        self.clock = clock
+        self.enabled = bool(enabled)
+        self.values = {}
+
+    def start(self):
+        if not self.enabled:
+            return None
+        try:
+            return self.clock()
+        except Exception:
+            return None
+
+    def finish(self, name, started):
+        if started is None:
+            return None
+        try:
+            value = max(0.0, float(self.clock() - started))
+            self.values[f"{name}_seconds"] = value
+            return value
+        except Exception:
+            return None
+
+    def counter(self, name, value):
+        try:
+            if value is None or isinstance(value, (bool, int, float, str)):
+                self.values[name] = value
+        except Exception:
+            pass
+
+    def section(self, name, values):
+        try:
+            self.values[name] = dict(values)
+        except Exception:
+            pass
+
+    def child(self):
+        return ProfilingTimer(clock=self.clock, enabled=self.enabled)
+
+    def snapshot(self):
+        try:
+            return dict(self.values)
+        except Exception:
+            return {}
+
+
 class PeriodicDeadline:
     """A periodic deadline that skips missed slots without catch-up bursts."""
 
@@ -53,6 +102,8 @@ class CollectorTiming:
         self._cycle_overrun_max = 0.0
         self._cell_overruns = 0
         self._cell_overrun_max = 0.0
+        self._cell_analysis_profiles = []
+        self._cell_analysis_global = {}
 
     def cycle_started(self, wall_time: float, monotonic_time: float) -> None:
         with self._lock:
@@ -120,6 +171,21 @@ class CollectorTiming:
                 }
             self._current["effective_cell_intervals_by_serial"] = per_serial
 
+    def cell_analysis_profiles(self, profiles, global_profile=None) -> None:
+        """Store only the latest bounded, scalar profiling projection."""
+        try:
+            bounded = []
+            for profile in list(profiles)[:6]:
+                if not isinstance(profile, dict):
+                    continue
+                bounded.append(profile)
+            global_value = dict(global_profile or {})
+        except Exception:
+            return
+        with self._lock:
+            self._cell_analysis_profiles = bounded
+            self._cell_analysis_global = global_value
+
     def snapshot(self) -> dict:
         with self._lock:
             result = dict(self._current)
@@ -136,5 +202,9 @@ class CollectorTiming:
                        "median_seconds": statistics.median(values),
                        "max_seconds": max(values)}
                 for name, values in self._rolling.items() if values
+            }
+            result["cell_analysis_profiling"] = {
+                "modules": list(self._cell_analysis_profiles),
+                "global": dict(self._cell_analysis_global),
             }
             return result

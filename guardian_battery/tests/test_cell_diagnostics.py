@@ -7,6 +7,7 @@ from cell_diagnostics import (
     CellSample,
     DIAGNOSTIC_PARAMETER_META,
 )
+from collector_timing import ProfilingTimer
 
 
 def opts(**overrides):
@@ -98,6 +99,86 @@ def test_empty_store_is_learning_phase(tmp_path):
     assert result["confidence"] == "LOW"
     assert result["sample_count"] == 0
     assert result["cells"] == []
+
+
+def test_empty_and_missing_identity_are_profiled_without_raw_samples(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "profile-empty.json")
+    profiler = ProfilingTimer()
+    result = store.analyse(4, opts(), profiler=profiler)
+    profile = profiler.snapshot()
+
+    assert result["sample_count"] == 0
+    assert profile["samples_current_identity"] == 0
+    assert profile["cache_miss"] is True
+    assert "values_and_validation_seconds" in profile
+    assert "voltages_mv" not in str(profile)
+
+
+def test_profiled_analysis_is_result_equal_and_reports_cache_hit(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "profile-equality.json")
+    add_repeated(store, 40, [3300] * 15, current_a=-2)
+    expected = store.analyse(1, opts())
+
+    store._analysis_cache.clear()
+    miss_profiler = ProfilingTimer()
+    actual = store.analyse(1, opts(), profiler=miss_profiler)
+
+    assert actual["status"] == expected["status"]
+    assert actual["confidence"] == expected["confidence"]
+    assert actual["cells"] == expected["cells"]
+    assert actual["evidence_deviation_mv"] == expected["evidence_deviation_mv"]
+    assert actual["trend"] == expected["trend"]
+    assert actual["maintenance_risk"] == expected["maintenance_risk"]
+    assert miss_profiler.snapshot()["cache_miss"] is True
+    hit_profiler = ProfilingTimer()
+    cached = store.analyse(1, opts(), profiler=hit_profiler)
+    assert cached == actual
+    assert hit_profiler.snapshot()["cache_hit"] is True
+    assert hit_profiler.snapshot()["cache_miss"] is False
+
+
+def test_profiler_counts_empty_many_aggregates_and_maintenance_events(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "profile-context.json")
+    add_repeated(store, 5, [3300] * 15, current_a=-2)
+    aggregates = [{"day": "2026-01-01", "phase": "discharge", "cell": 1,
+                   "sample_count": 1, "config_id": f"other-{number}"}
+                  for number in range(100)]
+    events = [{"maintenance_event_id": f"MEV-{number}",
+               "occurred_at": "1970-01-01T00:00:03+00:00",
+               "category": "inspection", "title": "Synthetic",
+               "module_number": 1, "cell_number": None, "archived_at": None,
+               "resolved_module_serial": None, "identity_status": "unknown"}
+              for number in range(3)]
+    profiler = ProfilingTimer()
+    store.analyse(1, opts(), events, aggregates, profiler=profiler)
+
+    profile = profiler.snapshot()
+    assert profile["aggregate_records_identity"] == 100
+    assert profile["maintenance_event_count"] == 3
+    assert profile["evidence"]["aggregate_records_current_config"] == 0
+    assert profile["evidence"]["maintenance_seconds"] >= 0
+
+
+def test_full_identity_buffer_profiles_exact_bounded_sample_count(tmp_path):
+    store = CellDiagnosticStore(tmp_path / "profile-full.json", 8640)
+    for timestamp in range(8641):
+        store.add(CellSample(timestamp, 1, [3300] * 15, -2, 50,
+                             [25.0] * 15, [False] * 15, "SYNTHETIC-1"))
+    profiler = ProfilingTimer()
+    store.analyse(1, opts(), profiler=profiler)
+
+    assert profiler.snapshot()["samples_current_identity"] == 8640
+    assert store.profiling_counts() == {
+        "store_samples_total": 8640,
+        "identity_buffer_count": 1,
+        "unknown_buffer_count": 0,
+    }
+    assert set(profiler.snapshot()["evidence"]) >= {
+        "valid_sample_sort_seconds", "ranking_seconds", "resistance_seconds",
+        "segments_seconds", "capacity_and_curves_seconds", "rest_seconds",
+        "balancing_seconds", "ica_readiness_seconds", "maintenance_seconds",
+        "evidence_assembly_seconds",
+    }
 
 
 def test_phase_assignment():

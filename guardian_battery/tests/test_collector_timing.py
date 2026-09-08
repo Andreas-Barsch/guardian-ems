@@ -7,7 +7,7 @@ import pytest
 
 from cell_diagnostics import CellDiagnosticStore, CellSample
 from cell_history import CellHistoryWriter
-from collector_timing import CollectorTiming, PeriodicDeadline
+from collector_timing import CollectorTiming, PeriodicDeadline, ProfilingTimer
 from derived_persistence import DerivedPersistenceWorker
 from diagnostic_aggregates import DiagnosticAggregateStore
 from position_history import (DocumentedIdentityResolver, PositionHistoryLog,
@@ -103,6 +103,38 @@ def test_timing_state_is_bounded_and_counts_overruns():
         "count": 3, "median_seconds": 0.6, "max_seconds": 5.0}
 
 
+def test_cell_analysis_profiles_are_bounded_to_six_and_scalar_only():
+    timing = CollectorTiming(10, 60)
+    profiles = [{"module_position": number, "sample_count": number * 10}
+                for number in range(1, 9)]
+    timing.cell_analysis_profiles(profiles, {
+        "store_samples_total": 60, "derived_writer_active": True})
+
+    profile = timing.snapshot()["cell_analysis_profiling"]
+    assert [item["module_position"] for item in profile["modules"]] == list(range(1, 7))
+    assert profile["global"] == {
+        "store_samples_total": 60, "derived_writer_active": True}
+    assert "voltages_mv" not in json.dumps(profile)
+
+    timing.cell_analysis_profiles([
+        {"module_position": 2, "physical_serial": None, "sample_count": 0}])
+    assert timing.snapshot()["cell_analysis_profiling"]["modules"] == [
+        {"module_position": 2, "physical_serial": None, "sample_count": 0}]
+
+
+def test_profiling_timer_is_best_effort_when_clock_fails():
+    def broken_clock():
+        raise RuntimeError("synthetic clock failure")
+
+    profiler = ProfilingTimer(clock=broken_clock)
+    assert profiler.start() is None
+    assert profiler.finish("stage", 1.0) is None
+    profiler.counter("cache_hit", True)
+    profiler.section("evidence", {"ranking_seconds": 1.0})
+    assert profiler.snapshot() == {
+        "cache_hit": True, "evidence": {"ranking_seconds": 1.0}}
+
+
 def sample(timestamp=1.0):
     return CellSample(timestamp, 1, [3300] * 15, 0.0, 50.0,
                       [25.0] * 15, [False] * 15, "SERIAL-1", None)
@@ -179,14 +211,20 @@ def test_slow_derived_writer_does_not_block_next_raw_append(tmp_path):
     history = CellHistoryWriter(tmp_path / "history")
     worker = DerivedPersistenceWorker(SlowCells(), Aggregates())
     worker.start()
+    assert worker.status()["active"] is False
+    assert worker.status()["pending"] is False
     worker.submit({}, None)
     assert entered.wait(1)
+    assert worker.status()["active"] is True
+    worker.submit({"next": True}, None)
+    assert worker.status()["pending"] is True
     history.append({"timestamp": 1.0, "module": 1, "module_serial": "SERIAL-1"})
     history.append({"timestamp": 2.0, "module": 2, "module_serial": "SERIAL-2"})
     records = (tmp_path / "history" / "1970-01-01.jsonl").read_text().splitlines()
     assert len(records) == 2
     release.set()
     assert worker.stop(5)
+    assert worker.status()["active"] is False
 
 
 def test_worker_exception_is_visible_and_worker_accepts_later_generation():
@@ -260,3 +298,19 @@ def test_main_keeps_console_single_owner_and_raw_history_before_derived_state():
     assert "cell_deadline.due()" in source
     assert "poll_deadline.delay()" in source
     assert "time.sleep(max(1" not in source
+
+
+def test_main_cell_analysis_profiling_wraps_only_existing_module_path():
+    source = (Path(__file__).parents[1] / "app" / "main.py").read_text(
+        encoding="utf-8")
+    start = source.index("analysis_profiles = []")
+    end = source.index('section_started = time.monotonic()', start + 50)
+    block = source[start:end]
+    assert "current_serial" in block
+    assert "aggregate_for_identity" in block
+    assert "store_analyse" in block
+    assert "module_analysis_total" in block
+    assert "cell_analysis_profiles" in source
+    assert "aggregate_records_global" in source
+    assert "derived_writer_active" in source and "derived_writer_pending" in source
+    assert "voltages_mv" not in block and "raw_samples" not in block

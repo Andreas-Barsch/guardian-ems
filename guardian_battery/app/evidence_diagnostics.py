@@ -168,23 +168,52 @@ class EvidenceDiagnostics:
             "rule": "HIGH: ≥4 Familien, ≥2 HIGH, ≥2× Mindestdauer; MEDIUM: ≥2 Familien und Mindestdauer; sonst LOW",
         }
 
-    def analyse(self, samples, options, base_cells, maintenance_events=(), aggregate_records=()):
+    def analyse(self, samples, options, base_cells, maintenance_events=(), aggregate_records=(),
+                profiler=None):
         options = {**QUALITY_DEFAULTS, **options}
+        started = profiler.start() if profiler else None
         valid = sorted(
             (sample for sample in samples
              if len(sample.get("voltages_mv", ())) == 15),
             key=lambda sample: float(sample["timestamp"]),
         )
+        if profiler:
+            profiler.finish("valid_sample_sort", started)
         period = _period(valid)
-        ranking = self._ranking(valid, options, period, aggregate_records)
+        started = profiler.start() if profiler else None
+        ranking = self._ranking(valid, options, period, aggregate_records, profiler)
+        if profiler:
+            profiler.finish("ranking", started)
+        started = profiler.start() if profiler else None
         resistance = self._resistance(valid, options, period)
+        if profiler:
+            profiler.finish("resistance", started)
+        started = profiler.start() if profiler else None
         segments = self._segments(valid, options)
+        if profiler:
+            profiler.finish("segments", started)
+        started = profiler.start() if profiler else None
         capacity, curves = self._capacity_and_curves(segments, options, period)
+        if profiler:
+            profiler.finish("capacity_and_curves", started)
+        started = profiler.start() if profiler else None
         rest = self._rest(valid, options, period)
+        if profiler:
+            profiler.finish("rest", started)
+        started = profiler.start() if profiler else None
         balancing = self._balancing(valid, options, period)
+        if profiler:
+            profiler.finish("balancing", started)
+        started = profiler.start() if profiler else None
         readiness = self._ica_readiness(segments, options, period)
+        if profiler:
+            profiler.finish("ica_readiness", started)
+        started = profiler.start() if profiler else None
         maintenance = self._maintenance(valid, maintenance_events, ranking, period, options)
+        if profiler:
+            profiler.finish("maintenance", started)
 
+        started = profiler.start() if profiler else None
         cells = []
         for index, base in enumerate(base_cells):
             evidences = {
@@ -268,7 +297,7 @@ class EvidenceDiagnostics:
             {"stabil": 0, "unklar": 1, "verbessernd": 1,
              "verschlechternd": 2}[cell["trend"]],
         )) if cells else None
-        return {
+        result = {
             "schema_version": 1,
             "guardian_version": GUARDIAN_VERSION,
             "diagnostic_engine_version": DIAGNOSTIC_ENGINE_VERSION,
@@ -286,8 +315,11 @@ class EvidenceDiagnostics:
                 "contributing_evidence": worst["contributing_evidence"] if worst else [],
             },
         }
+        if profiler:
+            profiler.finish("evidence_assembly", started)
+        return result
 
-    def _ranking(self, samples, options, period, aggregate_records=()):
+    def _ranking(self, samples, options, period, aggregate_records=(), profiler=None):
         daily = defaultdict(lambda: [{"rank": [], "dev": [], "low": 0,
                                       "high": 0, "n": 0} for _ in range(15)])
         phase_counts = defaultdict(int)
@@ -295,6 +327,8 @@ class EvidenceDiagnostics:
         persisted = [record for record in aggregate_records
                      if record.get("config_id") == current_config_id
                      and record.get("phase") in PHASES]
+        if profiler:
+            profiler.counter("aggregate_records_current_config", len(persisted))
         source_samples = [] if persisted else samples
         for sample in source_samples:
             voltages = sample["voltages_mv"]

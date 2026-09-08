@@ -15,6 +15,7 @@ class DerivedPersistenceWorker:
         self.log = logger or logging.getLogger("guardian_battery.derived_persistence")
         self._condition = threading.Condition()
         self._pending = None
+        self._active = False
         self._stop = False
         self._thread = None
         self.submitted = 0
@@ -54,6 +55,7 @@ class DerivedPersistenceWorker:
         with self._condition:
             return {"submitted": self.submitted, "persisted": self.persisted,
                     "coalesced": self.coalesced, "pending": self._pending is not None,
+                    "active": self._active,
                     "last_error": self.last_error}
 
     def _run(self):
@@ -65,6 +67,7 @@ class DerivedPersistenceWorker:
                     return
                 task = self._pending
                 self._pending = None
+                self._active = True
             try:
                 import time
                 started = time.monotonic()
@@ -83,3 +86,6 @@ class DerivedPersistenceWorker:
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 self.log.exception("Derived diagnostic persistence failed")
+            finally:
+                with self._condition:
+                    self._active = False

@@ -16,7 +16,7 @@ from typing import Optional
 from cell_diagnostics import CellDiagnosticStore, DIAGNOSTIC_PARAMETER_META
 from cell_acquisition import acquire_cell_round
 from cell_history import CellHistoryWriter
-from collector_timing import CollectorTiming, PeriodicDeadline
+from collector_timing import CollectorTiming, PeriodicDeadline, ProfilingTimer
 from derived_persistence import DerivedPersistenceWorker
 from diagnostic_aggregates import DiagnosticAggregateStore
 from diagnostic_backfill import DiagnosticAggregateBackfill
@@ -1446,16 +1446,49 @@ def main() -> None:
                     LOG.warning("Maintenance-Kontext nicht lesbar: %s", exc)
                     maintenance_events = ()
                 section_started = time.monotonic()
+                analysis_profiles = []
                 for module in modules:
+                    module_profiler = ProfilingTimer()
+                    module_started = module_profiler.start()
+                    stage_started = module_profiler.start()
                     latest_serial = cell_store.current_serial(module.module)
+                    module_profiler.finish("current_serial", stage_started)
+                    stage_started = module_profiler.start()
+                    aggregate_records = aggregate_store.for_identity(
+                        module.module, latest_serial)
+                    module_profiler.finish("aggregate_for_identity", stage_started)
+                    store_profiler = module_profiler.child()
+                    stage_started = module_profiler.start()
                     analysis = cell_store.analyse(
                         module.module, options, maintenance_events,
-                        aggregate_store.for_identity(module.module, latest_serial),
+                        aggregate_records, profiler=store_profiler,
                     )
+                    module_profiler.finish("store_analyse", stage_started)
+                    stage_started = module_profiler.start()
                     cell_results[module.module] = {
                         **analysis, "physical_module_serial": latest_serial
                     }
+                    module_profiler.finish("result_assembly", stage_started)
+                    module_profiler.finish("module_analysis_total", module_started)
+                    module_profiler.counter("module_position", int(module.module))
+                    module_profiler.counter("physical_serial", latest_serial)
+                    module_profiler.counter("sample_count", analysis.get("sample_count"))
+                    module_profiler.counter("aggregate_record_count", len(aggregate_records))
+                    module_profiler.section("store", store_profiler.snapshot())
+                    analysis_profiles.append(module_profiler.snapshot())
                 timing.duration("cell_analysis", time.monotonic() - section_started)
+                try:
+                    writer_profile = persistence_worker.status()
+                    global_profile = {
+                        **cell_store.profiling_counts(),
+                        "aggregate_records_global": len(aggregate_store.records),
+                        "maintenance_event_count": len(maintenance_events),
+                        "derived_writer_active": bool(writer_profile.get("active")),
+                        "derived_writer_pending": bool(writer_profile.get("pending")),
+                    }
+                    timing.cell_analysis_profiles(analysis_profiles, global_profile)
+                except Exception:
+                    LOG.debug("Cell analysis profiling projection unavailable", exc_info=True)
                 section_started = time.monotonic()
                 publisher.publish(
                     modules, status, alarms, options, persistent, trends, incident,

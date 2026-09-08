@@ -268,6 +268,15 @@ class CellDiagnosticStore:
         return [value for value in self.unknown_samples.get(int(module), ())
                 if float(value["timestamp"]) > latest_documented]
 
+    def profiling_counts(self):
+        """Bounded scalar store inventory; never exposes samples."""
+        return {
+            "store_samples_total": sum(len(values) for values in self.identity_samples.values())
+            + sum(len(values) for values in self.unknown_samples.values()),
+            "identity_buffer_count": len(self.identity_samples),
+            "unknown_buffer_count": len(self.unknown_samples),
+        }
+
     def coverage_snapshot(self):
         result = {}
         for serial, values in self.identity_samples.items():
@@ -398,13 +407,21 @@ class CellDiagnosticStore:
         options,
         maintenance_events=(),
         aggregate_records=(),
+        profiler=None,
     ):
+        started = profiler.start() if profiler else None
         values = [
             sample
             for sample in self.values_for_module(module)
             if self.valid_cell_voltages(sample)
         ]
+        if profiler:
+            profiler.finish("values_and_validation", started)
+            profiler.counter("samples_current_identity", len(values))
+            profiler.counter("maintenance_event_count", len(maintenance_events))
+            profiler.counter("aggregate_records_identity", len(aggregate_records))
 
+        started = profiler.start() if profiler else None
         maintenance_signature = tuple(
             (
                 getattr(event, "maintenance_event_id", None)
@@ -424,6 +441,10 @@ class CellDiagnosticStore:
                   for item in aggregate_records),
         )
         cached = self._analysis_cache.get(module)
+        if profiler:
+            profiler.finish("cache_signature", started)
+            profiler.counter("cache_hit", bool(cached and cached[0] == signature))
+            profiler.counter("cache_miss", not bool(cached and cached[0] == signature))
         if cached and cached[0] == signature:
             return cached[1]
 
@@ -441,6 +462,7 @@ class CellDiagnosticStore:
 
         cell_count = 15
 
+        started = profiler.start() if profiler else None
         statistics_by_phase = {
             phase: [
                 {
@@ -519,6 +541,10 @@ class CellDiagnosticStore:
                         == highest_voltage
                     )
 
+        if profiler:
+            profiler.finish("current_condition_statistics", started)
+
+        started = profiler.start() if profiler else None
         cells = []
 
         for index in range(cell_count):
@@ -755,9 +781,20 @@ class CellDiagnosticStore:
             ),
         )
 
+        if profiler:
+            profiler.finish("current_condition_reduction", started)
+
+        evidence_profiler = profiler.child() if profiler else None
+        started = profiler.start() if profiler else None
         advanced = EvidenceDiagnostics(self.phases).analyse(
-            values, options, cells, maintenance_events, aggregate_records
+            values, options, cells, maintenance_events, aggregate_records,
+            profiler=evidence_profiler,
         )
+        if profiler:
+            profiler.finish("evidence_total", started)
+            profiler.section("evidence", evidence_profiler.snapshot())
+
+        started = profiler.start() if profiler else None
         for cell, evidence in zip(cells, advanced["cells"]):
             cell["diagnostics"] = evidence
 
@@ -801,4 +838,6 @@ class CellDiagnosticStore:
             "contributing_evidence": advanced["module"]["contributing_evidence"],
         }
         self._analysis_cache[module] = (signature, result)
+        if profiler:
+            profiler.finish("result_assembly", started)
         return result

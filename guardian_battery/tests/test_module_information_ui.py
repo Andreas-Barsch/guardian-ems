@@ -134,3 +134,19 @@ def test_collector_timing_is_responsive_without_changing_management_projection()
     assert "item.discharge_current_limit_a" in html
     assert "enabled(item.discharge_enable)" in html
     assert "management_freshness_seconds||600" in html
+
+
+def test_cell_analysis_profiling_ui_is_bounded_and_read_only():
+    html = render_module_information_html(configuration_path="/", maintenance_path="maintenance")
+    assert "Cell Analysis Profiling" in html
+    assert "cell_analysis_profiling||{}" in html
+    assert "Store Samples gesamt" in html
+    assert "Identity Buffer Count" in html and "Unknown Buffer Count" in html
+    assert "Aggregate Records global" in html and "Maintenance Events" in html
+    assert "Derived Writer aktiv" in html and "Derived Writer pending" in html
+    assert "module_analysis_total_seconds" in html
+    assert "values_and_validation_seconds" in html
+    assert "capacity_and_curves_seconds" in html
+    assert "verändern keine Batterie-, Modul-, Alarm- oder Risk-Bewertung" in html
+    assert "voltages_mv" not in html and "raw_samples" not in html
+    assert "try{renderAnalysisProfiling(timing)}catch(error)" in html
