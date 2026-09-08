@@ -2,6 +2,21 @@
 
 Stand: 2026-09-08
 
+## Guardian Battery 0.7.30 – Asynchronous Derived MQTT Worker
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.30`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Unter **Guardian Maintenance → Collector Timing** Main Cycle Duration, Effective Main Poll, Cycle Overruns und das synchrone MQTT-Subtiming erfassen. Der Main-Publish-Count darf den Derived-only Burst nicht mehr enthalten.
+- Im separaten Bereich **Derived MQTT Worker** Active/Pending, aktive und wartende Generation, letzte abgeschlossene Generation, Created/Started/Completed, Wall/CPU, Publish Calls/Bytes und Publish-/Build-/JSON-Zeiten sowie Coalesced-/Failure-Zähler erfassen.
+- Auch bei einem weiterhin 50–60 Sekunden dauernden Derived Burst muss der Collector weiterlaufen. Währenddessen müssen Live SOC, Spannung, Strom, Temperatur, Zellspreizung und Alarme in ihrer regulären Main-Poll-Cadence aktualisiert werden.
+- Nach mehreren Cell-Runden Effective Cell Sampling, Deadline Lateness, Per-Serial Intervals und Cell Overruns prüfen. Ziele: Cell-Median höchstens 70 Sekunden, P95 höchstens 90 Sekunden und Hauptpoll ohne andere lange synchrone Arbeit nahe 10 Sekunden.
+- Einen MQTT-Reconnect prüfen: Die Reconnect-Epoche muss den Derived-Erfolgsmarker invalidieren und die aktuelle vollständige Generation erneut publizierbar machen. Exception, Returncode ungleich Success und Disconnect dürfen keinen Success Marker erzeugen.
+- Bei Backlog darf genau ein Job aktiv und nur die neueste Generation pending sein. Zwischengenerationen entfallen ausschließlich als rekonstruierbare MQTT-Projektion; Raw Evidence, Analysis, Persistenz, Daily Diagnostics und Risk bleiben vollständig.
+- Nach stabiler Abnahme die Zeitverläufe erstmals wieder öffnen und deren Ladezeit messen. History selbst ist in 0.7.30 unverändert.
+- Die Konkurrenz zwischen Derived MQTT Worker, Analysis Worker, Persistence Worker und Paho Network Thread bleibt unter realer Last zu verifizieren. Vor dieser Abnahme wird keine produktive Erfolgsbehauptung gemacht.
+- Source-Release, Add-on-Installation und produktive Laufzeit sind getrennte Zustände. Dieser Source-Release führt kein Deployment, keinen Neustart und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.29 – Generation-Aware Derived MQTT Projection
 
 ### Produktive Abnahme nach separatem Deployment

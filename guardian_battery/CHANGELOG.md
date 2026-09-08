@@ -1,5 +1,18 @@
 # Guardian Battery Changelog
 
+## 0.7.30 – Asynchronous Derived MQTT Worker
+
+- Entfernt ausschließlich Derived-only Cell Diagnostics aus dem zeitkritischen Collector-Main-Thread. Live- und gemischte MQTT-Werte, Live-Alarme, RS485, Topologie und Discovery bleiben synchron im bestehenden Collector-Pfad.
+- Verwendet genau einen bounded Worker mit höchstens einem aktiven und einem neuesten Pending-Job. Neuere Analysis Generations ersetzen nur wartende MQTT-Projektionen; Raw Evidence, Analysis Results, Derived Persistence, Daily Diagnostics und Risk werden nicht koalesziert.
+- Der Worker verwendet den bestehenden Paho-Client und dessen bestehende Verbindung. Es gibt keine zweite MQTT-Verbindung, kein Batching, keine Payloadreduktion und keine Änderung an Topics, Payloads, Reihenfolge, QoS oder Retain.
+- Jeder Job bindet Analysis Generation, Config-ID, kanonische Position-zu-`physical_module_serial`-Provenienz, Reconnect-Epoche und Erstellungszeit. Ein Reconnect invalidiert den Erfolgsmarker und macht den aktuellen Derived State erneut publizierbar.
+- Exception, MQTT-Returncode ungleich Success und Connection Loss erzeugen keinen falschen Erfolgsmarker. Workerfehler bleiben von Collector, Acquisition, Live MQTT, Alarmen und Evidence isoliert; es gibt keine unbounded Retry-Schleife.
+- Beim Shutdown werden keine neuen Jobs angenommen, Pending verworfen und ein aktiver Job nur mit begrenztem Timeout gejoint.
+- Ergänzt separate bounded Worker-Observability mit Active/Pending, Generationen, Zeitstempeln, Wall-/CPU-, Build-, JSON- und Publish-Zeiten, Calls, Bytes, Maximaldauer, Erfolg/Fehler sowie Coalesced-/Failure-Zählern. Abgeschlossene Collector-Zyklen bleiben unverändert.
+- Produktive Ausgangsevidence waren etwa 3.692 Cell-Diagnostic-Publishes mit rund 47–61 Sekunden Publish Wall. Im lokalen Sechs-Modul-/90-Zell-Test sank der synchrone Main-Pfad von 3.649 auf 169 Publishes; Submit kostete etwa 0,11 ms. Dies ist keine produktive Laufzeitgarantie.
+- Scheduler, Analysis Worker, Derived Persistence, Raw Evidence, Diagnostics, Risk, Alarmgrenzen, RS485, Hycube und History bleiben unverändert.
+- Guardian Battery und Add-on sind `0.7.30`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.29 – Generation-Aware Derived MQTT Projection
 
 - Publiziert ausschließlich verifizierte Derived-only Cell Diagnostics bei einer neuen vollständig abgeschlossenen Analysis Generation. Modul-Zellmedian, Diagnosezustände, Confidence, Evidence, Trend, Maintenance Risk sowie Zell-Diagnose-States und -Attribute werden bei unveränderter bereits erfolgreich publizierter Generation nicht redundant wiederholt.
