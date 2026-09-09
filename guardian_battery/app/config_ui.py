@@ -31,6 +31,7 @@ from hycube_evidence import (DEFAULT_HYCUBE_HISTORY_DIR,
                              HycubeBatteryCapacitySeries, HycubePolicyHistory)
 from rs485_evidence import DEFAULT_RS485_HISTORY_DIR, Rs485HistorySeries
 from history_ui import render_history_html
+from history_timing import HistoryRequestTimingState
 from guardian_header import render_guardian_header
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog,
                               PositionHistoryService, classify_stack_change,
@@ -54,6 +55,7 @@ _MAINTENANCE_API = None
 _MAINTENANCE_API_LOCK = threading.Lock()
 _TIMELINE_API = None
 _HISTORY_API = None
+_HISTORY_TIMING = HistoryRequestTimingState()
 _POSITION_HISTORY_API = None
 _DIAGNOSTICS_API = None
 _MAINTENANCE_LIVE_PUBLISHER = None
@@ -119,6 +121,7 @@ def _get_history_api():
                     Rs485HistorySeries(DEFAULT_RS485_HISTORY_DIR),
                     HycubeBatteryCapacitySeries(DEFAULT_HYCUBE_HISTORY_DIR),
                     HycubePolicyHistory(DEFAULT_HYCUBE_POLICY_HISTORY_DIR),
+                    timing_state=_HISTORY_TIMING,
                 )
     return _HISTORY_API
 
@@ -391,6 +394,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header('Content-Type',ctype+'; charset=utf-8'); self.send_header('Content-Length',str(len(raw)))
         for key,value in (headers or {}).items(): self.send_header(key,value)
         self.end_headers(); self.wfile.write(raw)
+    def _send_history(self,response):
+        failed = response.status >= 400
+        try:
+            with _HISTORY_TIMING.stage('serialization'):
+                raw=json.dumps(response.body,ensure_ascii=False).encode()
+            _HISTORY_TIMING.counts(response_bytes=len(raw))
+            self.send_response(response.status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(raw)))
+            for key,value in response.headers.items(): self.send_header(key,value)
+            self.end_headers()
+            with _HISTORY_TIMING.stage('response_write'):
+                self.wfile.write(raw)
+        except Exception as exc:
+            _HISTORY_TIMING.complete(failed=True,error=exc)
+            raise
+        _HISTORY_TIMING.complete(failed=failed,
+                                 error=response.body.get('error',{}).get('code') if failed else None)
     def _is_maintenance_api(self):
         return API_ROUTE in self.path.split('?',1)[0]
     def _is_timeline_api(self):
@@ -440,10 +459,11 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_diagnostics_api(): self._diagnostics_request('GET'); return
         if self._is_history_api():
             response=_get_history_api().handle('GET',self.path)
-            self._send(response.status,response.body,headers=response.headers); return
+            self._send_history(response); return
         if self.path.rstrip('/').endswith('/api/rs485/status'):
             payload = (_RS485_STATUS_PROVIDER() if _RS485_STATUS_PROVIDER else
                        {"status": {"state": "disabled"}, "management": {}, "history": {}})
+            payload = {**payload, "history_timing": _HISTORY_TIMING.snapshot()}
             # Raw protocol frames are intentionally never exposed through ingress.
             management = {str(adr): {key: value for key, value in item.items()
                           if key != "raw_frame"} for adr, item in payload.get("management", {}).items()}

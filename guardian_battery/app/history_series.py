@@ -5,6 +5,7 @@ import json
 import re
 import time
 from collections import OrderedDict
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -106,7 +107,7 @@ class CellHistorySeries:
 
     def query_bundles(self, *, requests, timestamp_from, timestamp_to, module_number=None,
                       module_numbers=None, max_points=DEFAULT_MAX_DISPLAY_POINTS,
-                      include_all_module_soc=False):
+                      include_all_module_soc=False, timing=None):
         """Project several metrics from one JSONL scan and one shared sample set."""
         selected_modules = tuple(sorted(set(module_numbers or (
             (module_number,) if module_number is not None else ()))))
@@ -128,7 +129,10 @@ class CellHistorySeries:
             raise ValueError("at least one series metric is required")
         if len({metric for metric, _, _ in normalized}) != len(normalized):
             raise ValueError("series metrics must be unique")
-        paths = self._paths(timestamp_from, timestamp_to)
+        stage = timing.stage if timing else nullcontext
+        with stage("discovery"):
+            considered = len(list(self.directory.glob("*.jsonl"))) if self.directory.exists() else 0
+            paths = self._paths(timestamp_from, timestamp_to)
         try:
             signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths)
             position_signature = ((self.position_history_path.stat().st_size,
@@ -141,6 +145,10 @@ class CellHistorySeries:
                selected_modules, primary_module, max_points, include_all_module_soc)
         if key in self._cache:
             self._cache.move_to_end(key)
+            if timing:
+                timing.counts(cache_hit=True, cache_miss=False,
+                              cell_files_considered=considered, cell_files_opened=0)
+                timing.not_executed("cell_read_parse_filter", "downsampling")
             return {**self._cache[key], "cache_hit": True}
 
         started = time.perf_counter()
@@ -161,9 +169,14 @@ class CellHistorySeries:
                               if item[0] == "soc"]
         needs_stack_context = any(metric in STACK_SOC_METRICS
                                   for metric, _, _ in normalized)
+        rejected = parsed = in_window = bytes_read = opened = 0
+        parse_errors = invalid_records = 0
         try:
+          with stage("cell_read_parse_filter"):
             for path in paths:
+                bytes_read += path.stat().st_size
                 with path.open(encoding="utf-8") as handle:
+                    opened += 1
                     for line_number, line in enumerate(handle, 1):
                         if not line.strip():
                             continue
@@ -171,13 +184,21 @@ class CellHistorySeries:
                         module_token = _MODULE_TOKEN.search(line)
                         if (not needs_stack_context and module_token is not None
                                 and int(module_token.group(1)) not in selected_modules):
+                            rejected += 1
                             continue
-                        record = json.loads(line)
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            parse_errors += 1
+                            raise
+                        parsed += 1
                         if record.get("schema_version") != 1:
+                            invalid_records += 1
                             raise ValueError("schema")
                         epoch = float(record["timestamp"])
                         if not start_epoch <= epoch <= end_epoch:
                             continue
+                        in_window += 1
                         record_module = int(record["module"])
                         if include_all_module_soc and record_module in soc_collectors:
                             timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
@@ -237,10 +258,19 @@ class CellHistorySeries:
                             _ExtremaCollector(per_group, start_epoch, end_epoch)).add(point)
                         raw_points[index] += 1
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError) as exc:
+            if timing:
+                timing.counts(cell_files_considered=considered,
+                    cell_files_opened=opened, cell_bytes_read=bytes_read,
+                    cell_raw_lines=raw_file_records,
+                    cell_lines_rejected_before_json=rejected,
+                    cell_parsed_records=parsed, cell_parse_errors=parse_errors,
+                    cell_invalid_records=invalid_records,
+                    cell_records_in_window=in_window,
+                    cell_records_for_requested_modules=raw_records)
             raise SeriesHistoryError(f"cell history is invalid: {exc}") from exc
 
         scan_seconds = time.perf_counter() - started
-        downsample_started = time.perf_counter()
+        downsample_started = time.perf_counter(); downsample_cpu = time.thread_time()
         projected = []
         for index, (metric, cell_number, selected_cells) in enumerate(normalized):
             if metric == "soc" and include_all_module_soc:
@@ -258,6 +288,18 @@ class CellHistorySeries:
                               "cell_numbers": list(selected_cells or ()), "points": points,
                               "raw_points": raw_points[index]})
         downsample_seconds = time.perf_counter() - downsample_started
+        if timing:
+            timing.record("downsampling", downsample_seconds,
+                          time.thread_time() - downsample_cpu, accounting=True)
+            timing.counts(cache_hit=False, cache_miss=True,
+                cell_files_considered=considered, cell_files_opened=opened,
+                cell_bytes_read=bytes_read, cell_raw_lines=raw_file_records,
+                cell_lines_rejected_before_json=rejected, cell_parsed_records=parsed,
+                cell_parse_errors=parse_errors, cell_invalid_records=invalid_records,
+                cell_records_in_window=in_window,
+                cell_records_for_requested_modules=raw_records,
+                series_points_before_downsampling=sum(raw_points),
+                series_points_after_downsampling=sum(len(x["points"]) for x in projected))
         soc_module_series = [
             {"metric": "soc", "label": f"Modul {number} SOC", "unit": "%",
              "source": "pylontech", "module_number": number,

@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
@@ -51,10 +52,13 @@ class HycubeBatteryCapacitySeries:
         return sorted(path for path in self.directory.glob("*.jsonl")
                       if first <= path.stem <= last)
 
-    def query(self, *, timestamp_from, timestamp_to, max_points=850):
+    def query(self, *, timestamp_from, timestamp_to, max_points=850, timing=None):
         from history_series import _ExtremaCollector
 
-        paths = self._paths(timestamp_from, timestamp_to)
+        stage = timing.stage if timing else nullcontext
+        with stage("hycube_discovery"):
+            considered = len(list(self.directory.glob("*.jsonl"))) if self.directory.exists() else 0
+            paths = self._paths(timestamp_from, timestamp_to)
         try:
             signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns)
                               for path in paths)
@@ -63,20 +67,32 @@ class HycubeBatteryCapacitySeries:
         key = (signature, timestamp_from, timestamp_to, max_points)
         if key in self._cache:
             self._cache.move_to_end(key)
+            if timing: timing.not_executed("hycube_read_parse_filter", "hycube_downsampling")
             return {**self._cache[key], "cache_hit": True}
         started = time.perf_counter()
         start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
         end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
         collector = _ExtremaCollector(max_points, start_epoch, end_epoch)
-        raw_records = 0
+        raw_records = 0; raw_lines = 0; parsed = 0; bytes_read = 0; opened = 0
+        parse_errors = invalid_records = 0
         try:
+          with stage("hycube_read_parse_filter"):
             for path in paths:
+                bytes_read += path.stat().st_size
                 with path.open(encoding="utf-8") as handle:
+                    opened += 1
                     for line in handle:
                         if not line.strip():
                             continue
-                        record = json.loads(line)
+                        raw_lines += 1
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            parse_errors += 1
+                            raise
+                        parsed += 1
                         if record.get("record_type") != "hycube_system_observation":
+                            invalid_records += 1
                             continue
                         received_at = record.get("received_at")
                         capacity = record.get("BatteryCapacity")
@@ -99,10 +115,28 @@ class HycubeBatteryCapacitySeries:
                         })
                         raw_records += 1
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            if timing:
+                timing.counts(hycube_files_considered=considered,
+                    hycube_files_opened=opened, hycube_bytes_read=bytes_read,
+                    hycube_raw_lines=raw_lines, hycube_parsed_records=parsed,
+                    hycube_parse_errors=parse_errors,
+                    hycube_invalid_records=invalid_records,
+                    hycube_records_in_window=raw_records)
             raise HycubeHistoryError(f"Hycube history is invalid: {exc}") from exc
         read_seconds = time.perf_counter() - started
-        downsample_started = time.perf_counter()
+        downsample_started = time.perf_counter(); downsample_cpu = time.thread_time()
         points = collector.points()
+        if timing:
+            timing.record("hycube_downsampling", time.perf_counter() - downsample_started,
+                          time.thread_time() - downsample_cpu)
+            timing.counts(hycube_files_considered=considered,
+                hycube_files_opened=opened, hycube_bytes_read=bytes_read,
+                hycube_raw_lines=raw_lines, hycube_parsed_records=parsed,
+                hycube_parse_errors=parse_errors,
+                hycube_invalid_records=invalid_records,
+                hycube_records_in_window=raw_records,
+                hycube_points_before_downsampling=raw_records,
+                hycube_points_after_downsampling=len(points))
         result = {"metric": "hycube_battery_capacity", "label": "Hycube Battery Capacity",
                   "unit": "%", "source": "hycube", "source_field": "BatteryCapacity",
                   "timestamp_source": "received_at", "points": points,
@@ -210,14 +244,16 @@ class HycubePolicyHistory:
             os.fsync(handle.fileno())
         return path
 
-    def query(self, *, timestamp_from, timestamp_to):
+    def query(self, *, timestamp_from, timestamp_to, timing=None):
         if not self.directory.exists():
+            if timing:
+                timing.counts(policy_files=0, policy_records=0)
             return []
         start = datetime.fromisoformat(timestamp_from).timestamp()
         end = datetime.fromisoformat(timestamp_to).timestamp()
         first_day = datetime.fromtimestamp(start, timezone.utc).date().isoformat()
         last_day = datetime.fromtimestamp(end, timezone.utc).date().isoformat()
-        last_before = None
+        last_before = None; parsed_records = 0
         changes = []
         try:
             all_paths = sorted(self.directory.glob("*.jsonl"))
@@ -226,6 +262,7 @@ class HycubePolicyHistory:
                 lines = path.read_text(encoding="utf-8").splitlines()
                 for line in reversed(lines):
                     record = json.loads(line)
+                    parsed_records += 1
                     if (record.get("record_type") == "hycube_policy_observation"
                             and record.get("parse_quality") == "complete"):
                         last_before = record
@@ -238,6 +275,7 @@ class HycubePolicyHistory:
                         if not line.strip():
                             continue
                         record = json.loads(line)
+                        parsed_records += 1
                         if (record.get("record_type") != "hycube_policy_observation"
                                 or record.get("parse_quality") != "complete"):
                             continue
@@ -249,6 +287,8 @@ class HycubePolicyHistory:
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise HycubeHistoryError(f"Hycube policy history is invalid: {exc}") from exc
         records = ([last_before] if last_before else []) + changes
+        if timing:
+            timing.counts(policy_files=len(all_paths), policy_records=parsed_records)
         segments = []
         for index, record in enumerate(records):
             segment_from = timestamp_from if index == 0 and last_before else record["observed_at"]

@@ -157,6 +157,10 @@ def test_mqtt_subtiming_ui_shows_wall_cpu_groups_and_return_codes():
     assert 'id="timing-derived-mqtt-worker"' in html
     assert "generation_pending" in html
     assert "publish_wall_seconds" in html
+    assert "History Timing" in html
+    assert 'id="history-timing-summary"' in html
+    assert 'id="history-timing-components"' in html
+    assert 'id="history-timing-counts"' in html
 
 
 def test_collector_cell_intervals_sort_numerically_by_position_then_serial():

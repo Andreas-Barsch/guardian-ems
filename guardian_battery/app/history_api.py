@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import time
+from datetime import datetime
 from urllib.parse import parse_qs, urlsplit
 
 from event_overlay import EventOverlayAdapter, OverlayContext, matches_chart
@@ -39,13 +40,15 @@ class HistoryApi:
     def __init__(self, series: CellHistorySeries, overlays: EventOverlayAdapter, phase_engine=None,
                  rs485_series: Rs485HistorySeries | None = None,
                  hycube_series: HycubeBatteryCapacitySeries | None = None,
-                 hycube_policy_history: HycubePolicyHistory | None = None):
+                 hycube_policy_history: HycubePolicyHistory | None = None,
+                 timing_state=None):
         self.series = series
         self.overlays = overlays
         self.phase_engine = phase_engine
         self.rs485_series = rs485_series
         self.hycube_series = hycube_series
         self.hycube_policy_history = hycube_policy_history
+        self.timing_state = timing_state
 
     def handle(self, method: str, target: str) -> ApiResponse:
         try:
@@ -57,20 +60,26 @@ class HistoryApi:
                 return ApiResponse(404, error_json("not_found", "History API route not found"))
             return self._query(split.query)
         except (HistoryApiProblem, PhaseEngineError) as exc:
+            if self.timing_state: self.timing_state.note_error(exc)
             return ApiResponse(400, error_json("invalid_request", str(exc)))
         except SeriesHistoryError as exc:
+            if self.timing_state: self.timing_state.note_error(exc)
             LOG.error("Guardian series unavailable: %s", exc)
             return ApiResponse(503, error_json("series_history_error", "Guardian series history is unavailable"))
         except HycubeHistoryError as exc:
+            if self.timing_state: self.timing_state.note_error(exc)
             LOG.error("Hycube history unavailable: %s", exc)
             return ApiResponse(503, error_json("hycube_history_error", "Hycube history is unavailable"))
         except MaintenanceHistoryError as exc:
+            if self.timing_state: self.timing_state.note_error(exc)
             LOG.error("Maintenance overlay unavailable: %s", exc)
             return ApiResponse(503, error_json("maintenance_history_error", "Maintenance history is unavailable"))
         except TechnicalHistoryError as exc:
+            if self.timing_state: self.timing_state.note_error(exc)
             LOG.error("Timeline overlay unavailable: %s", exc)
             return ApiResponse(503, error_json("technical_history_error", "Technical event history is unavailable"))
-        except Exception:
+        except Exception as exc:
+            if self.timing_state: self.timing_state.note_error(exc)
             LOG.exception("Unhandled history API error")
             return ApiResponse(500, error_json("internal_error", "Internal server error"))
 
@@ -132,6 +141,21 @@ class HistoryApi:
         include_archived = self._boolean(values.get("include_archived", "false"))
         if active in (False, None):
             include_archived = True
+        timing = self.timing_state
+        if timing:
+            timing.begin({"view": "combined" if combined else "single",
+                "metric": metrics[0] if len(metrics) == 1 else None,
+                "metrics": list(metrics), "module_number": module_number,
+                "modules": list(modules), "selected_cells": list(cell_numbers or ()),
+                "from": timestamp_from, "to": timestamp_to,
+                "window_seconds": (datetime.fromisoformat(timestamp_to) -
+                                   datetime.fromisoformat(timestamp_from)).total_seconds(),
+                "analysis_mode": values.get("analysis_mode", "historical"),
+                "active": active})
+            timing.unavailable("cell_read", "cell_parse", "cell_filter",
+                               "config", "series_build",
+                               "soc_timeline", "assembly")
+            timing.not_executed("identity")
         backend_started = time.perf_counter()
         requests = []
         for metric in metrics:
@@ -145,16 +169,28 @@ class HistoryApi:
             requests=cell_requests or [{"metric": "soc", "cell_number": None, "cell_numbers": None}],
             timestamp_from=timestamp_from, timestamp_to=timestamp_to,
             module_number=module_number, module_numbers=modules,
-            include_all_module_soc="soc" in metrics)
+            include_all_module_soc="soc" in metrics, timing=timing)
         hycube = (self.hycube_series.query(timestamp_from=timestamp_from,
                                            timestamp_to=timestamp_to,
-                                           max_points=max(4, 6000 // 7))
+                                           max_points=max(4, 6000 // 7), timing=timing)
                   if "soc" in metrics and self.hycube_series is not None else None)
-        policy_started = time.perf_counter()
-        policy_series = (self.hycube_policy_history.query(
-            timestamp_from=timestamp_from, timestamp_to=timestamp_to)
-            if "soc" in metrics and self.hycube_policy_history is not None else [])
-        policy_seconds = time.perf_counter() - policy_started
+        if timing and hycube is None:
+            timing.not_executed("hycube_discovery", "hycube_read_parse_filter",
+                                "hycube_downsampling")
+        policy_seconds = 0.0
+        if "soc" in metrics and self.hycube_policy_history is not None:
+            policy_started = time.perf_counter(); policy_cpu = time.thread_time()
+            policy_series = self.hycube_policy_history.query(
+                timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                timing=timing)
+            policy_seconds = time.perf_counter() - policy_started
+            if timing:
+                timing.record("policy", policy_seconds, time.thread_time() - policy_cpu)
+        else:
+            policy_series = []
+            if timing:
+                timing.not_executed("policy")
+                timing.counts(policy_files=0, policy_records=0)
         projected_series = list(bundle["series"] if cell_requests else [])
         if any(item["metric"] in RS485_SERIES_METRICS for item in requests):
             if self.rs485_series is None:
@@ -179,7 +215,7 @@ class HistoryApi:
         projected_series = [by_metric[metric] for metric in metrics]
         marker_cells = (tuple(sorted(set((voltage_cells or ()) + (temperature_cells or ()))))
                         or (None,)) if combined else cell_numbers or (cell_number,)
-        maintenance_started = time.perf_counter()
+        maintenance_started = time.perf_counter(); maintenance_cpu = time.thread_time()
         candidates = self.overlays.markers(OverlayContext(
             timestamp_from=timestamp_from, timestamp_to=timestamp_to,
             event_types=("maintenance",), include_archived=include_archived,
@@ -193,6 +229,11 @@ class HistoryApi:
         markers.sort(key=lambda marker: (marker.timestamp, marker.event_type,
                                          marker.maintenance_event_id or marker.title))
         maintenance_seconds = time.perf_counter() - maintenance_started
+        if timing:
+            timing.record("maintenance", maintenance_seconds,
+                          time.thread_time() - maintenance_cpu)
+            timing.counts(maintenance_events_considered=len(candidates),
+                          maintenance_markers_returned=len(markers))
         maintenance_boundaries = project_maintenance_boundaries(
             [{**marker.to_dict(), "occurred_at": marker.timestamp}
              for marker in markers if marker.event_type == "maintenance"]
@@ -214,7 +255,7 @@ class HistoryApi:
                 }
                 try: what_if = {key: float(values[source]) for key, source in names.items()}
                 except (KeyError, ValueError) as exc: raise HistoryApiProblem("what-if mode requires four numeric phase parameters") from exc
-            phase_started = time.perf_counter()
+            phase_started = time.perf_counter(); phase_cpu = time.thread_time()
             analysis = self.phase_engine.analyse(bundle["samples"], mode=mode, what_if=what_if,
                                                  window_to=timestamp_to)
             phase_seconds = time.perf_counter() - phase_started
@@ -222,6 +263,13 @@ class HistoryApi:
             diagnostic_phases = analysis["diagnostic_intervals"]
             relative_endpoints = analysis.get("relative_endpoints", [])
             visual_parameters = analysis["visual_parameters"]
+            if timing:
+                timing.record("phase", phase_seconds, time.thread_time() - phase_cpu)
+                timing.counts(phase_input_samples=len(bundle["samples"]),
+                    visual_phase_intervals=len(phases),
+                    diagnostic_phase_intervals=len(diagnostic_phases))
+        elif timing:
+            timing.not_executed("phase", "config")
         response = {
             "series": [{**{key: value for key, value in item.items() if key != "raw_points"},
                           "module_number": module_number,
@@ -265,6 +313,12 @@ class HistoryApi:
                               if combined else {**projected_series[0],
                                                 "module_number": module_number,
                                                 "selected_modules": list(modules)})
+        if timing:
+            timing.counts(response_series_count=len(projected_series),
+                response_points_total=sum(len(item["points"]) for item in projected_series),
+                soc_timeline_module_count=len(bundle.get("soc_module_series", [])),
+                soc_timeline_points=sum(len(item["points"]) for item in
+                                        bundle.get("soc_module_series", [])))
         response["performance"] = {
             "raw_records": bundle["raw_records"] + (hycube["raw_records"] if hycube else 0),
             "raw_file_records": bundle.get("raw_file_records", bundle["raw_records"]),
