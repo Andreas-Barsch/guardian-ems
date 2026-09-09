@@ -2,6 +2,21 @@
 
 Stand: 2026-09-09
 
+## Guardian Battery 0.7.32 – Hycube History Projection V1
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.32`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Nach einem Deployment nicht sofort eine Performanceaussage ableiten. Zuerst das Add-on normal starten, den Hycube Projection Writer und die Current-Day Projection prüfen und Collector Timing beobachten.
+- Danach unter **Guardian Maintenance → Hycube History Projection → Historische Hycube-Projektion aufbauen** den Backfill ausdrücklich starten. Währenddessen Status, Current File, Files Completed, Bytes, Records und Errors beobachten; Raw-Dateien niemals manuell verändern.
+- Abgeschlossene relevante Tage erst nach erfolgreicher Sidecar-Prüfung als `complete` betrachten. Sidecars belegen Raw-Signatur, bestätigten Byteoffset, Projection-Größe, Record-Anzahl und ersten/letzten Zeitstempel; sie enthalten keine History.
+- Erst nach vollständigem Backfill desselben relevanten Zeitraums den Referenzfall **24 h → SOC → Modul 1** wiederholen und Total Wall/CPU, Source Mode, Projection Wall/CPU/Bytes, Raw-Fallback Wall/CPU/Bytes und Fallback Reason dokumentieren. Für abgeschlossene projizierte Tage ist `projection` der erwartete Normalfall.
+- Das Diagramm muss fachlich unverändert bleiben. Insbesondere bleiben Hycube-0%-Werte erhalten, wenn sie in der Source vorliegen; dieser Release enthält keine Nullwertbereinigung, Glättung oder Ursachenanalyse.
+- Parallel Effective Main Poll, Effective Cell Sampling, Cell Deadline Lateness, Cycle Overruns und Cell Overruns prüfen. Der bounded Backfill darf die bereits erreichten ungefähr 60-Sekunden-Cell-Samples nicht relevant verschlechtern.
+- Die lokale Referenz umfasste 27.687 Records: Raw 88.121.938 Bytes, Projection 12.444.272 Bytes, 449,46 Bytes pro Projection Record und etwa 7,08× weniger Inputbytes. Cold-Reader-Mediane waren lokal Raw 0,255 s, Projection 0,145 s und Mixed 0,222 s; Current-Day Tail lag bei 0,024 s. Dies sind lokale Evidence-Werte, keine produktive Performancegarantie.
+- Raw Evidence bleibt authoritative; Projection ist derived und rebuildable. Reader bevorzugen eine gültige Projection, kombinieren am aktuellen Tag den Raw Tail ab bestätigtem Byteoffset und fallen bei Fehlern tageweise auf Raw zurück. Es gibt keine zweite Hycube-Abfrage.
+- Source-Release, Add-on-Installation, Backfill und produktive Laufzeit sind getrennte Zustände. Dieser Source-Release führt kein Deployment, keinen Neustart, keinen Backfill und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.31 – Production History Request Subtiming
 
 ### Produktive Root-Cause-Messung nach separatem Deployment

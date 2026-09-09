@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.32 – Hycube History Projection V1
+
+- Ergänzt eine schlanke append-only Hycube History Projection mit Schema V1. Die Raw Hycube Evidence bleibt authoritative und unverändert; es gibt keine zweite Hycube-Abfrage und keine Änderung an Raw-Schema, Payload, Cadence, Flush-/fsync- oder Fehlersemantik.
+- Erhält `source_raw_end_offset` als bytegenaue Raw-Provenienz sowie SOC-Provenienz, Zeitsemantik, Parse-Qualität, Payload-Hash und beobachtete Sampling-Intervalle. `BatteryCapacity = 0` wird weder gefiltert noch geglättet.
+- Liest SOC History bevorzugt aus gültigen Projektionen. Für den aktuellen Tag werden bestätigte Projection-Daten und der anschließende Raw Tail kombiniert; ungültige oder fehlende Projektionen fallen tageweise auf Raw zurück. API-Ergebnis, Reihenfolge und Downsampling bleiben fachlich unverändert.
+- Verwendet atomar ersetzte Sidecars für Status, Raw-Signatur, bestätigten Offset, Projection-Größe, Record-Anzahl und ersten/letzten Zeitstempel. Die Sidecars enthalten keine History.
+- Bietet einen expliziten, bounded, resumable und idempotenten Backfill mit genau einem Worker, neuesten abgeschlossenen Tagen zuerst, begrenzten Chunks, `.building`-Dateien und atomarer Promotion. Raw-Dateien werden dabei nie verändert.
+- Isoliert Projection-, Flush-, Sidecar-, ENOSPC-, Berechtigungs-, Korruptions-, Schema- und Backfill-Fehler vom autoritativen Raw-Pfad und weist Projection- sowie Raw-Fallback-History-Timings getrennt aus.
+- Lokale Referenz mit 27.687 Records: Raw 88.121.938 Bytes, Projection 12.444.272 Bytes beziehungsweise 449,46 Bytes pro Record und etwa 7,08× weniger Inputbytes. Dies ist keine Behauptung einer bereits produktiv verifizierten Beschleunigung.
+- Guardian Battery und Add-on sind `0.7.32`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.31 – Production History Request Subtiming
 
 - Ergänzt einen eigenen bounded `HistoryRequestTimingState` mit prozesslokal monotonen Request-IDs, dem neuesten laufenden Request und dem tatsächlich zuletzt abgeschlossenen Request. Parallele Requests bleiben getrennt; abgeschlossene Werte werden nicht historisiert oder nachträglich verändert.
