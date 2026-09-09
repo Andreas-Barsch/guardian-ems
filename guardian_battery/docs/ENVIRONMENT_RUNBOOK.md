@@ -1,6 +1,23 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-09-08
+Stand: 2026-09-09
+
+## Guardian Battery 0.7.31 – Production History Request Subtiming
+
+### Produktive Root-Cause-Messung nach separatem Deployment
+
+- Guardian/Add-on: `0.7.31`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Zunächst den Referenzfall **24 h → SOC → Modul 1** einmal laden und die manuelle Zeit vom Klick bis zum vollständig sichtbaren Chart erfassen. Danach unter **Guardian Maintenance → History Timing** Request-ID, Status, Total Wall, Total Thread CPU und Cache Hit/Miss ablesen.
+- Für denselben Request Discovery, kombinierte Cell Read/Parse/Filter-Grenze, Downsampling, Hycube Discovery und Read/Parse/Filter, Hycube Downsampling, Policy, Maintenance, Phase, finale Serialization, Response Write und Other sowie alle Datei-/Byte-/Zeilen-/Record-/Punkt-/Response-Counts dokumentieren.
+- Anschließend den Referenzfall **24 h → SOC → alle Module** analog erfassen. Frühere Benutzerbeobachtungen von etwa 95 beziehungsweise 140 Sekunden sind Vergleichswerte und nicht als Backendzeit vorauszusetzen.
+- Wenn Backend Total ungefähr der manuellen Gesamtzeit entspricht, liegt die Verzögerung überwiegend im Add-on-Pfad. Bei Total Wall deutlich größer als Total Thread CPU anhand der Stage-Werte I/O, Descheduling, Contention oder Write weiter eingrenzen und nicht vorschnell den Algorithmus ändern.
+- Dominiert Cell Read/Parse/Filter, den Raw-History-/Storagepfad untersuchen. Dominiert Hycube, dessen Historypfad separat untersuchen. Dominiert Response Write bei geringer CPU, HTTP-/Ingress-/Client-Backpressure prüfen.
+- Ist Backend Total deutlich kleiner als die manuelle Gesamtzeit, erst in einem separaten Auftrag Frontend-Unterzeiten für Fetch, Headers, `response.json`, Series Transformation und Chart Rendering instrumentieren. Ingress und Browser liegen außerhalb der aktuellen Backend-Messgrenze.
+- Während des Referenzrequests zusätzlich Effective Main Poll, Effective Cell Sampling, Cell Deadline Lateness, Cycle Overruns und Cell Overruns beobachten. Aufgrund dieser Werte in diesem Release noch keine Änderung durchführen.
+- `not_executed` bedeutet, dass ein Pfad für den Request nicht durchlaufen wurde; `not_available` bedeutet, dass eine Unterzeit ohne invasive Refaktorierung nicht belastbar trennbar ist. Fehlende Werte sind keine künstlichen null Sekunden.
+- Der Timing-State ist bounded und enthält keine Raw Records, JSONL-Zeilen, Zellarrays oder Response-Payloads. History-Algorithmus, 24-Entry-Cache, Cache-Key/Invalidierung, Response, Downsampling und Dateiformat bleiben unverändert.
+- Der lokale Referenzbenchmark ergab 0,109 % Median-Overhead. Diese lokale Messung und der lokal verifizierte Wall/CPU-Descheduling-Effekt sind keine Aussage über die produktive Ursache.
+- Source-Release, Add-on-Installation und produktive Laufzeit sind getrennte Zustände. Dieser Source-Release führt kein Deployment, keinen Neustart und keinen produktiven `/share`- oder `/config`-Zugriff aus.
 
 ## Guardian Battery 0.7.30 – Asynchronous Derived MQTT Worker
 

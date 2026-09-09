@@ -1,5 +1,18 @@
 # Guardian Battery Changelog
 
+## 0.7.31 – Production History Request Subtiming
+
+- Ergänzt einen eigenen bounded `HistoryRequestTimingState` mit prozesslokal monotonen Request-IDs, dem neuesten laufenden Request und dem tatsächlich zuletzt abgeschlossenen Request. Parallele Requests bleiben getrennt; abgeschlossene Werte werden nicht historisiert oder nachträglich verändert.
+- Misst den vollständigen im Add-on sichtbaren Backendpfad als monotone Wall-Zeit und Request-Thread-CPU. Belastbare Stufen umfassen Discovery, kombinierte Cell- und Hycube-Read/Parse/Filter-Grenzen, Downsampling, Policy, Maintenance, Phase, finale HTTP-Serialisierung, handlerseitiges Response Write und Other Accounting.
+- Kennzeichnet nicht ausgeführte Stufen als `not_executed` und ohne invasive Refaktorierung nicht trennbare Unterzeiten als `not_available`; es werden keine künstlichen Nullzeiten erzeugt.
+- Erfasst ausschließlich bounded technische Counts für Dateien, Bytes, Zeilen, Prefilter, Parse-/Invalid-Records, Fenster-/Modulauswahl, Downsampling, Policy, Maintenance, Phase und Response-Größe. Raw Records, JSONL-Zeilen, Zellarrays und Responseinhalte werden nicht im Timing-State gespeichert.
+- Beobachtet den unveränderten 24-Entry-History-Cache als Hit/Miss. Cache-Key, `mtime_ns`-/Dateigrößeninvalidierung, Requestparameter, fachliche Response, Punktreihenfolge und Downsampling bleiben unverändert.
+- Zeigt Current und Last Completed/Failed Request, Total Wall/CPU, Cache, Backend-Breakdown, Counts und Observability Error Count unter **Guardian Maintenance → History Timing**. Die Anzeige ist technische Evidence und keine Batterie-, Modul- oder Alarmbewertung.
+- Die tatsächliche finale HTTP-Serialisierung wird ohne zusätzliche Observability-Serialisierung gemessen. Response Write endet mit der Rückkehr des Handler-Calls und umfasst ausdrücklich weder Supervisor-Ingress noch Browser Parse oder Chart Rendering.
+- Der lokale 24-h-SOC-Referenzbenchmark für Modul 1 ergab 0,102797 s Baseline-Median und 0,102909 s instrumentierten Median, entsprechend 0,109 % Overhead. Unter künstlicher CPU-Konkurrenz stieg primär Wall gegenüber Request-Thread-CPU; daraus wird keine produktive Ursache abgeleitet.
+- Dieser Release enthält keine History-Performanceoptimierung, Cacheänderung, Frontend-Instrumentierung oder Änderung an Collector, Scheduler, Analysis Worker, Derived MQTT Worker, Persistence, MQTT, Raw Evidence, Diagnostics, Risk, RS485 oder Hycube Control.
+- Guardian Battery und Add-on sind `0.7.31`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.30 – Asynchronous Derived MQTT Worker
 
 - Entfernt ausschließlich Derived-only Cell Diagnostics aus dem zeitkritischen Collector-Main-Thread. Live- und gemischte MQTT-Werte, Live-Alarme, RS485, Topologie und Discovery bleiben synchron im bestehenden Collector-Pfad.
