@@ -12,10 +12,15 @@ import urllib.error
 import urllib.request
 from collections import OrderedDict
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+
+from hycube_projection import (DEFAULT_HYCUBE_PROJECTION_DIR,
+                               HycubeProjectionStore, parse_projection_record,
+                               projection_plan)
 
 
 LOG = logging.getLogger("guardian_battery.hycube_evidence")
@@ -36,11 +41,82 @@ class HycubeHistoryError(RuntimeError):
     pass
 
 
+class _CapacitySourceError(ValueError):
+    def __init__(self, message, counts):
+        super().__init__(message)
+        self.counts = counts
+
+
+def _read_capacity_source(path, offset, is_projection):
+    items = []; lines = parsed = invalid = byte_count = 0
+    with Path(path).open("rb") as handle:
+        handle.seek(offset)
+        for raw_line in handle:
+            byte_count += len(raw_line)
+            if not raw_line.strip():
+                continue
+            lines += 1
+            try:
+                record = json.loads(raw_line)
+                parsed += 1
+                if is_projection:
+                    item, epoch, capacity = parse_projection_record(record)
+                    items.append((item, epoch, capacity))
+                    continue
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+                raise _CapacitySourceError(str(exc), {
+                    "bytes": byte_count, "lines": lines, "parsed": parsed,
+                    "invalid": invalid}) from exc
+            expected = "hycube_history_projection" if is_projection else "hycube_system_observation"
+            if record.get("record_type") != expected:
+                if is_projection:
+                    raise ValueError("projection record type mismatch")
+                invalid += 1
+                continue
+            received_at = record.get("received_at")
+            capacity = record.get("battery_capacity" if is_projection else "BatteryCapacity")
+            if received_at is None or isinstance(capacity, bool) or not isinstance(capacity, (int, float)):
+                if is_projection:
+                    raise ValueError("invalid projection record")
+                continue
+            epoch = datetime.fromisoformat(received_at).timestamp()
+            items.append((record, epoch, float(capacity)))
+    return items, {"bytes": byte_count, "lines": lines, "parsed": parsed,
+                   "invalid": invalid}
+
+
+def _source_mode(plans, projection_files, raw_fallback_files, raw_tail_files):
+    if not plans:
+        return "not_executed"
+    if projection_files and not raw_fallback_files and not raw_tail_files:
+        return "projection"
+    if projection_files and raw_tail_files and not raw_fallback_files:
+        return "projection_plus_raw_tail"
+    if not projection_files:
+        return "raw_fallback"
+    return "mixed"
+
+
+def _fallback_reason(reasons):
+    if not reasons:
+        return None
+    priority = ("projection_read_error", "schema_unsupported", "raw_changed",
+                "metadata_invalid", "projection_incomplete", "projection_missing",
+                "current_day_tail")
+    return next((reason for reason in priority if reason in reasons), "projection_invalid")
+
+
 class HycubeBatteryCapacitySeries:
     """Read-only, time-windowed projection of observed BatteryCapacity."""
 
-    def __init__(self, directory=DEFAULT_HYCUBE_HISTORY_DIR, cache_size=24):
+    def __init__(self, directory=DEFAULT_HYCUBE_HISTORY_DIR, cache_size=24,
+                 projection_directory=None):
         self.directory = Path(directory)
+        self.projection_directory = Path(
+            projection_directory if projection_directory is not None
+            else (DEFAULT_HYCUBE_PROJECTION_DIR
+                  if self.directory == DEFAULT_HYCUBE_HISTORY_DIR
+                  else self.directory.parent / "hycube_history_projection"))
         self.cache_size = cache_size
         self._cache = OrderedDict()
 
@@ -60,73 +136,168 @@ class HycubeBatteryCapacitySeries:
             considered = len(list(self.directory.glob("*.jsonl"))) if self.directory.exists() else 0
             paths = self._paths(timestamp_from, timestamp_to)
         try:
-            signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns)
-                              for path in paths)
+            plans = [projection_plan(path, self.projection_directory) for path in paths]
+            signature_items = []
+            for plan in plans:
+                files = [plan["raw_path"]]
+                if plan["mode"] != "raw":
+                    files.extend((plan["projection_path"], plan["metadata_path"]))
+                signature_items.append((plan["mode"], plan.get("raw_offset"), tuple(
+                    (str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in files)))
+            signature = tuple(signature_items)
         except OSError as exc:
             raise HycubeHistoryError("Hycube history is unavailable") from exc
         key = (signature, timestamp_from, timestamp_to, max_points)
         if key in self._cache:
             self._cache.move_to_end(key)
-            if timing: timing.not_executed("hycube_read_parse_filter", "hycube_downsampling")
+            if timing:
+                timing.not_executed("hycube_projection_read_parse_filter",
+                                    "hycube_raw_fallback_read_parse_filter",
+                                    "hycube_downsampling")
+                timing.counts(hycube_source_mode="not_executed")
             return {**self._cache[key], "cache_hit": True}
         started = time.perf_counter()
         start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
         end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
         collector = _ExtremaCollector(max_points, start_epoch, end_epoch)
         raw_records = 0; raw_lines = 0; parsed = 0; bytes_read = 0; opened = 0
+        projection_files = projection_attempts = projection_records = 0
+        raw_fallback_files = raw_tail_files = 0
+        projection_bytes = projection_lines = projection_parsed = 0
+        raw_bytes = raw_source_lines = raw_parsed = raw_records_in_window = 0
+        projection_wall = projection_cpu = raw_wall = raw_cpu = 0.0
+        fallback_reasons = []
         parse_errors = invalid_records = 0
         try:
-          with stage("hycube_read_parse_filter"):
-            for path in paths:
-                bytes_read += path.stat().st_size
-                with path.open(encoding="utf-8") as handle:
-                    opened += 1
-                    for line in handle:
-                        if not line.strip():
-                            continue
-                        raw_lines += 1
-                        try:
-                            record = json.loads(line)
-                        except json.JSONDecodeError:
-                            parse_errors += 1
-                            raise
-                        parsed += 1
-                        if record.get("record_type") != "hycube_system_observation":
-                            invalid_records += 1
-                            continue
-                        received_at = record.get("received_at")
-                        capacity = record.get("BatteryCapacity")
-                        if received_at is None or isinstance(capacity, bool) or not isinstance(capacity, (int, float)):
-                            continue
-                        epoch = datetime.fromisoformat(received_at).timestamp()
-                        if not start_epoch <= epoch <= end_epoch:
-                            continue
-                        collector.add({
-                            "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
-                            "_epoch": epoch, "value": float(capacity),
-                            "source": "hycube", "source_field": "BatteryCapacity",
-                            "device_timestamp": record.get("device_timestamp"),
-                            "timezone_semantics": record.get("timezone_semantics"),
-                            "parse_quality": record.get("parse_quality"),
-                            "payload_sha256": record.get("payload_sha256"),
-                            "configured_interval_seconds": record.get("configured_interval_seconds"),
-                            "actual_interval_seconds": record.get("actual_interval_seconds"),
-                            "actual_interval_quality": record.get("actual_interval_quality"),
-                        })
-                        raw_records += 1
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+          with nullcontext():
+            for plan in plans:
+                sources = []
+                if plan["mode"] == "raw":
+                    raw_fallback_files += 1
+                    fallback_reasons.append(plan.get("fallback_reason", "projection_invalid"))
+                    sources.append((plan["raw_path"], 0, False))
+                else:
+                    projection_files += 1
+                    projection_attempts += 1
+                    sources.append((plan["projection_path"], 0, True))
+                    if plan["mode"] == "projection_tail":
+                        raw_tail_files += 1
+                        fallback_reasons.append("current_day_tail")
+                        sources.append((plan["raw_path"], plan["raw_offset"], False))
+                day_items = []
+                try:
+                    for path, offset, is_projection in sources:
+                        source_wall = time.monotonic(); source_cpu = time.thread_time()
+                        items, counts = _read_capacity_source(path, offset, is_projection)
+                        elapsed_wall = time.monotonic() - source_wall
+                        elapsed_cpu = time.thread_time() - source_cpu
+                        if is_projection:
+                            projection_wall += elapsed_wall; projection_cpu += elapsed_cpu
+                            projection_bytes += counts["bytes"]
+                            projection_lines += counts["lines"]
+                            projection_parsed += counts["parsed"]
+                        else:
+                            raw_wall += elapsed_wall; raw_cpu += elapsed_cpu
+                            raw_bytes += counts["bytes"]
+                            raw_source_lines += counts["lines"]
+                            raw_parsed += counts["parsed"]
+                        opened += 1; bytes_read += counts["bytes"]; raw_lines += counts["lines"]
+                        parsed += counts["parsed"]; invalid_records += counts["invalid"]
+                        day_items.extend(items)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError,
+                        ValueError) as projection_error:
+                    if plan["mode"] == "raw":
+                        if isinstance(projection_error, _CapacitySourceError):
+                            counts = projection_error.counts
+                            raw_bytes += counts["bytes"]
+                            raw_source_lines += counts["lines"]
+                            raw_parsed += counts["parsed"]
+                        raw_wall += time.monotonic() - source_wall
+                        raw_cpu += time.thread_time() - source_cpu
+                        parse_errors += 1
+                        raise
+                    if isinstance(projection_error, _CapacitySourceError):
+                        counts = projection_error.counts
+                        projection_bytes += counts["bytes"]
+                        projection_lines += counts["lines"]
+                        projection_parsed += counts["parsed"]
+                    projection_wall += time.monotonic() - source_wall
+                    projection_cpu += time.thread_time() - source_cpu
+                    # A derived projection is disposable: fall back for this day only.
+                    raw_fallback_files += 1
+                    projection_files -= 1
+                    fallback_reasons.append("projection_read_error")
+                    source_wall = time.monotonic(); source_cpu = time.thread_time()
+                    items, counts = _read_capacity_source(plan["raw_path"], 0, False)
+                    raw_wall += time.monotonic() - source_wall
+                    raw_cpu += time.thread_time() - source_cpu
+                    raw_bytes += counts["bytes"]; raw_source_lines += counts["lines"]
+                    raw_parsed += counts["parsed"]
+                    opened += 1; bytes_read += counts["bytes"]; raw_lines += counts["lines"]
+                    parsed += counts["parsed"]; invalid_records += counts["invalid"]
+                    day_items = items
+                for record, epoch, capacity in day_items:
+                    if not start_epoch <= epoch <= end_epoch:
+                        continue
+                    collector.add({
+                        "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
+                        "_epoch": epoch, "value": float(capacity),
+                        "source": "hycube", "source_field": "BatteryCapacity",
+                        "device_timestamp": record.get("device_timestamp"),
+                        "timezone_semantics": record.get("timezone_semantics"),
+                        "parse_quality": record.get("parse_quality"),
+                        "payload_sha256": record.get("payload_sha256"),
+                        "configured_interval_seconds": record.get("configured_interval_seconds"),
+                        "actual_interval_seconds": record.get("actual_interval_seconds"),
+                        "actual_interval_quality": record.get("actual_interval_quality"),
+                        "_history_storage": ("projection" if record.get("record_type") ==
+                                             "hycube_history_projection" else "raw"),
+                    })
+                    raw_records += 1
+                    if record.get("record_type") == "hycube_history_projection":
+                        projection_records += 1
+                    else:
+                        raw_records_in_window += 1
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
             if timing:
+                if projection_attempts:
+                    timing.record("hycube_projection_read_parse_filter",
+                                  projection_wall, projection_cpu)
+                else:
+                    timing.not_executed("hycube_projection_read_parse_filter")
+                if raw_fallback_files or raw_tail_files:
+                    timing.record("hycube_raw_fallback_read_parse_filter", raw_wall, raw_cpu)
+                else:
+                    timing.not_executed("hycube_raw_fallback_read_parse_filter")
                 timing.counts(hycube_files_considered=considered,
                     hycube_files_opened=opened, hycube_bytes_read=bytes_read,
                     hycube_raw_lines=raw_lines, hycube_parsed_records=parsed,
                     hycube_parse_errors=parse_errors,
                     hycube_invalid_records=invalid_records,
-                    hycube_records_in_window=raw_records)
+                    hycube_records_in_window=raw_records,
+                    hycube_projection_bytes_read=projection_bytes,
+                    hycube_raw_fallback_bytes_read=raw_bytes,
+                    hycube_source_mode=_source_mode(
+                        plans, projection_files, raw_fallback_files, raw_tail_files),
+                    hycube_raw_fallback_reason=_fallback_reason(fallback_reasons))
             raise HycubeHistoryError(f"Hycube history is invalid: {exc}") from exc
         read_seconds = time.perf_counter() - started
         downsample_started = time.perf_counter(); downsample_cpu = time.thread_time()
         points = collector.points()
+        projection_points_after = sum(
+            point.get("_history_storage") == "projection" for point in points)
+        for point in points:
+            point.pop("_history_storage", None)
         if timing:
+            if projection_attempts:
+                timing.record("hycube_projection_read_parse_filter",
+                              projection_wall, projection_cpu)
+            else:
+                timing.not_executed("hycube_projection_read_parse_filter")
+            if raw_fallback_files or raw_tail_files:
+                timing.record("hycube_raw_fallback_read_parse_filter", raw_wall, raw_cpu)
+            else:
+                timing.not_executed("hycube_raw_fallback_read_parse_filter")
             timing.record("hycube_downsampling", time.perf_counter() - downsample_started,
                           time.thread_time() - downsample_cpu)
             timing.counts(hycube_files_considered=considered,
@@ -134,6 +305,30 @@ class HycubeBatteryCapacitySeries:
                 hycube_raw_lines=raw_lines, hycube_parsed_records=parsed,
                 hycube_parse_errors=parse_errors,
                 hycube_invalid_records=invalid_records,
+                hycube_projection_files=projection_files,
+                hycube_projection_records=projection_records,
+                hycube_raw_fallback_files=raw_fallback_files,
+                hycube_raw_tail_files=raw_tail_files,
+                hycube_projection_files_considered=sum(
+                    plan["mode"] != "raw" for plan in plans),
+                hycube_projection_files_opened=projection_attempts,
+                hycube_projection_bytes_read=projection_bytes,
+                hycube_projection_raw_lines=projection_lines,
+                hycube_projection_parsed_records=projection_parsed,
+                hycube_projection_records_in_window=projection_records,
+                hycube_projection_points_before_downsampling=projection_records,
+                hycube_projection_points_after_downsampling=projection_points_after,
+                hycube_raw_fallback_files_considered=sum(
+                    plan["mode"] == "raw" or plan["mode"] == "projection_tail"
+                    for plan in plans),
+                hycube_raw_fallback_files_opened=raw_fallback_files + raw_tail_files,
+                hycube_raw_fallback_bytes_read=raw_bytes,
+                hycube_raw_fallback_raw_lines=raw_source_lines,
+                hycube_raw_fallback_parsed_records=raw_parsed,
+                hycube_raw_fallback_records_in_window=raw_records_in_window,
+                hycube_source_mode=_source_mode(
+                    plans, projection_files, raw_fallback_files, raw_tail_files),
+                hycube_raw_fallback_reason=_fallback_reason(fallback_reasons),
                 hycube_records_in_window=raw_records,
                 hycube_points_before_downsampling=raw_records,
                 hycube_points_after_downsampling=len(points))
@@ -406,16 +601,29 @@ class HycubeEvidenceWriter:
     def __init__(self, directory):
         self.directory = Path(directory)
 
-    def append(self, record: dict) -> Path:
+    def append_with_receipt(self, record: dict):
         timestamp = datetime.fromisoformat(record["received_at"])
         path = self.directory / f"{timestamp.astimezone(timezone.utc).date().isoformat()}.jsonl"
         self.directory.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        with path.open("a", encoding="utf-8") as handle:
+        line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8")
+        with path.open("ab") as handle:
+            start_offset = handle.tell()
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
-        return path
+            end_offset = handle.tell()
+        return HycubeWriteReceipt(path, start_offset, end_offset)
+
+    def append(self, record: dict) -> Path:
+        return self.append_with_receipt(record).path
+
+
+@dataclass(frozen=True)
+class HycubeWriteReceipt:
+    path: Path
+    start_offset: int
+    end_offset: int
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -426,7 +634,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class HycubeCollector:
     """Single non-overlapping GET loop isolated from Guardian acquisition."""
 
-    def __init__(self, base_url, writer, *, policy_writer=None,
+    def __init__(self, base_url, writer, *, policy_writer=None, projection_store=None,
                  interval_seconds=5.0, policy_interval_seconds=DEFAULT_POLICY_POLL_INTERVAL_SECONDS,
                  timeout_seconds=0.8, clock=time.time, monotonic=time.monotonic,
                  opener=None, max_backoff_seconds=60.0):
@@ -434,6 +642,7 @@ class HycubeCollector:
         self.policy_url = policy_url(base_url)
         self.writer = writer
         self.policy_writer = policy_writer
+        self.projection_store = projection_store
         self.interval_seconds = float(interval_seconds)
         self.policy_interval_seconds = float(policy_interval_seconds)
         self.timeout_seconds = float(timeout_seconds)
@@ -453,7 +662,10 @@ class HycubeCollector:
 
     def status(self):
         with self._lock:
-            return dict(self._status)
+            status = dict(self._status)
+        if self.projection_store is not None:
+            status["projection"] = self.projection_store.status()
+        return status
 
     def _set(self, **values):
         with self._lock:
@@ -480,7 +692,12 @@ class HycubeCollector:
             "first_observation" if actual_interval is None else
             "observed" if actual_interval >= 0 else "clock_regression")
         record["request_timeout_seconds"] = self.timeout_seconds
-        self.writer.append(record)
+        receipt = self.writer.append_with_receipt(record)
+        if self.projection_store is not None:
+            try:
+                self.projection_store.append_live(record, receipt)
+            except Exception as exc:
+                LOG.warning("Hycube projection write failed: %s", type(exc).__name__)
         if record["parse_quality"] == "invalid":
             raise ValueError("invalid Hycube JSON")
         self._last_received_timestamp = received_timestamp
@@ -529,6 +746,11 @@ class HycubeCollector:
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout)
         self._thread = None
+        if self.projection_store is not None:
+            try:
+                self.projection_store.close()
+            except Exception as exc:
+                LOG.warning("Hycube projection flush failed: %s", type(exc).__name__)
         self._set(state="disabled")
 
     def _run(self):
@@ -559,12 +781,16 @@ class HycubeCollector:
             self._stop.wait(max(0.0, delay - (self.monotonic() - started)))
 
 
-def collector_from_options(options: dict, history_directory, policy_history_directory=None):
+def collector_from_options(options: dict, history_directory, policy_history_directory=None,
+                           projection_directory=None):
     """Construct the collector only after an explicit boolean opt-in."""
     if not evidence_enabled(options.get("hycube_evidence_enabled", False)):
         return None
     return HycubeCollector(
         options["hycube_base_url"], HycubeEvidenceWriter(history_directory),
+        projection_store=HycubeProjectionStore(
+            projection_directory if projection_directory is not None
+            else Path(history_directory).parent / "hycube_history_projection"),
         policy_writer=(HycubePolicyHistory(policy_history_directory)
                        if policy_history_directory is not None else None),
         interval_seconds=float(options.get("hycube_interval_seconds", 5)),

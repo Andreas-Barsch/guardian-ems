@@ -72,6 +72,26 @@ def test_history_series_api_and_ui_routes_support_dynamic_ingress_prefix():
     assert handler._ingress_base() == '/api/hassio_ingress/dynamic-token'
 
 
+def test_hycube_projection_status_and_backfill_action_use_existing_ingress(monkeypatch):
+    monkeypatch.setattr(config_ui, '_HYCUBE_PROJECTION_PROVIDER',
+                        lambda: {'live': {'state': 'available'},
+                                 'backfill': {'status': 'idle'}})
+    requested = []
+    monkeypatch.setattr(config_ui, '_HYCUBE_BACKFILL_ACTION',
+                        lambda: not requested and not requested.append(True))
+    handler = object.__new__(Handler); handler._ingress_allowed = lambda: True
+    captured = []
+    handler._send = lambda code, body, *args, **kwargs: captured.append((code, body))
+    handler.path = '/api/hassio_ingress/token/api/hycube-projection/status'
+    handler.do_GET()
+    assert captured[-1][0] == 200
+    assert captured[-1][1]['live']['state'] == 'available'
+    assert captured[-1][1]['history_source']['mode'] == 'not_available'
+    handler.path = '/api/hassio_ingress/token/api/hycube-projection/backfill'
+    handler.do_POST(); handler.do_POST()
+    assert captured[-2][0] == 202 and captured[-1][0] == 200
+
+
 def test_rs485_status_endpoint_serializes_resolved_management_with_numeric_timestamp(
         monkeypatch):
     import rs485_identity

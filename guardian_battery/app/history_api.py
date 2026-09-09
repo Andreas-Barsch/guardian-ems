@@ -175,8 +175,11 @@ class HistoryApi:
                                            max_points=max(4, 6000 // 7), timing=timing)
                   if "soc" in metrics and self.hycube_series is not None else None)
         if timing and hycube is None:
-            timing.not_executed("hycube_discovery", "hycube_read_parse_filter",
+            timing.not_executed("hycube_discovery",
+                                "hycube_projection_read_parse_filter",
+                                "hycube_raw_fallback_read_parse_filter",
                                 "hycube_downsampling")
+            timing.counts(hycube_source_mode="not_executed")
         policy_seconds = 0.0
         if "soc" in metrics and self.hycube_policy_history is not None:
             policy_started = time.perf_counter(); policy_cpu = time.thread_time()

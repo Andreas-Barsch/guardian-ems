@@ -30,7 +30,8 @@ from config_history import ConfigHistory
 from daily_diagnostics import DailyDiagnosticSources
 from daily_diagnostic_worker import DailyDiagnosticWorker
 from hycube_evidence import collector_from_options
-from config_ui import (configure_maintenance_live_publisher,
+from hycube_projection import HycubeProjectionBackfill
+from config_ui import (configure_hycube_projection, configure_maintenance_live_publisher,
                        configure_rs485_status_provider,
                        record_stable_observed_positions, start_config_server)
 from maintenance_mqtt import MaintenanceMqttPublisher
@@ -76,6 +77,7 @@ CONFIG_HISTORY_FILE = SHARE_DIR / "config_history.jsonl"
 DAILY_DIAGNOSTICS_ROOT = SHARE_DIR / "diagnostics"
 HYCUBE_HISTORY_DIR = SHARE_DIR / "hycube_history"
 HYCUBE_POLICY_HISTORY_DIR = SHARE_DIR / "hycube_policy_history"
+HYCUBE_PROJECTION_DIR = SHARE_DIR / "hycube_history_projection"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -1435,6 +1437,8 @@ def main() -> None:
     rs485_mqtt = Rs485MqttProjection(
         publisher, stale_seconds=int(options.get("rs485_sniffer_stale_seconds", 600)))
     publisher.discovery(int(options["module_count"]))
+    hycube_collector = None
+    hycube_backfill = None
     configure_maintenance_live_publisher(publisher.maintenance_events)
     configure_rs485_status_provider(
         (lambda: {"status": {**rs485_reader.status(), "management_freshness_seconds": int(
@@ -1444,7 +1448,12 @@ def main() -> None:
                       position_history_path=DEFAULT_POSITION_HISTORY_FILE),
                   "identities": rs485_reader.identities(),
                   "history": rs485_writer.status() if rs485_writer else {},
-                  "collector_timing": timing.snapshot()})
+                  "collector_timing": timing.snapshot(),
+                  "hycube_projection": {
+                      "live": (hycube_collector.status().get("projection", {})
+                               if hycube_collector else {}),
+                      "backfill": hycube_backfill.status() if hycube_backfill else {},
+                  }})
         if rs485_reader else None)
     cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
     try:
@@ -1505,7 +1514,6 @@ def main() -> None:
     module_infos: dict[int, dict] = {}
     identity_resolution_log: dict[int, tuple[str, int | None]] = {}
     daily_worker = None
-    hycube_collector = None
 
     if rs485_reader is not None:
         restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
@@ -1529,9 +1537,18 @@ def main() -> None:
         LOG.warning("Daily diagnostics worker konnte nicht gestartet werden: %s", exc)
     try:
         hycube_collector = collector_from_options(
-            options, HYCUBE_HISTORY_DIR, HYCUBE_POLICY_HISTORY_DIR)
+            options, HYCUBE_HISTORY_DIR, HYCUBE_POLICY_HISTORY_DIR,
+            HYCUBE_PROJECTION_DIR)
         if hycube_collector is not None:
             hycube_collector.start()
+            hycube_backfill = HycubeProjectionBackfill(
+                HYCUBE_HISTORY_DIR, HYCUBE_PROJECTION_DIR,
+                live_store=hycube_collector.projection_store)
+            configure_hycube_projection(
+                lambda: {"live": hycube_collector.projection_store.status(),
+                         "backfill": hycube_backfill.status()},
+                hycube_backfill.request_historical_backfill)
+            hycube_backfill.start()
     except Exception as exc:
         hycube_collector = None
         LOG.warning("Hycube read-only collector konnte nicht gestartet werden: %s",
@@ -1902,6 +1919,11 @@ def main() -> None:
                 hycube_collector.stop()
             except Exception as exc:
                 LOG.warning("Hycube read-only collector konnte nicht gestoppt werden: %s", exc)
+        if hycube_backfill is not None:
+            try:
+                hycube_backfill.stop()
+            except Exception as exc:
+                LOG.warning("Hycube projection backfill konnte nicht gestoppt werden: %s", exc)
         if daily_worker is not None:
             try:
                 daily_worker.stop()

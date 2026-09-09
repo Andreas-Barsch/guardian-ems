@@ -60,6 +60,8 @@ _POSITION_HISTORY_API = None
 _DIAGNOSTICS_API = None
 _MAINTENANCE_LIVE_PUBLISHER = None
 _RS485_STATUS_PROVIDER = None
+_HYCUBE_PROJECTION_PROVIDER = None
+_HYCUBE_BACKFILL_ACTION = None
 _AUTOMATIC_POSITION_LOCK = threading.Lock()
 LOG = logging.getLogger("guardian_battery.config_ui")
 
@@ -76,6 +78,13 @@ def configure_rs485_status_provider(provider):
     """Expose compact live RS485 observations to the ingress UI."""
     global _RS485_STATUS_PROVIDER
     _RS485_STATUS_PROVIDER = provider
+
+
+def configure_hycube_projection(provider, backfill_action):
+    """Attach process-local status and the ingress-protected idempotent action."""
+    global _HYCUBE_PROJECTION_PROVIDER, _HYCUBE_BACKFILL_ACTION
+    _HYCUBE_PROJECTION_PROVIDER = provider
+    _HYCUBE_BACKFILL_ACTION = backfill_action
 
 
 def _get_maintenance_api():
@@ -457,6 +466,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self._is_diagnostics_api(): self._diagnostics_request('GET'); return
+        if self.path.rstrip('/').endswith('/api/hycube-projection/status'):
+            payload = (_HYCUBE_PROJECTION_PROVIDER() if _HYCUBE_PROJECTION_PROVIDER else
+                       {"live": {"enabled": False}, "backfill": {"status": "disabled"}})
+            last = _HISTORY_TIMING.snapshot().get("last_completed_request") or {}
+            counts = last.get("counts") or {}
+            self._send(200, {**payload, "history_source": {
+                "mode": counts.get("hycube_source_mode", "not_available"),
+                "fallback_reason": counts.get(
+                    "hycube_raw_fallback_reason", "not_available")}}); return
         if self._is_history_api():
             response=_get_history_api().handle('GET',self.path)
             self._send_history(response); return
@@ -494,6 +512,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self._is_diagnostics_api(): self._diagnostics_request('POST'); return
+        if self.path.rstrip('/').endswith('/api/hycube-projection/backfill'):
+            if _HYCUBE_BACKFILL_ACTION is None:
+                self._send(503, {'error': 'projection backfill unavailable'}); return
+            started = bool(_HYCUBE_BACKFILL_ACTION())
+            self._send(202 if started else 200,
+                       {'accepted': started, 'status': 'requested' if started else 'already_requested'})
+            return
         if self._is_position_history_api():
             try: length=int(self.headers.get('Content-Length','0'))
             except ValueError: self._send(400,error_json('invalid_request','Content-Length must be an integer')); return
