@@ -508,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
         if self._is_diagnostics_ui():
             base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics'),'text/html'); return
-        base=self._ingress_base(); self._send(200,render_module_information_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance'),'text/html')
+        base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history'),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self._is_diagnostics_api(): self._diagnostics_request('POST'); return

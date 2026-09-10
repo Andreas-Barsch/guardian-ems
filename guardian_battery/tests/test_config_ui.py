@@ -1,5 +1,6 @@
 import json
 import sys
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
@@ -90,6 +91,51 @@ def test_hycube_projection_status_and_backfill_action_use_existing_ingress(monke
     handler.path = '/api/hassio_ingress/token/api/hycube-projection/backfill'
     handler.do_POST(); handler.do_POST()
     assert captured[-2][0] == 202 and captured[-1][0] == 200
+
+
+def test_real_http_ingress_root_and_maintenance_render_projection(monkeypatch):
+    monkeypatch.setattr(Handler, '_ingress_allowed', lambda self: True)
+    server = config_ui.start_config_server(port=0, bind_host='127.0.0.1')
+    ingress = f"http://127.0.0.1:{server.server_address[1]}/api/hassio_ingress/session"
+    headers = {'X-Ingress-Path': '/api/hassio_ingress/session'}
+    try:
+        for suffix in ('', '/', '/maintenance', '/maintenance/'):
+            request = urllib.request.Request(ingress + suffix, headers=headers)
+            with urllib.request.urlopen(request, timeout=3) as response:
+                html = response.read().decode()
+                assert response.status == 200
+                assert response.headers.get_content_type() == 'text/html'
+                assert 'Hycube History Projection' in html
+                assert 'Historische Hycube-Projektion aufbauen' in html
+                assert 'Aktuelle Zuordnung' not in html
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_real_http_direct_ui_routes_remain_distinct(monkeypatch):
+    monkeypatch.setattr(Handler, '_ingress_allowed', lambda self: True)
+    server = config_ui.start_config_server(port=0, bind_host='127.0.0.1')
+    ingress = f"http://127.0.0.1:{server.server_address[1]}/api/hassio_ingress/session"
+    headers = {'X-Ingress-Path': '/api/hassio_ingress/session'}
+    expected = {
+        '/module-information': 'Aktuelle Zuordnung',
+        '/history': 'Guardian-Zeitverlauf',
+        '/timeline': '<h2>Verlauf</h2>',
+        '/configuration': 'Diagnoseparameter',
+        '/diagnostics': 'Guardian Diagnostics',
+    }
+    try:
+        for suffix, marker in expected.items():
+            request = urllib.request.Request(ingress + suffix, headers=headers)
+            with urllib.request.urlopen(request, timeout=3) as response:
+                html = response.read().decode()
+                assert response.status == 200
+                assert response.headers.get_content_type() == 'text/html'
+                assert marker in html
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_rs485_status_endpoint_serializes_resolved_management_with_numeric_timestamp(
