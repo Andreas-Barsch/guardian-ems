@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.33 – Maintenance Ingress Root Routing
+
+- Der Home-Assistant-Sidebar-Einstieg **Guardian Maintenance** rendert am Ingress-Root jetzt tatsächlich die Maintenance UI statt der Modulinformationen.
+- Die direkte Route `/maintenance` bleibt gültig; `/module-information` bleibt separat erreichbar. History, Timeline, Konfiguration und Guardian Diagnostics behalten ihre bestehenden Unterrouten.
+- Dadurch ist **Hycube History Projection** einschließlich der expliziten Backfill-Aktion auch am normalen Sidebar-Einstieg sichtbar.
+- Echte HTTP-Integrationstests über den produktionsgleichen `ThreadingHTTPServer` decken Ingress-Root, dynamischen Ingress-Prefix, Maintenance und die weiteren UI-Routen ab.
+- Hycube Projection, Raw Evidence, History, Backfill, Sidecar, Collector, MQTT, Diagnostics, Risk, Alarmierung, RS485, Hycube Control und Batterielogik bleiben unverändert.
+- Guardian Battery und Add-on sind `0.7.33`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.32 – Hycube History Projection V1
 
 - Ergänzt eine schlanke append-only Hycube History Projection mit Schema V1. Die Raw Hycube Evidence bleibt authoritative und unverändert; es gibt keine zweite Hycube-Abfrage und keine Änderung an Raw-Schema, Payload, Cadence, Flush-/fsync- oder Fehlersemantik.

@@ -2,6 +2,17 @@
 
 Stand: 2026-09-09
 
+## Guardian Battery 0.7.33 – Maintenance Ingress Root Routing
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.33`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Den Home-Assistant-Sidebar-Eintrag **Guardian Maintenance** öffnen. Der Ingress-Root muss unmittelbar die Maintenance UI mit **Hycube History Projection** und **Historische Hycube-Projektion aufbauen** anzeigen.
+- Die direkte Unterroute `/maintenance` muss dieselbe Maintenance-Einstiegsseite liefern. `/module-information` muss weiterhin die aktuelle Modulzuordnung anzeigen; History, Timeline, Konfiguration und Guardian Diagnostics bleiben separat erreichbar.
+- Bei einer abweichenden Anzeige zuerst tatsächlich aufgerufenen Ingress-Pfad, Response-Inhalt und laufendes Add-on-Image prüfen. Die Add-on-Versionsanzeige allein beweist nicht den Python-Inhalt eines bereits vorhandenen Containers.
+- Dieser Routing-Release ändert weder Hycube Projection noch Raw Evidence, History, Backfill, Sidecar, Collector, Cell Sampling, MQTT, Diagnostics, Risk, Alarme, RS485, Hycube Control oder Anlagensteuerung.
+- Source-Release, Add-on-Installation und produktive Laufzeit sind getrennte Zustände. Dieser Source-Release führt kein Deployment, keinen Neustart, keinen Backfill und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.32 – Hycube History Projection V1
 
 ### Produktive Abnahme nach separatem Deployment
