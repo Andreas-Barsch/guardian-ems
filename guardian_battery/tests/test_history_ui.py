@@ -1,4 +1,41 @@
+import json
+from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
+
 from history_ui import render_history_html
+
+
+def _javascript_function(source, name):
+    start = source.index(f"function {name}")
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"unterminated JavaScript function {name}")
+
+
+def _node_binary():
+    executable = shutil.which("node")
+    if executable:
+        return executable
+    candidates = sorted((Path.home() / ".cache/codex-runtimes").glob(
+        "*/dependencies/node/bin/node"))
+    if candidates:
+        return str(candidates[-1])
+    pytest.skip("Node runtime is unavailable")
+
+
+def _run_node(script):
+    return subprocess.run([_node_binary(), "-e", script], check=True,
+                          text=True, capture_output=True).stdout
 
 
 def test_generic_soc_and_cell_chart_with_touch_markers_and_responsive_layout():
@@ -36,7 +73,7 @@ def test_soc_projection_distinguishes_module_hycube_and_policy_sources():
     assert "Batterieschutz: ${policy.battery_protection_pct}" in html
     assert "Kausalität nicht bestimmt" in html
     assert "series.source==='pylontech'?'module_soc'" in html
-    assert "series.source==='hycube'?'hycube_capacity':'policy_boundary'" in html
+    assert "series.source==='hycube'?'hycube_capacity':series.source==='hycube_policy'?'policy_boundary':'soc_source_unknown'" in html
 
 
 def test_module_and_metric_selections_are_orthogonal():
@@ -74,9 +111,102 @@ def test_soc_legend_is_grouped_and_uses_compact_labels():
     assert "legendGroup('Hycube')" in html
     assert "legendGroup('Hycube-Bereichsgrenzen')" in html
     assert "`Modul ${label.module_number}`" in html
-    assert "?'Battery Capacity':label.label.replace('Bereichsgrenze ','')" in html
+    assert "label.source==='hycube'?'Battery Capacity':label.source==='hycube_policy'?label.label.replace('Bereichsgrenze ','')" in html
     assert ".legend-group{display:flex" in html
     assert "flex-wrap:wrap" in html
+
+
+def test_soc_legend_executes_for_api_sources_and_neutral_unknown_source():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance",
+                               timeline_path="timeline")
+    functions = "\n".join(_javascript_function(html, name) for name in
+                            ("legendGroup", "relabelSocLegend"))
+    script = f"""
+class Item {{
+  constructor(tag, text=null) {{ this.tag=tag; this.textContent=text; this.children=[]; this.attrs={{}}; }}
+  append(...items) {{ this.children.push(...items); }}
+  replaceChildren(...items) {{ this.children=[...items]; }}
+  querySelector(selector) {{
+    if(selector==='.legend') return this.legend;
+    if(selector==='button') return this.children.find(item=>item.tag==='button')||null;
+    return null;
+  }}
+  querySelectorAll(selector) {{
+    if(selector==='button') return this.children.filter(item=>item.tag==='button');
+    if(selector==='path.series') return [];
+    return [];
+  }}
+  get lastChild() {{ return this.children[this.children.length-1]; }}
+  setAttribute(key,value) {{ this.attrs[key]=value; }}
+}}
+const node=(tag,text)=>new Item(tag,text);
+const labels=[
+  {{source:'pylontech',module_number:1,label:'Modul 1 SOC'}},
+  {{source:'hycube',label:'Hycube BatteryCapacity'}},
+  {{source:'hycube_policy',label:'Bereichsgrenze Normalbetrieb / Passiv'}},
+  {{source:'future_source',label:'Forensische Zusatzquelle'}}
+];
+const socLabels=()=>labels;
+{functions}
+const legend=new Item('div');
+for(let index=0;index<labels.length;index++){{const button=new Item('button');button.append(new Item('span'),new Item('text','old'));legend.append(button)}}
+const root=new Item('root');root.legend=legend;
+relabelSocLegend(root,{{soc_timeline:{{}}}});
+console.log(JSON.stringify(legend.children.map(group=>[group.children[0].textContent,group.children.slice(1).map(button=>button.lastChild.textContent)])));
+"""
+    groups = json.loads(_run_node(script))
+    assert groups == [["Pylontech", ["Modul 1"]],
+                      ["Hycube", ["Battery Capacity"]],
+                      ["Hycube-Bereichsgrenzen", ["Normalbetrieb / Passiv"]],
+                      ["Weitere Quellen", ["Forensische Zusatzquelle"]]]
+
+
+def test_policy_tooltip_executes_without_historical_policy_evidence():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance",
+                               timeline_path="timeline")
+    function = _javascript_function(html, "pointTooltip")
+    script = f"""
+const exact=()=> '02.09.2026, 09:35:00';
+const decimals=()=>1;
+const METRIC_LABELS={{soc:'SOC [%]'}},UNITS={{soc:'%'}};
+{function}
+const point={{time:0,display:25,_series_type:'policy_boundary',_series_label:'Bereichsgrenze'}};
+console.log(pointTooltip(point,'soc',1));
+"""
+    output = _run_node(script)
+    assert "Policy: nicht verfügbar (keine historische Evidence)" in output
+    assert "Kausalität nicht bestimmt" in output
+
+
+def test_complete_soc_contract_executes_with_hycube_policy_phase_and_marker():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance",
+                               timeline_path="timeline")
+    functions = "\n".join(_javascript_function(html, name) for name in
+                            ("policyBoundarySeries", "socProjection", "pointTooltip"))
+    script = f"""
+const POLICY_BOUNDARIES=[['boundary_normal_passive','Normal / Passiv']];
+const exact=()=> '02.09.2026, 09:35:00',decimals=()=>1;
+const METRIC_LABELS={{soc:'SOC [%]'}},UNITS={{soc:'%'}};
+const timeline={{
+ module_series:[{{source:'pylontech',module_number:1,label:'Modul 1 SOC',points:[{{timestamp:'2026-09-02T09:35:00Z',value:75}}]}}],
+ hycube_series:{{source:'hycube',label:'Hycube BatteryCapacity',points:[{{timestamp:'2026-09-02T09:35:00Z',value:80}}]}},
+ policy_series:[{{from:'2026-09-02T09:30:00Z',to:'2026-09-02T10:00:00Z',boundary_normal_passive:18,normal_operation_pct:82,passive_pct:3,emergency_pct:10,battery_protection_pct:5}}]
+}};
+const data={{series:{{metric:'soc',points:[]}},soc_timeline:timeline,
+ phase_analysis:{{intervals:[{{phase:'charge'}}]}},overlays:[{{title:'Maintenance'}}]}};
+const socLabels=value=>[...value.soc_timeline.module_series,value.soc_timeline.hycube_series,...policyBoundarySeries(value.soc_timeline)];
+{functions}
+const projected=socProjection(data);
+const tooltips=projected.points.map(point=>pointTooltip({{...point,time:Date.parse(point.timestamp),display:point.value}},'soc',1));
+console.log(JSON.stringify({{types:projected.points.map(point=>point._series_type),tooltips,
+ phases:data.phase_analysis.intervals.length,markers:data.overlays.length}}));
+"""
+    rendered = json.loads(_run_node(script))
+    assert rendered["types"] == ["module_soc", "hycube_capacity", "policy_boundary",
+                                  "policy_boundary"]
+    assert any("Hycube Battery Capacity" in item for item in rendered["tooltips"])
+    assert any("Normalbetrieb: 82 %" in item for item in rendered["tooltips"])
+    assert rendered["phases"] == rendered["markers"] == 1
 
 
 def test_overlay_uses_server_deep_link_and_safe_text_rendering():

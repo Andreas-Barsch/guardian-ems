@@ -387,6 +387,6 @@ class DisplayHistoryReader:
                      else "display_plus_tail" if used_display and used_tail
                      else f"display_{resolution}" if used_display else "full_resolution")
         return {"metric":"hycube_battery_capacity","label":"Hycube BatteryCapacity",
-            "unit":"%","points":points,"raw_records":raw,"file_count":files,
+            "unit":"%","source":"hycube","points":points,"raw_records":raw,"file_count":files,
             "read_seconds":0.0,"downsample_seconds":0.0,"cache_hit":False,
             "source_mode":source_mode,"display_bytes":bytes_read}

@@ -216,6 +216,7 @@ def test_hycube_soc_uses_display_extrema_and_invalid_day_falls_back(tmp_path):
     reader=DisplayHistoryReader(display,cell,hycube,CellHistorySeries(cell),Full())
     result=reader.query_hycube(timestamp_from="2026-09-01T00:00:00+00:00",
                                timestamp_to="2026-09-01T23:59:59+00:00")
+    assert result["source"]=="hycube"
     assert [p["value"] for p in result["points"]]==[80,0,100]
     with (hycube/f"{DAY}.jsonl").open("a") as handle:handle.write(json.dumps(rows[-1])+"\n")
     result=reader.query_hycube(timestamp_from="2026-09-01T00:00:00+00:00",

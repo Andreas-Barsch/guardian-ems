@@ -92,6 +92,7 @@ def test_soc_timeline_single_projects_selected_module_and_hycube_received_at(tmp
     assert response.status == 200
     projected = response.body["soc_timeline"]
     assert [item["module_number"] for item in projected["module_series"]] == [3]
+    assert projected["hycube_series"]["source"] == "hycube"
     assert projected["hycube_series"]["points"] == [{
         "timestamp": "2026-09-02T08:00:20+00:00", "value": 82.0,
         "source": "hycube", "source_field": "BatteryCapacity",
