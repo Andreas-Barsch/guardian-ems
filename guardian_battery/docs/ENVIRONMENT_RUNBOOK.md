@@ -2,6 +2,17 @@
 
 Stand: 2026-09-11
 
+## Guardian Battery 0.7.36 – History UI Contract Regression Fix
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.36`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Den zuvor betroffenen SOC-Zeitverlauf mit Modul-SOC, Hycube BatteryCapacity und Policy erneut laden. Die Legende muss vollständig erscheinen und darf keinen JavaScript-Abbruch mehr erzeugen.
+- Einen Zeitraum ohne historische Policy-Coverage prüfen. Der Tooltip muss die Policy als nicht verfügbare historische Evidence kennzeichnen; aktuelle, Default- oder Nullwerte dürfen nicht als historische Policy eingesetzt werden.
+- Hycube, Policy, Maintenance-Marker, Visual-/Diagnostic-Phase- und Provenienzinformationen müssen weiterhin vorhanden sein. Die lange produktive History-Laufzeit ist getrennt zu messen und nicht Bestandteil dieses Regression-Fixes.
+- Dieser Release ändert weder History-/Canonical-Daten noch Display Projection, Rebuild, Downsampling, Policy History, Maintenance, Diagnostics, Risk, MQTT, RS485 oder Navigation.
+- Source-Release und produktive Installation bleiben getrennte Zustände. Dieser Auftrag führt kein Deployment, keinen Neustart, keinen Rebuild und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.35 – Display History and Canonical Phase Timeline
 
 ### Produktive Abnahme nach separatem Deployment

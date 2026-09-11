@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.36 – History UI Contract Regression Fix
+
+- Ergänzt das fehlende `source: "hycube"` im Contract der Display-Hycube-Serie und verhindert damit den JavaScript-Abbruch der SOC-Legende.
+- Behandelt fehlende historische Policy im Tooltip ausdrücklich als nicht verfügbare historische Evidence; es werden keine Policywerte erfunden, ersetzt oder rückwirkend angewendet.
+- Unbekannte Quellen werden neutral unter **Weitere Quellen** dargestellt und brechen den History-Renderer nicht mehr ab.
+- Guardian-Zusatzinformationen, Hycube, Policy, Maintenance-Marker sowie Visual-/Diagnostic-Phase- und Provenienzdaten bleiben erhalten.
+- History-/Canonical-Daten, Display Projection, Rebuild, Downsampling und Diagnostic Engine bleiben unverändert.
+- Guardian Battery und Add-on sind `0.7.36`; Diagnostic Engine bleibt `0.4.12`, Canonical Semantics bleibt `guardian_canonical_phase_v2` und Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.35 – Display History and Canonical Phase Timeline
 
 - Ergänzt eine versionierte, vollständig rebuildbare Multi-Resolution Display History Projection mit 1-, 5-, 15- und 60-Minuten-Auflösung. Full Cell History und Raw Evidence bleiben authoritative; die Projection ist ausschließlich Derived Data. Der Projection-preferred Reader fällt tageweise auf Full Resolution zurück, kombiniert den offenen aktuellen Tag inkrementell und erhält Extrema sowie SOC-Sprünge.
