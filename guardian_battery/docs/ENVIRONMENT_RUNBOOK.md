@@ -2,6 +2,20 @@
 
 Stand: 2026-09-09
 
+## Guardian Battery 0.7.34 – Safe History Block-Range Index
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.34`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Nach dem Add-on-Start zuerst Collector, Hycube Projection Writer, Cell Sampling und normale History-Aufrufe prüfen. Indexfehler müssen kontrolliert als Full Scan enden und dürfen weder Acquisition noch Raw-, Projection- oder Cell-History-Schreiben beeinträchtigen.
+- Unter **Guardian Maintenance → Hycube History Projection → Historische Hycube-Projektion aufbauen** die explizite Maintenance-Migration nur kontrolliert auslösen. Sie kann fehlende Indizes aus bestehenden Complete Projections und historischen Cell-Dateien erzeugen; kein erneuter Raw-Hycube-Backfill ist dafür erforderlich.
+- Danach denselben Referenzrequest **24 h → SOC → Modul 1** verwenden. Gegenüber der 0.7.33-Referenz Total Wall `43,96948 s`, Hycube Projection `28,79871 s`, Cell History `9,03284 s`, Projection Bytes `11.415.575` und Cell Bytes `9.520.372` erfassen.
+- Zusätzlich `projection_seek_mode`, `projection_skipped_bytes`, `cell_seek_mode`, `cell_skipped_bytes`, gelesene Bytes/Records sowie Hycube- und Cell-Wall-Zeiten dokumentieren. Eine Verbesserung erst aus diesen produktiven Messwerten ableiten.
+- Diagrammpunkte, Zeitstempel, Reihenfolge, Duplikate, Provenienz und Downsampling müssen fachlich identisch bleiben. Der aktuelle Tag muss weiter Projection-Prefix, linearen Projection-Suffix und Raw Tail ab `confirmed_raw_end_offset` kombinieren.
+- Projection Days, Complete/Open-Lifecycle und der zuvor beobachtete Zustand `10 Days / 8 Complete / 2 Open` werden getrennt untersucht und durch diesen Release nicht korrigiert.
+- Navigation, Module-/Stack-Links, Dashboard-Verfügbarkeit, Temperatur-/Incident-/Metadatenanzeigen, SOH/BMS-Zyklen und Derived MQTT sind ausdrücklich nicht Bestandteil dieses Releases.
+- Source-Release, Add-on-Installation, Index-Rebuild und produktive Laufzeit sind getrennte Zustände. Dieser Source-Release führt kein Deployment, keinen Restart, keinen Backfill und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.33 – Maintenance Ingress Root Routing
 
 ### Produktive Abnahme nach separatem Deployment

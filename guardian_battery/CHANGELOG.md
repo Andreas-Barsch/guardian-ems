@@ -1,5 +1,16 @@
 # Guardian Battery Changelog
 
+## 0.7.34 – Safe History Block-Range Index
+
+- Ergänzt separate rebuildbare Blockbereichsindizes für Hycube Projection History und Cell History. Feste 256-Record-Blöcke tragen Byteoffsets sowie minimale und maximale Zeitstempel; Raw Evidence und Projection bleiben authoritative und unverändert.
+- History Reader überspringen ausschließlich Blöcke, deren vollständiger Zeitbereich außerhalb des Requestfensters liegt. Dateireihenfolge, Duplikate, Clock Regression, Out-of-order, Provenienz und fachliche History-Ergebnisse bleiben erhalten.
+- Fehlende, beschädigte, unbekannte oder nicht mehr zur Source passende Indizes führen kontrolliert zum bisherigen Full Scan. Indexfehler bleiben von History Request, Raw Writer, Projection Writer und Cell Writer isoliert.
+- Der offene aktuelle Tag kombiniert weiterhin den indexierten Projection-Prefix, den linear gelesenen Projection-Suffix und den Raw Tail strikt ab `confirmed_raw_end_offset`; `projection_plus_raw_tail` bleibt unverändert.
+- Bestehende abgeschlossene Hycube-Projektionen und historische Cell-Dateien können über die explizite Maintenance-Migration ohne erneute Hycube-Abfrage beziehungsweise ohne Raw-Hycube-Backfill indexiert werden. Es gibt keinen unbounded Startup-Scan und keinen zusätzlichen `fsync`.
+- Ergänzt ausschließlich die technischen Counts `projection_seek_mode`, `projection_skipped_bytes`, `cell_seek_mode` und `cell_skipped_bytes`. API-Vertrag, Downsampling, Collector, Policy, Maintenance, Phase, MQTT, Diagnostics, Risk, Alarmierung, RS485 und Anlagensteuerung bleiben unverändert.
+- Lokale produktionsnahe Fixtures reduzierten Hycube-Input von 25.325 auf 15.872 Zeilen und Cell-Input von 12.947 auf 1.792 Zeilen bei vollständiger Ergebnisgleichheit. Das ist keine bereits produktiv verifizierte Laufzeitgarantie.
+- Guardian Battery und Add-on sind `0.7.34`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.33 – Maintenance Ingress Root Routing
 
 - Der Home-Assistant-Sidebar-Einstieg **Guardian Maintenance** rendert am Ingress-Root jetzt tatsächlich die Maintenance UI statt der Modulinformationen.
