@@ -648,12 +648,20 @@ class Mqtt:
         self.client.will_set(f"{self.prefix}/battery/availability", "offline", retain=True)
         self.client.connect(host, port, keepalive=60)
         self.client.loop_start()
-        self._publish(f"{self.prefix}/battery/availability", "online", retain=True)
         self.maintenance_events = MaintenanceMqttPublisher(self.client, self.prefix)
         self._cycle_profiler = None
 
     def _on_mqtt_connect(self, _client, _userdata, _flags, _reason_code,
                          _properties=None):
+        if _reason_code != 0:
+            return
+        try:
+            # The connect callback is authoritative for both initial connect and
+            # reconnect, and replaces a retained LWT ``offline`` state.
+            self._publish(f"{self.prefix}/battery/availability", "online", retain=True)
+        except Exception as exc:
+            # MQTT availability recovery must never escape into acquisition.
+            LOG.warning("MQTT Availability online konnte nicht publiziert werden: %s", exc)
         # Includes the initial connection. The epoch is process-local and only
         # invalidates the bounded derived-publish key; discovery behavior stays
         # under Paho/Guardian's existing lifecycle.

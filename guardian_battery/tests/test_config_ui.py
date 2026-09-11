@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -150,6 +151,30 @@ def test_real_http_direct_ui_routes_remain_distinct(monkeypatch):
                 assert response.status == 200
                 assert response.headers.get_content_type() == 'text/html'
                 assert marker in html
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_every_ingress_page_links_modules_to_explicit_prefixed_route(monkeypatch):
+    monkeypatch.setattr(Handler, '_ingress_allowed', lambda self: True)
+    server = config_ui.start_config_server(port=0, bind_host='127.0.0.1')
+    prefix = '/api/hassio_ingress/dynamic-token'
+    ingress = f"http://127.0.0.1:{server.server_address[1]}{prefix}"
+    headers = {'X-Ingress-Path': prefix}
+    try:
+        for suffix in ('/maintenance', '/timeline', '/history', '/configuration',
+                       '/diagnostics', '/module-information'):
+            request = urllib.request.Request(ingress + suffix, headers=headers)
+            with urllib.request.urlopen(request, timeout=3) as response:
+                html = response.read().decode()
+            match = re.search(r'<a[^>]*href="([^"]+)"[^>]*>Module &amp; Stack</a>', html)
+            assert match and match.group(1) == prefix + '/module-information'
+            target = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_address[1]}{match.group(1)}",
+                headers=headers)
+            with urllib.request.urlopen(target, timeout=3) as response:
+                assert 'Aktuelle Zuordnung' in response.read().decode()
     finally:
         server.shutdown()
         server.server_close()

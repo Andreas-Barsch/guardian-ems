@@ -332,5 +332,5 @@ def test_diagnostics_ui_route_uses_current_dynamic_ingress_base(token):
     handler.do_GET()
     assert captured["code"] == 200 and captured["ctype"] == "text/html"
     assert f"const API='{prefix}/api/diagnostics'" in captured["body"]
-    assert 'href="./">Module &amp; Stack</a>' in captured["body"]
+    assert f'href="{prefix}/module-information">Module &amp; Stack</a>' in captured["body"]
     assert "3195b09a_guardian_battery" not in captured["body"]

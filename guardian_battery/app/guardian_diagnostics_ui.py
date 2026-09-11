@@ -7,7 +7,7 @@ from guardian_header import render_guardian_header
 
 
 def render_guardian_diagnostics_html(*, api_path: str = "api/diagnostics",
-                                     modules_path: str = "./") -> str:
+                                     modules_path: str = "module-information") -> str:
     api = escape(api_path.rstrip("/"), quote=True)
     header = render_guardian_header(
         active="diagnostics",

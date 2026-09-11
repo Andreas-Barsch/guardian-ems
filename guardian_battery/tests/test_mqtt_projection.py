@@ -298,6 +298,36 @@ def test_new_generation_config_identity_and_reconnect_each_republish_derived():
     assert profile["derived_publish_invalidated_by_reconnect"] is True
 
 
+def test_initial_connect_and_reconnect_restore_retained_global_availability():
+    client = FakeClient()
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = client
+    publisher._ensure_derived_publish_state()
+
+    publisher._on_mqtt_connect(client, None, None, 0)
+    client.publish("guardian/battery/availability", "offline", retain=True)
+    publisher._last_successfully_published_derived_key = (7, "cfg", (), 1)
+    publisher._on_mqtt_connect(client, None, None, 0)
+
+    availability = [call for call in client.calls
+                    if call["topic"] == "guardian/battery/availability"]
+    assert [(call["payload"], call["retain"]) for call in availability] == [
+        ("online", True), ("offline", True), ("online", True)]
+    assert publisher._derived_republish_required_by_reconnect is True
+
+
+def test_connect_availability_publish_failure_is_callback_isolated():
+    class Failing(FakeClient):
+        def publish(self, topic, payload, retain=False):
+            raise RuntimeError("broker unavailable")
+
+    publisher = Mqtt.__new__(Mqtt)
+    publisher.prefix = "guardian"; publisher.client = Failing()
+    publisher._ensure_derived_publish_state()
+    publisher._on_mqtt_connect(publisher.client, None, None, 0)
+    assert publisher._derived_reconnect_epoch == 1
+
+
 def test_connection_loss_during_derived_publish_does_not_mark_success():
     class Disconnecting(FakeClient):
         def __init__(self):

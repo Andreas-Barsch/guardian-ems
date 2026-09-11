@@ -398,7 +398,8 @@ def validate(cfg):
             errors.append('Hycube lokale Basisadresse: ungültig oder nicht lokal.')
     return errors
 
-def _config_html(maintenance_path='maintenance', timeline_path='timeline', history_path='history'):
+def _config_html(maintenance_path='maintenance', timeline_path='timeline', history_path='history',
+                 modules_path='module-information'):
     page = r'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Guardian Konfiguration</title>
 <style>:root{color-scheme:light dark;--b:#1976d2;--warn:#ef6c00}body{font:14px system-ui;margin:0;background:var(--primary-background-color,#fafafa);color:var(--primary-text-color,#222)}header{padding:18px 22px;background:#0d47a1;color:white}header nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}header nav a{color:white;text-decoration:none;padding:8px 12px;border:1px solid #ffffff66;border-radius:8px}header nav a.active{background:white;color:#0d47a1}main{max-width:1100px;margin:auto;padding:16px}.intro,.group{background:var(--card-background-color,#fff);border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 4px #0002}.group h2{margin-top:0}.row{display:grid;grid-template-columns:minmax(240px,1fr) minmax(160px,260px);gap:12px;padding:12px 0;border-top:1px solid #8883}.label{font-weight:650}.meta{font-size:12px;opacity:.72;margin-top:3px}.impact{font-size:12px;margin-top:6px;padding:7px 9px;border-left:3px solid var(--warn);background:#ff980012}input,select{width:100%;box-sizing:border-box;padding:9px;border:1px solid #8888;border-radius:7px;background:transparent;color:inherit}.advanced{border-left:4px solid #777}.actions{position:sticky;bottom:0;background:var(--card-background-color,#fff);padding:12px 16px;border-radius:12px;box-shadow:0 -2px 8px #0002;display:flex;gap:10px;align-items:center}button{padding:10px 16px;border:0;border-radius:8px;cursor:pointer}button.primary{background:var(--b);color:white}.status{margin-left:auto;font-weight:600}.changed{outline:2px solid #ff980088}.sys{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.sys div{padding:8px;background:#8881;border-radius:7px}@media(max-width:650px){.row{grid-template-columns:1fr}.actions{flex-wrap:wrap}.status{width:100%;margin:0}}</style></head>
 <body>__HEADER__<main>
@@ -417,7 +418,7 @@ load().catch(e=>document.getElementById('status').textContent='Fehler: '+e);</sc
     escaped_history=history_path.replace('&','&amp;').replace('"','&quot;').replace('<','&lt;').replace('>','&gt;')
     header = render_guardian_header(
         active="configuration",
-        paths={"modules": "./", "configuration": "configuration",
+        paths={"modules": modules_path, "configuration": "configuration",
                "maintenance": maintenance_path, "timeline": timeline_path,
                "history": history_path, "diagnostics": "diagnostics"},
         subtitle="Diagnoseparameter kontrolliert, validiert und nachvollziehbar ändern",
@@ -533,21 +534,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(response.status,response.body,headers=response.headers); return
         if self._is_maintenance_api(): self._maintenance_request('GET'); return
         if self._is_timeline_ui():
-            base=self._ingress_base(); self._send(200,render_timeline_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance',history_path=(base+'/history') or '/history'),'text/html'); return
+            base=self._ingress_base(); self._send(200,render_timeline_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance',history_path=(base+'/history') or '/history',modules_path=(base+'/module-information') or '/module-information'),'text/html'); return
         if self._is_history_ui():
-            base=self._ingress_base(); self._send(200,render_history_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance',timeline_path=(base+'/timeline') or '/timeline'),'text/html'); return
+            base=self._ingress_base(); self._send(200,render_history_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance',timeline_path=(base+'/timeline') or '/timeline',modules_path=(base+'/module-information') or '/module-information'),'text/html'); return
         if self._is_module_information_ui():
-            base=self._ingress_base(); self._send(200,render_module_information_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance'),'text/html'); return
+            base=self._ingress_base(); self._send(200,render_module_information_html(configuration_path=(base+'/configuration') or '/configuration',maintenance_path=(base+'/maintenance') or '/maintenance',modules_path=(base+'/module-information') or '/module-information'),'text/html'); return
         if self._is_maintenance_ui():
-            base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history'),'text/html'); return
+            base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history',modules_path=(base+'/module-information') or '/module-information'),'text/html'); return
         if self._is_configuration_ui():
-            base=self._ingress_base(); self._send(200,_config_html((base+'/maintenance') or '/maintenance',(base+'/timeline') or '/timeline',(base+'/history') or '/history'),'text/html'); return
+            base=self._ingress_base(); self._send(200,_config_html((base+'/maintenance') or '/maintenance',(base+'/timeline') or '/timeline',(base+'/history') or '/history',(base+'/module-information') or '/module-information'),'text/html'); return
         if self.path.rstrip('/').endswith('/api/config'):
             rec=_last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
             self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
         if self._is_diagnostics_ui():
-            base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics'),'text/html'); return
-        base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history'),'text/html')
+            base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics',modules_path=(base+'/module-information') or '/module-information'),'text/html'); return
+        base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history',modules_path=(base+'/module-information') or '/module-information'),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self._is_diagnostics_api(): self._diagnostics_request('POST'); return

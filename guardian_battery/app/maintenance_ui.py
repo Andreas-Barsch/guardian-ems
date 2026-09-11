@@ -15,13 +15,14 @@ def maintenance_deep_link(event_id: str) -> str:
 
 
 def render_maintenance_html(*, configuration_path: str, timeline_path: str = "timeline",
-                            history_path: str = "history") -> str:
+                            history_path: str = "history",
+                            modules_path: str = "module-information") -> str:
     config_href = escape(configuration_path, quote=True)
     timeline_href = escape(timeline_path, quote=True)
     history_href = escape(history_path, quote=True)
     header = render_guardian_header(
         active="maintenance",
-        paths={"modules": "./", "configuration": configuration_path,
+        paths={"modules": modules_path, "configuration": configuration_path,
                "maintenance": "maintenance", "timeline": timeline_path,
                "history": history_path, "diagnostics": "diagnostics"},
     )

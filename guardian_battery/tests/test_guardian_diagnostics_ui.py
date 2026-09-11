@@ -26,7 +26,7 @@ def test_diagnostics_ui_structure_semantics_and_escaping():
                  "Effective Lowest Persistence", "Load Sensitivity", "Risk-Score-Verlauf",
                  "geringe Datenbasis", "Balancing", "Kausalität: nicht bestimmt"):
         assert text in default_html
-    assert 'href="./">Module &amp; Stack</a>' in default_html
+    assert 'href="module-information">Module &amp; Stack</a>' in default_html
     for target in ("configuration", "maintenance", "timeline", "history", "diagnostics"):
         assert f'href="{target}"' in default_html
     assert "/api/hassio_ingress/" not in html

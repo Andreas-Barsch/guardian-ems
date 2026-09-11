@@ -8,10 +8,11 @@ from guardian_header import render_guardian_header
 
 
 def render_timeline_html(*, configuration_path: str, maintenance_path: str,
-                         history_path: str = "history") -> str:
+                         history_path: str = "history",
+                         modules_path: str = "module-information") -> str:
     header = render_guardian_header(
         active="timeline",
-        paths={"modules": "./", "configuration": configuration_path,
+        paths={"modules": modules_path, "configuration": configuration_path,
                "maintenance": maintenance_path, "timeline": "timeline",
                "history": history_path, "diagnostics": "diagnostics"},
         subtitle="Chronologischer Verlauf vorhandener Guardian-Ereignisquellen",
