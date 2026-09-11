@@ -1,6 +1,19 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-09-09
+Stand: 2026-09-11
+
+## Guardian Battery 0.7.35 – Display History and Canonical Phase Timeline
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.35`; Diagnostic Engine unverändert `0.4.12`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Raw Evidence und Full Cell History bleiben authoritative. Display History und Canonical Phase v2 sind Derived Data, versioniert und vollständig rebuildbar. Ein produktiver Rebuild ist eine separate, ausdrücklich auszulösende Maintenance-Aktion.
+- **Breaking Semantic Change:** Historische Phasegrenzen stammen nun aus der kontinuierlichen `guardian_canonical_phase_v2`-Timeline statt aus einer bei jedem Request neu initialisierten Analyse. Erwartete Abweichungen zu früheren Grenzen fachlich dokumentieren und nicht als Raw-History-Änderung interpretieren.
+- Canonical Historical Rebuild arbeitet tageweise bounded, resumable und failure-isolated. Der lokale 6×30-Benchmark dauerte etwa 312 Sekunden; während eines späteren produktiven Rebuilds Collector, Cell Sampling, MQTT und Worker-Status getrennt beobachten. Die Buildzeit ist keine interaktive History-Latenz.
+- Nach aufgebauten Derived Projections die Referenzmatrix 1×1, 6×1, 1×10, 6×10, 1×30 und 6×30 prüfen. Lokal lagen Display-plus-Canonical-Reads bei etwa 0,040 / 0,186 / 0,365 / 1,800 / 1,057 / 5,229 Sekunden. Produktive Verbesserung erst anhand realer History Timings bestätigen.
+- Einen MQTT-Verbindungsabbruch mit erfolgreichem Reconnect kontrolliert abnehmen: globales `battery/availability` muss retained wieder `online` werden; modulbezogene Availability und Derived-Reconnect-Invalidierung müssen unverändert funktionieren.
+- Auf Maintenance, Verlauf, Zeitverläufe, Konfiguration, Diagnostics und Module Information **Module & Stack** öffnen. Das Ziel muss unter demselben dynamischen Ingress-Prefix `/module-information` sein; `/` bleibt Maintenance.
+- Source-Release, Add-on-Installation, Derived Rebuild und produktive Laufzeit sind getrennte Zustände. Dieser Source-Release führt kein Deployment, keinen Neustart, keinen Rebuild und keinen produktiven `/share`- oder `/config`-Zugriff aus.
 
 ## Guardian Battery 0.7.34 – Safe History Block-Range Index
 

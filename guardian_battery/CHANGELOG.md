@@ -1,5 +1,15 @@
 # Guardian Battery Changelog
 
+## 0.7.35 – Display History and Canonical Phase Timeline
+
+- Ergänzt eine versionierte, vollständig rebuildbare Multi-Resolution Display History Projection mit 1-, 5-, 15- und 60-Minuten-Auflösung. Full Cell History und Raw Evidence bleiben authoritative; die Projection ist ausschließlich Derived Data. Der Projection-preferred Reader fällt tageweise auf Full Resolution zurück, kombiniert den offenen aktuellen Tag inkrementell und erhält Extrema sowie SOC-Sprünge.
+- Führt `guardian_canonical_phase_v2` als kontinuierliche historische Phase-Timeline mit getrennten Diagnostic-/Visual-Intervallen, erhaltener Hysterese, Minimum Duration, Short-Gap-Merging, kanonischen Relative Endpoints, Identity-Epochen und historischer Config-Provenienz ein. Current- und What-if-Analysen bleiben Legacy/on-demand.
+- **BREAKING SEMANTIC CHANGE:** Historische Phasegrenzen werden kontinuierlich aus der kanonischen Timeline bestimmt und nicht mehr bei jedem History-Request neu initialisiert. Grenzen können deshalb beabsichtigt von früheren Releases abweichen; die historische Reproduzierbarkeit wird dadurch erhöht.
+- Der Canonical Historical Rebuild arbeitet tageweise bounded, resumable und failure-isolated mit atomaren EOD-Checkpoints. Ein lokaler 6-Module-/30-Tage-Benchmark benötigte etwa 312 Sekunden; dies ist Hintergrund-/Maintenance-Arbeit und keine interaktive Request-Latenz.
+- Lokale Display-plus-Canonical-Reads lagen zwischen etwa 0,040 Sekunden für 1 Modul × 1 Tag und 5,229 Sekunden für 6 Module × 30 Tage. Dies ist keine bereits produktiv verifizierte Performancegarantie.
+- Stellt nach jedem erfolgreichen MQTT Connect/Reconnect das globale retained `battery/availability=online` wieder her und korrigiert **Module & Stack** auf die dynamisch ingress-präfixierte Route `/module-information`. Der Ingress-Root `/` bleibt Maintenance.
+- Guardian Battery und Add-on sind `0.7.35`; Diagnostic Engine bleibt `0.4.12`, Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.34 – Safe History Block-Range Index
 
 - Ergänzt separate rebuildbare Blockbereichsindizes für Hycube Projection History und Cell History. Feste 256-Record-Blöcke tragen Byteoffsets sowie minimale und maximale Zeitstempel; Raw Evidence und Projection bleiben authoritative und unverändert.
