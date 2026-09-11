@@ -41,7 +41,7 @@ class HistoryApi:
                  rs485_series: Rs485HistorySeries | None = None,
                  hycube_series: HycubeBatteryCapacitySeries | None = None,
                  hycube_policy_history: HycubePolicyHistory | None = None,
-                 timing_state=None):
+                 timing_state=None, display_reader=None, canonical_phase_reader=None):
         self.series = series
         self.overlays = overlays
         self.phase_engine = phase_engine
@@ -49,6 +49,8 @@ class HistoryApi:
         self.hycube_series = hycube_series
         self.hycube_policy_history = hycube_policy_history
         self.timing_state = timing_state
+        self.display_reader = display_reader
+        self.canonical_phase_reader = canonical_phase_reader
 
     def handle(self, method: str, target: str) -> ApiResponse:
         try:
@@ -165,15 +167,20 @@ class HistoryApi:
                              "cell_number": None if combined else cell_number,
                              "cell_numbers": selected if combined else cell_numbers})
         cell_requests = [item for item in requests if item["metric"] not in RS485_SERIES_METRICS]
-        bundle = self.series.query_bundles(
+        bundle_reader = self.display_reader or self.series
+        bundle = bundle_reader.query_bundles(
             requests=cell_requests or [{"metric": "soc", "cell_number": None, "cell_numbers": None}],
             timestamp_from=timestamp_from, timestamp_to=timestamp_to,
             module_number=module_number, module_numbers=modules,
             include_all_module_soc="soc" in metrics, timing=timing)
-        hycube = (self.hycube_series.query(timestamp_from=timestamp_from,
+        hycube = (self.display_reader.query_hycube(
+                      timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                      max_points=max(4, 6000 // 7), timing=timing)
+                  if "soc" in metrics and self.display_reader is not None else None)
+        hycube = (hycube or (self.hycube_series.query(timestamp_from=timestamp_from,
                                            timestamp_to=timestamp_to,
                                            max_points=max(4, 6000 // 7), timing=timing)
-                  if "soc" in metrics and self.hycube_series is not None else None)
+                  if "soc" in metrics and self.hycube_series is not None else None))
         if timing and hycube is None:
             timing.not_executed("hycube_discovery",
                                 "hycube_projection_read_parse_filter",
@@ -247,6 +254,7 @@ class HistoryApi:
         relative_endpoints = []
         visual_parameters = {}
         phase_seconds = 0.0
+        canonical = None
         if self.phase_engine is not None:
             what_if = None
             if mode == "what_if":
@@ -258,19 +266,61 @@ class HistoryApi:
                 }
                 try: what_if = {key: float(values[source]) for key, source in names.items()}
                 except (KeyError, ValueError) as exc: raise HistoryApiProblem("what-if mode requires four numeric phase parameters") from exc
-            phase_started = time.perf_counter(); phase_cpu = time.thread_time()
-            analysis = self.phase_engine.analyse(bundle["samples"], mode=mode, what_if=what_if,
-                                                 window_to=timestamp_to)
-            phase_seconds = time.perf_counter() - phase_started
-            phases = analysis["visual_intervals"]
-            diagnostic_phases = analysis["diagnostic_intervals"]
-            relative_endpoints = analysis.get("relative_endpoints", [])
-            visual_parameters = analysis["visual_parameters"]
-            if timing:
-                timing.record("phase", phase_seconds, time.thread_time() - phase_cpu)
-                timing.counts(phase_input_samples=len(bundle["samples"]),
-                    visual_phase_intervals=len(phases),
-                    diagnostic_phase_intervals=len(diagnostic_phases))
+            if mode == "historical" and self.canonical_phase_reader is not None:
+                canonical_started=time.perf_counter();canonical_cpu=time.thread_time()
+                canonical=self.canonical_phase_reader.query(
+                    timestamp_from,timestamp_to,module_number=module_number,timing=timing)
+                if timing:
+                    timing.record("canonical_phase_assembly",
+                        time.perf_counter()-canonical_started,
+                        time.thread_time()-canonical_cpu)
+            if canonical and canonical.get("available"):
+                phases=canonical["visual_intervals"]
+                diagnostic_phases=canonical["diagnostic_intervals"]
+                relative_endpoints=canonical["relative_endpoints"]
+                visual_parameters=dict(self.phase_engine.visual_projection.parameters)
+                if timing:
+                    timing.not_executed("diagnostic_phase_full_resolution","phase",
+                                        "legacy_phase_fallback")
+                    timing.counts(canonical_phase_days=len(canonical["days"]),
+                        canonical_phase_bytes=canonical["bytes"],
+                        canonical_visual_intervals=len(phases),
+                        canonical_diagnostic_intervals=len(diagnostic_phases),
+                        canonical_relative_endpoints=len(relative_endpoints),
+                        phase_semantics_version=canonical["semantics_version"],
+                        phase_source_mode=canonical["source_mode"])
+            else:
+              phase_samples = bundle["samples"]
+              if self.display_reader is not None and bundle.get(
+                      "display_observability", {}).get("history_source_mode") != "full_resolution":
+                exact_started=time.perf_counter();exact_cpu=time.thread_time()
+                exact=self.series.query_bundles(
+                    requests=({"metric":"soc","cell_number":None,"cell_numbers":None},),
+                    timestamp_from=timestamp_from,timestamp_to=timestamp_to,
+                    module_number=module_number,module_numbers=(module_number,),
+                    include_all_module_soc=False,timing=None)
+                phase_samples=exact["samples"]
+                if timing:timing.record("diagnostic_phase_full_resolution",
+                    time.perf_counter()-exact_started,time.thread_time()-exact_cpu)
+              phase_started = time.perf_counter(); phase_cpu = time.thread_time()
+              analysis = self.phase_engine.analyse(phase_samples, mode=mode, what_if=what_if,
+                                                   window_to=timestamp_to)
+              phase_seconds = time.perf_counter() - phase_started
+              phases = analysis["visual_intervals"]
+              diagnostic_phases = analysis["diagnostic_intervals"]
+              relative_endpoints = analysis.get("relative_endpoints", [])
+              visual_parameters = analysis["visual_parameters"]
+              if timing:
+                  timing.record("phase", phase_seconds, time.thread_time() - phase_cpu)
+                  timing.record("legacy_phase_fallback",phase_seconds,
+                                time.thread_time()-phase_cpu)
+                  timing.counts(phase_input_samples=len(phase_samples),
+                      visual_phase_intervals=len(phases),
+                      diagnostic_phase_intervals=len(diagnostic_phases),
+                      phase_semantics_version="legacy_request_relative_v1",
+                      phase_source_mode="legacy_on_demand",
+                      legacy_phase_fallback_reason=(canonical or {}).get("reason","not_requested"),
+                      legacy_phase_fallback_days=len((canonical or {}).get("days",[])))
         elif timing:
             timing.not_executed("phase", "config")
         response = {
@@ -308,7 +358,13 @@ class HistoryApi:
                                "maintenance_boundaries": maintenance_boundaries,
                                "visual_parameters": visual_parameters,
                                "raw_measurements_unchanged": True,
-                               "diagnostic_phase_unchanged": True},
+                               "diagnostic_phase_unchanged": True,
+                               "semantics_version": ((canonical or {}).get("semantics_version")
+                                    if canonical and canonical.get("available") else
+                                    "legacy_request_relative_v1"),
+                               "source_mode": ((canonical or {}).get("source_mode")
+                                    if canonical and canonical.get("available") else
+                                    "legacy_on_demand")},
         }
         response["series"] = ([{**item, "module_number": module_number,
                                 "selected_modules": list(modules)}
@@ -336,6 +392,7 @@ class HistoryApi:
             "policy_seconds": round(policy_seconds, 6),
             "maintenance_seconds": round(maintenance_seconds, 6),
             "backend_seconds": round(time.perf_counter() - backend_started, 6),
+            **bundle.get("display_observability", {}),
         }
         serialization_started = time.perf_counter()
         response["performance"]["payload_bytes"] = len(json.dumps(

@@ -31,7 +31,12 @@ from daily_diagnostics import DailyDiagnosticSources
 from daily_diagnostic_worker import DailyDiagnosticWorker
 from hycube_evidence import collector_from_options
 from hycube_projection import HycubeProjectionBackfill
-from config_ui import (configure_hycube_projection, configure_maintenance_live_publisher,
+from display_history_projection import (DisplayHistoryProjection,
+                                        DisplayHistoryProjectionWorker)
+from canonical_phase import (CanonicalPhaseProjection, CanonicalPhaseWorker,
+                             DEFAULT_CANONICAL_PHASE_DIR)
+from config_ui import (configure_canonical_phase, configure_display_projection, configure_hycube_projection,
+                       configure_maintenance_live_publisher,
                        configure_rs485_status_provider,
                        record_stable_observed_positions, start_config_server)
 from maintenance_mqtt import MaintenanceMqttPublisher
@@ -78,6 +83,7 @@ DAILY_DIAGNOSTICS_ROOT = SHARE_DIR / "diagnostics"
 HYCUBE_HISTORY_DIR = SHARE_DIR / "hycube_history"
 HYCUBE_POLICY_HISTORY_DIR = SHARE_DIR / "hycube_policy_history"
 HYCUBE_PROJECTION_DIR = SHARE_DIR / "hycube_history_projection"
+DISPLAY_HISTORY_DIR = SHARE_DIR / "display_history"
 SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -1514,6 +1520,8 @@ def main() -> None:
     module_infos: dict[int, dict] = {}
     identity_resolution_log: dict[int, tuple[str, int | None]] = {}
     daily_worker = None
+    display_projection_worker = None
+    canonical_phase_worker = None
 
     if rs485_reader is not None:
         restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
@@ -1553,6 +1561,29 @@ def main() -> None:
     except Exception as exc:
         hycube_collector = None
         LOG.warning("Hycube read-only collector konnte nicht gestartet werden: %s",
+                    type(exc).__name__)
+    try:
+        display_projection_worker = DisplayHistoryProjectionWorker(
+            DisplayHistoryProjection(CELL_HISTORY_DIR, HYCUBE_PROJECTION_DIR,
+                                     DISPLAY_HISTORY_DIR))
+        configure_display_projection(display_projection_worker.status,
+                                     display_projection_worker.request_historical_rebuild)
+        display_projection_worker.start()
+    except Exception as exc:
+        display_projection_worker = None
+        LOG.warning("Display History Projection konnte nicht gestartet werden: %s",
+                    type(exc).__name__)
+    try:
+        canonical_phase_worker = CanonicalPhaseWorker(CanonicalPhaseProjection(
+            CELL_HISTORY_DIR, DEFAULT_CANONICAL_PHASE_DIR,
+            ConfigHistory(CONFIG_HISTORY_FILE),
+            position_history_path=DEFAULT_POSITION_HISTORY_FILE), interval_seconds=5)
+        configure_canonical_phase(canonical_phase_worker.status,
+                                  canonical_phase_worker.request_historical_rebuild)
+        canonical_phase_worker.start()
+    except Exception as exc:
+        canonical_phase_worker = None
+        LOG.warning("Canonical Phase v2 konnte nicht gestartet werden: %s",
                     type(exc).__name__)
     try:
         while RUNNING:
@@ -1900,6 +1931,18 @@ def main() -> None:
                 poll_deadline.consume()
             time.sleep(poll_deadline.delay())
     finally:
+        if canonical_phase_worker is not None:
+            try:
+                if not canonical_phase_worker.stop():
+                    LOG.warning("Canonical Phase v2 did not stop within timeout")
+            except Exception as exc:
+                LOG.warning("Canonical Phase v2 stop failed: %s", exc)
+        if display_projection_worker is not None:
+            try:
+                if not display_projection_worker.stop():
+                    LOG.warning("Display History Projection did not stop within timeout")
+            except Exception as exc:
+                LOG.warning("Display History Projection stop failed: %s", exc)
         try:
             if not derived_mqtt_worker.stop():
                 LOG.warning("Derived MQTT worker did not stop within timeout")

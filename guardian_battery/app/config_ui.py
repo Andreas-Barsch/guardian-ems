@@ -26,9 +26,13 @@ from timeline_ui import render_timeline_html
 from event_overlay import EventOverlayAdapter
 from history_api import HISTORY_API_ROUTE, HistoryApi
 from history_series import DEFAULT_CELL_HISTORY_DIR, CellHistorySeries
+from display_history_projection import DEFAULT_DISPLAY_HISTORY_DIR
+from display_history_reader import DisplayHistoryReader
+from canonical_phase import CanonicalPhaseReader, DEFAULT_CANONICAL_PHASE_DIR
 from hycube_evidence import (DEFAULT_HYCUBE_HISTORY_DIR,
                              DEFAULT_HYCUBE_POLICY_HISTORY_DIR,
                              HycubeBatteryCapacitySeries, HycubePolicyHistory)
+from hycube_projection import DEFAULT_HYCUBE_PROJECTION_DIR
 from rs485_evidence import DEFAULT_RS485_HISTORY_DIR, Rs485HistorySeries
 from history_ui import render_history_html
 from history_timing import HistoryRequestTimingState
@@ -62,6 +66,10 @@ _MAINTENANCE_LIVE_PUBLISHER = None
 _RS485_STATUS_PROVIDER = None
 _HYCUBE_PROJECTION_PROVIDER = None
 _HYCUBE_BACKFILL_ACTION = None
+_DISPLAY_PROJECTION_PROVIDER = None
+_DISPLAY_PROJECTION_REBUILD_ACTION = None
+_CANONICAL_PHASE_PROVIDER = None
+_CANONICAL_PHASE_REBUILD_ACTION = None
 _AUTOMATIC_POSITION_LOCK = threading.Lock()
 LOG = logging.getLogger("guardian_battery.config_ui")
 
@@ -85,6 +93,20 @@ def configure_hycube_projection(provider, backfill_action):
     global _HYCUBE_PROJECTION_PROVIDER, _HYCUBE_BACKFILL_ACTION
     _HYCUBE_PROJECTION_PROVIDER = provider
     _HYCUBE_BACKFILL_ACTION = backfill_action
+
+
+def configure_display_projection(provider, rebuild_action):
+    """Expose only technical derived-data status and an explicit rebuild action."""
+    global _DISPLAY_PROJECTION_PROVIDER, _DISPLAY_PROJECTION_REBUILD_ACTION
+    _DISPLAY_PROJECTION_PROVIDER = provider
+    _DISPLAY_PROJECTION_REBUILD_ACTION = rebuild_action
+
+
+def configure_canonical_phase(provider, rebuild_action):
+    """Expose derived phase status and an explicit, ingress-only rebuild action."""
+    global _CANONICAL_PHASE_PROVIDER, _CANONICAL_PHASE_REBUILD_ACTION
+    _CANONICAL_PHASE_PROVIDER = provider
+    _CANONICAL_PHASE_REBUILD_ACTION = rebuild_action
 
 
 def _get_maintenance_api():
@@ -123,14 +145,22 @@ def _get_history_api():
     if _HISTORY_API is None:
         with _MAINTENANCE_API_LOCK:
             if _HISTORY_API is None:
+                cell_series = CellHistorySeries(DEFAULT_CELL_HISTORY_DIR)
+                hycube_series = HycubeBatteryCapacitySeries(DEFAULT_HYCUBE_HISTORY_DIR)
                 _HISTORY_API = HistoryApi(
-                    CellHistorySeries(DEFAULT_CELL_HISTORY_DIR),
+                    cell_series,
                     EventOverlayAdapter(timeline),
                     PhaseEngine(ConfigHistory(CONFIG_HISTORY_FILE), _read_options),
                     Rs485HistorySeries(DEFAULT_RS485_HISTORY_DIR),
-                    HycubeBatteryCapacitySeries(DEFAULT_HYCUBE_HISTORY_DIR),
+                    hycube_series,
                     HycubePolicyHistory(DEFAULT_HYCUBE_POLICY_HISTORY_DIR),
                     timing_state=_HISTORY_TIMING,
+                    display_reader=DisplayHistoryReader(
+                        DEFAULT_DISPLAY_HISTORY_DIR, DEFAULT_CELL_HISTORY_DIR,
+                        DEFAULT_HYCUBE_PROJECTION_DIR, cell_series, hycube_series),
+                    canonical_phase_reader=CanonicalPhaseReader(
+                        DEFAULT_CANONICAL_PHASE_DIR, DEFAULT_CELL_HISTORY_DIR,
+                        CONFIG_HISTORY_FILE),
                 )
     return _HISTORY_API
 
@@ -475,6 +505,15 @@ class Handler(BaseHTTPRequestHandler):
                 "mode": counts.get("hycube_source_mode", "not_available"),
                 "fallback_reason": counts.get(
                     "hycube_raw_fallback_reason", "not_available")}}); return
+        if self.path.rstrip('/').endswith('/api/display-projection/status'):
+            payload = (_DISPLAY_PROJECTION_PROVIDER()
+                       if _DISPLAY_PROJECTION_PROVIDER else
+                       {"enabled": False, "state": "disabled"})
+            self._send(200, payload); return
+        if self.path.rstrip('/').endswith('/api/canonical-phase/status'):
+            payload = (_CANONICAL_PHASE_PROVIDER() if _CANONICAL_PHASE_PROVIDER else
+                       {"enabled": False, "state": "disabled"})
+            self._send(200, payload); return
         if self._is_history_api():
             response=_get_history_api().handle('GET',self.path)
             self._send_history(response); return
@@ -518,6 +557,22 @@ class Handler(BaseHTTPRequestHandler):
             started = bool(_HYCUBE_BACKFILL_ACTION())
             self._send(202 if started else 200,
                        {'accepted': started, 'status': 'requested' if started else 'already_requested'})
+            return
+        if self.path.rstrip('/').endswith('/api/display-projection/rebuild'):
+            if _DISPLAY_PROJECTION_REBUILD_ACTION is None:
+                self._send(503, {'error': 'display projection rebuild unavailable'}); return
+            started = bool(_DISPLAY_PROJECTION_REBUILD_ACTION())
+            self._send(202 if started else 200,
+                       {'accepted': started,
+                        'status': 'requested' if started else 'already_requested'})
+            return
+        if self.path.rstrip('/').endswith('/api/canonical-phase/rebuild'):
+            if _CANONICAL_PHASE_REBUILD_ACTION is None:
+                self._send(503, {'error': 'canonical phase rebuild unavailable'}); return
+            started = bool(_CANONICAL_PHASE_REBUILD_ACTION())
+            self._send(202 if started else 200,
+                       {'accepted': started,
+                        'status': 'requested' if started else 'already_requested'})
             return
         if self._is_position_history_api():
             try: length=int(self.headers.get('Content-Length','0'))

@@ -93,6 +93,23 @@ def test_hycube_projection_status_and_backfill_action_use_existing_ingress(monke
     assert captured[-2][0] == 202 and captured[-1][0] == 200
 
 
+def test_display_projection_status_and_rebuild_use_existing_ingress(monkeypatch):
+    monkeypatch.setattr(config_ui, '_DISPLAY_PROJECTION_PROVIDER',
+                        lambda: {'enabled': True, 'state': 'available'})
+    requested = []
+    monkeypatch.setattr(config_ui, '_DISPLAY_PROJECTION_REBUILD_ACTION',
+                        lambda: not requested and not requested.append(True))
+    handler = object.__new__(Handler); handler._ingress_allowed = lambda: True
+    captured = []
+    handler._send = lambda code, body, *args, **kwargs: captured.append((code, body))
+    handler.path = '/api/hassio_ingress/token/api/display-projection/status'
+    handler.do_GET()
+    assert captured[-1] == (200, {'enabled': True, 'state': 'available'})
+    handler.path = '/api/hassio_ingress/token/api/display-projection/rebuild'
+    handler.do_POST(); handler.do_POST()
+    assert captured[-2][0] == 202 and captured[-1][0] == 200
+
+
 def test_real_http_ingress_root_and_maintenance_render_projection(monkeypatch):
     monkeypatch.setattr(Handler, '_ingress_allowed', lambda self: True)
     server = config_ui.start_config_server(port=0, bind_host='127.0.0.1')
