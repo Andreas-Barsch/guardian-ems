@@ -6,6 +6,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from history_block_index import extend_open_index
+
+
+def _validate_index_record(record):
+    if record.get("schema_version") != 1:
+        raise ValueError("cell history schema mismatch")
+    value = record.get("timestamp")
+    if isinstance(value, bool):
+        raise ValueError("invalid cell timestamp")
+    float(value)
+
 
 def cell_history_timing(cell_sample_at: float, pwr_sample_at: float | None) -> dict:
     """Describe the non-simultaneous PWR context without negative ages."""
@@ -27,6 +38,7 @@ class CellHistoryWriter:
     def __init__(self, directory: Path):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._index_appends = {}
 
     def append(self, sample: Any) -> None:
         data = asdict(sample) if is_dataclass(sample) else dict(sample)
@@ -42,3 +54,13 @@ class CellHistoryWriter:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False))
             handle.write("\n")
+        pending = self._index_appends.get(day)
+        self._index_appends[day] = 1 if pending is None else pending + 1
+        if pending is None or self._index_appends[day] >= 256:
+            try:
+                extend_open_index(path, timestamp_field="timestamp", iso_timestamp=False,
+                                  validate_record=_validate_index_record)
+            except Exception:
+                # Cell history is authoritative; its disposable index is best effort only.
+                pass
+            self._index_appends[day] = 0

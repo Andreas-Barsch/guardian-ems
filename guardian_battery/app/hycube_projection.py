@@ -9,6 +9,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from history_block_index import (DEFAULT_BLOCK_RECORDS, BlockIndexError, build_index,
+                                 extend_open_index, selected_ranges)
+
 
 SCHEMA_VERSION = 1
 RECORD_TYPE = "hycube_history_projection"
@@ -64,6 +67,19 @@ def parse_projection_record(record):
             or not isinstance(offset, int) or offset < 0):
         raise ValueError("invalid projection record")
     return record, datetime.fromisoformat(received_at).timestamp(), float(capacity)
+
+
+def _validate_index_record(record):
+    parse_projection_record(record)
+
+
+def _validate_cell_index_record(record):
+    if record.get("schema_version") != 1:
+        raise ValueError("cell history schema mismatch")
+    value = record.get("timestamp")
+    if isinstance(value, bool):
+        raise ValueError("invalid cell timestamp")
+    float(value)
 
 
 def _write_json_atomic(path: Path, value: dict) -> None:
@@ -214,7 +230,8 @@ class HycubeProjectionStore:
         first = metadata.get("first_timestamp")
         if first is None and projected:
             first = projected[0]["received_at"]
-        count = int(metadata.get("projection_record_count", 0)) + len(projected)
+        old_count = int(metadata.get("projection_record_count", 0))
+        count = old_count + len(projected)
         _last_item, last_receipt = self._pending[-1]
         last_projection_offset = metadata.get("last_projection_source_raw_end_offset")
         trailing_skipped = int(metadata.get("trailing_skipped_records", 0))
@@ -239,6 +256,13 @@ class HycubeProjectionStore:
                                else metadata.get("last_timestamp")),
         }
         _write_json_atomic(self.metadata_path(day), next_metadata)
+        if count // DEFAULT_BLOCK_RECORDS > old_count // DEFAULT_BLOCK_RECORDS:
+            try:
+                extend_open_index(path, timestamp_field="received_at", iso_timestamp=True,
+                                  validate_record=_validate_index_record)
+            except Exception:
+                # The index is disposable and must never affect Projection or Raw writes.
+                pass
         self._status.update(state="available",
                             records_written=self._status["records_written"] + len(projected),
                             last_error=None, last_flush_at=time.time(),
@@ -328,13 +352,15 @@ class HycubeProjectionBackfill:
     def __init__(self, raw_directory, projection_directory, *,
                  max_records=BACKFILL_MAX_RECORDS, max_bytes=BACKFILL_MAX_BYTES,
                  pause_seconds=1.0, scan_interval_seconds=60.0,
-                 clock=time.time, live_store=None):
+                 clock=time.time, live_store=None, cell_history_directory=None):
         self.raw_directory = Path(raw_directory)
         self.projection_directory = Path(projection_directory)
         self.max_records = max(1, int(max_records)); self.max_bytes = max(1, int(max_bytes))
         self.pause_seconds = max(0.0, float(pause_seconds)); self.clock = clock
         self.scan_interval_seconds = max(1.0, float(scan_interval_seconds))
         self.live_store = live_store
+        self.cell_history_directory = (Path(cell_history_directory)
+                                       if cell_history_directory is not None else None)
         self._stop = threading.Event(); self._thread = None; self._lock = threading.Lock()
         self._historical_requested = threading.Event()
         self._historical_active = False
@@ -410,10 +436,33 @@ class HycubeProjectionBackfill:
                           last_error=f"{type(exc).__name__}: {str(exc)[:120]}")
             self._set(files_completed=complete, updated_at=self.clock())
             if self.pause_seconds and self._stop.wait(self.pause_seconds): break
+        if include_historical and not self._stop.is_set():
+            self._rebuild_cell_indexes(current_day)
         stopped = self._stop.is_set()
         self._set(status="stopped" if stopped else "completed", current_file=None,
                   completed_at=self.clock() if not stopped else None, updated_at=self.clock())
         return self.status()
+
+    def _rebuild_cell_indexes(self, current_day):
+        """Reuse the explicit maintenance migration for existing Cell History."""
+        if self.cell_history_directory is None or not self.cell_history_directory.exists():
+            return
+        for path in sorted(self.cell_history_directory.glob("*.jsonl")):
+            if self._stop.is_set() or path.stem >= current_day:
+                break
+            try:
+                selected_ranges(path, float("-inf"), float("inf"),
+                                timestamp_field="timestamp", iso_timestamp=False)
+            except BlockIndexError:
+                try:
+                    build_index(path, timestamp_field="timestamp", iso_timestamp=False,
+                                complete=True, validate_record=_validate_cell_index_record)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            if self.pause_seconds and self._stop.wait(self.pause_seconds):
+                break
 
     def _run(self):
         # Startup recovery is deliberately limited to the active UTC day.
@@ -440,6 +489,18 @@ class HycubeProjectionBackfill:
         final_projection_path = self.projection_directory / f"{day}.jsonl"
         final_metadata_path = self.projection_directory / f"{day}.meta.json"
         if historical and projection_plan(raw_path, self.projection_directory)["mode"] == "projection":
+            try:
+                selected_ranges(final_projection_path, float("-inf"), float("inf"),
+                                timestamp_field="received_at", iso_timestamp=True)
+            except BlockIndexError:
+                try:
+                    build_index(final_projection_path, timestamp_field="received_at",
+                                iso_timestamp=True, complete=True,
+                                validate_record=_validate_index_record)
+                except Exception:
+                    pass
+            except Exception:
+                pass
             return True
         projection_path = (self.projection_directory / f"{day}.jsonl.building"
                            if historical else final_projection_path)
@@ -496,6 +557,20 @@ class HycubeProjectionBackfill:
         if status == "complete" and historical:
             os.replace(projection_path, final_projection_path)
             os.replace(metadata_path, final_metadata_path)
+            try:
+                build_index(final_projection_path, timestamp_field="received_at",
+                            iso_timestamp=True, complete=True,
+                            validate_record=_validate_index_record)
+            except Exception:
+                pass
+        elif projection_path.exists():
+            try:
+                for _ in range(1 + written // DEFAULT_BLOCK_RECORDS):
+                    extend_open_index(
+                        projection_path, timestamp_field="received_at",
+                        iso_timestamp=True, validate_record=_validate_index_record)
+            except Exception:
+                pass
         snapshot = self.status()
         self._set(bytes_processed=snapshot["bytes_processed"] + bytes_processed,
                   records_processed=snapshot["records_processed"] + processed,

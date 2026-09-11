@@ -21,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 from hycube_projection import (DEFAULT_HYCUBE_PROJECTION_DIR,
                                HycubeProjectionStore, parse_projection_record,
                                projection_plan)
+from history_block_index import index_signature, selected_ranges
 
 
 LOG = logging.getLogger("guardian_battery.hycube_evidence")
@@ -47,40 +48,45 @@ class _CapacitySourceError(ValueError):
         self.counts = counts
 
 
-def _read_capacity_source(path, offset, is_projection):
+def _read_capacity_source(path, offset, is_projection, byte_ranges=None):
     items = []; lines = parsed = invalid = byte_count = 0
     with Path(path).open("rb") as handle:
-        handle.seek(offset)
-        for raw_line in handle:
-            byte_count += len(raw_line)
-            if not raw_line.strip():
-                continue
-            lines += 1
-            try:
-                record = json.loads(raw_line)
-                parsed += 1
-                if is_projection:
-                    item, epoch, capacity = parse_projection_record(record)
-                    items.append((item, epoch, capacity))
+        ranges = byte_ranges if byte_ranges is not None else ((offset, Path(path).stat().st_size),)
+        for range_start, range_end in ranges:
+            handle.seek(range_start)
+            while handle.tell() < range_end:
+                raw_line = handle.readline()
+                if not raw_line:
+                    break
+                byte_count += len(raw_line)
+                if not raw_line.strip():
                     continue
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
-                raise _CapacitySourceError(str(exc), {
-                    "bytes": byte_count, "lines": lines, "parsed": parsed,
-                    "invalid": invalid}) from exc
-            expected = "hycube_history_projection" if is_projection else "hycube_system_observation"
-            if record.get("record_type") != expected:
-                if is_projection:
-                    raise ValueError("projection record type mismatch")
-                invalid += 1
-                continue
-            received_at = record.get("received_at")
-            capacity = record.get("battery_capacity" if is_projection else "BatteryCapacity")
-            if received_at is None or isinstance(capacity, bool) or not isinstance(capacity, (int, float)):
-                if is_projection:
-                    raise ValueError("invalid projection record")
-                continue
-            epoch = datetime.fromisoformat(received_at).timestamp()
-            items.append((record, epoch, float(capacity)))
+                lines += 1
+                try:
+                    record = json.loads(raw_line)
+                    parsed += 1
+                    if is_projection:
+                        item, epoch, capacity = parse_projection_record(record)
+                        items.append((item, epoch, capacity))
+                        continue
+                except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+                    raise _CapacitySourceError(str(exc), {
+                        "bytes": byte_count, "lines": lines, "parsed": parsed,
+                        "invalid": invalid}) from exc
+                expected = "hycube_history_projection" if is_projection else "hycube_system_observation"
+                if record.get("record_type") != expected:
+                    if is_projection:
+                        raise ValueError("projection record type mismatch")
+                    invalid += 1
+                    continue
+                received_at = record.get("received_at")
+                capacity = record.get("battery_capacity" if is_projection else "BatteryCapacity")
+                if received_at is None or isinstance(capacity, bool) or not isinstance(capacity, (int, float)):
+                    if is_projection:
+                        raise ValueError("invalid projection record")
+                    continue
+                epoch = datetime.fromisoformat(received_at).timestamp()
+                items.append((record, epoch, float(capacity)))
     return items, {"bytes": byte_count, "lines": lines, "parsed": parsed,
                    "invalid": invalid}
 
@@ -142,6 +148,7 @@ class HycubeBatteryCapacitySeries:
                 files = [plan["raw_path"]]
                 if plan["mode"] != "raw":
                     files.extend((plan["projection_path"], plan["metadata_path"]))
+                    signature_items.append(index_signature(plan["projection_path"]))
                 signature_items.append((plan["mode"], plan.get("raw_offset"), tuple(
                     (str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in files)))
             signature = tuple(signature_items)
@@ -166,6 +173,7 @@ class HycubeBatteryCapacitySeries:
         projection_bytes = projection_lines = projection_parsed = 0
         raw_bytes = raw_source_lines = raw_parsed = raw_records_in_window = 0
         projection_wall = projection_cpu = raw_wall = raw_cpu = 0.0
+        projection_seek_modes = set(); projection_skipped_bytes = 0
         fallback_reasons = []
         parse_errors = invalid_records = 0
         try:
@@ -188,7 +196,18 @@ class HycubeBatteryCapacitySeries:
                 try:
                     for path, offset, is_projection in sources:
                         source_wall = time.monotonic(); source_cpu = time.thread_time()
-                        items, counts = _read_capacity_source(path, offset, is_projection)
+                        ranges = None
+                        if is_projection:
+                            try:
+                                ranges, seek = selected_ranges(
+                                    path, start_epoch, end_epoch,
+                                    timestamp_field="received_at", iso_timestamp=True)
+                                projection_seek_modes.add(seek["mode"])
+                                projection_skipped_bytes += seek["skipped_bytes"]
+                            except Exception:
+                                projection_seek_modes.add("full_scan")
+                        items, counts = _read_capacity_source(
+                            path, offset, is_projection, byte_ranges=ranges)
                         elapsed_wall = time.monotonic() - source_wall
                         elapsed_cpu = time.thread_time() - source_cpu
                         if is_projection:
@@ -276,6 +295,9 @@ class HycubeBatteryCapacitySeries:
                     hycube_invalid_records=invalid_records,
                     hycube_records_in_window=raw_records,
                     hycube_projection_bytes_read=projection_bytes,
+                    projection_seek_mode=(next(iter(projection_seek_modes))
+                        if len(projection_seek_modes) == 1 else "mixed"),
+                    projection_skipped_bytes=projection_skipped_bytes,
                     hycube_raw_fallback_bytes_read=raw_bytes,
                     hycube_source_mode=_source_mode(
                         plans, projection_files, raw_fallback_files, raw_tail_files),
@@ -313,6 +335,9 @@ class HycubeBatteryCapacitySeries:
                     plan["mode"] != "raw" for plan in plans),
                 hycube_projection_files_opened=projection_attempts,
                 hycube_projection_bytes_read=projection_bytes,
+                projection_seek_mode=(next(iter(projection_seek_modes))
+                    if len(projection_seek_modes) == 1 else "mixed"),
+                projection_skipped_bytes=projection_skipped_bytes,
                 hycube_projection_raw_lines=projection_lines,
                 hycube_projection_parsed_records=projection_parsed,
                 hycube_projection_records_in_window=projection_records,

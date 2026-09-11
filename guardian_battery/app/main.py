@@ -1543,7 +1543,8 @@ def main() -> None:
             hycube_collector.start()
             hycube_backfill = HycubeProjectionBackfill(
                 HYCUBE_HISTORY_DIR, HYCUBE_PROJECTION_DIR,
-                live_store=hycube_collector.projection_store)
+                live_store=hycube_collector.projection_store,
+                cell_history_directory=CELL_HISTORY_DIR)
             configure_hycube_projection(
                 lambda: {"live": hycube_collector.projection_store.status(),
                          "backfill": hycube_backfill.status()},

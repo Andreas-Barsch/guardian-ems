@@ -11,12 +11,14 @@ from pathlib import Path
 
 from position_history import DEFAULT_POSITION_HISTORY_FILE, PositionHistoryLog
 from stack_soc import STACK_SOC_METRICS, project_stack_soc
+from history_block_index import index_signature, selected_ranges
 
 DEFAULT_CELL_HISTORY_DIR = Path("/share/guardian_battery/cell_history")
 SERIES_METRICS = frozenset({"soc", "current", "cell_voltage", "cell_temperature",
                             *STACK_SOC_METRICS})
 DEFAULT_MAX_DISPLAY_POINTS = 6000
 _MODULE_TOKEN = re.compile(r'"module"\s*:\s*(\d+)')
+_MODULE_TOKEN_BYTES = re.compile(rb'"module"\s*:\s*(\d+)')
 
 
 class SeriesHistoryError(RuntimeError):
@@ -134,7 +136,8 @@ class CellHistorySeries:
             considered = len(list(self.directory.glob("*.jsonl"))) if self.directory.exists() else 0
             paths = self._paths(timestamp_from, timestamp_to)
         try:
-            signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths)
+            signature = tuple((str(path), path.stat().st_size, path.stat().st_mtime_ns,
+                               index_signature(path)) for path in paths)
             position_signature = ((self.position_history_path.stat().st_size,
                                    self.position_history_path.stat().st_mtime_ns)
                                   if any(item[0] in STACK_SOC_METRICS for item in normalized)
@@ -170,72 +173,82 @@ class CellHistorySeries:
         needs_stack_context = any(metric in STACK_SOC_METRICS
                                   for metric, _, _ in normalized)
         rejected = parsed = in_window = bytes_read = opened = 0
+        seek_modes = set(); skipped_bytes = 0
         parse_errors = invalid_records = 0
         try:
           with stage("cell_read_parse_filter"):
             for path in paths:
-                bytes_read += path.stat().st_size
-                with path.open(encoding="utf-8") as handle:
+                try:
+                    ranges, seek = selected_ranges(
+                        path, start_epoch, end_epoch,
+                        timestamp_field="timestamp", iso_timestamp=False)
+                    seek_modes.add(seek["mode"]); skipped_bytes += seek["skipped_bytes"]
+                except Exception:
+                    ranges = ((0, path.stat().st_size),); seek_modes.add("full_scan")
+                with path.open("rb") as handle:
                     opened += 1
-                    for line_number, line in enumerate(handle, 1):
-                        if not line.strip():
-                            continue
-                        raw_file_records += 1
-                        module_token = _MODULE_TOKEN.search(line)
-                        if (not needs_stack_context and module_token is not None
-                                and int(module_token.group(1)) not in selected_modules):
-                            rejected += 1
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except json.JSONDecodeError:
-                            parse_errors += 1
-                            raise
-                        parsed += 1
-                        if record.get("schema_version") != 1:
-                            invalid_records += 1
-                            raise ValueError("schema")
-                        epoch = float(record["timestamp"])
-                        if not start_epoch <= epoch <= end_epoch:
-                            continue
-                        in_window += 1
-                        record_module = int(record["module"])
-                        if include_all_module_soc and record_module in soc_collectors:
+                    for range_start, range_end in ranges:
+                        handle.seek(range_start)
+                        while handle.tell() < range_end:
+                            line = handle.readline(); bytes_read += len(line)
+                            if not line.strip():
+                                continue
+                            raw_file_records += 1
+                            module_token = _MODULE_TOKEN_BYTES.search(line)
+                            if (not needs_stack_context and module_token is not None
+                                    and int(module_token.group(1)) not in selected_modules):
+                                rejected += 1
+                                continue
+                            try:
+                                record = json.loads(line)
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                parse_errors += 1
+                                raise
+                            parsed += 1
+                            if record.get("schema_version") != 1:
+                                invalid_records += 1
+                                raise ValueError("schema")
+                            epoch = float(record["timestamp"])
+                            if not start_epoch <= epoch <= end_epoch:
+                                continue
+                            in_window += 1
+                            record_module = int(record["module"])
+                            if include_all_module_soc and record_module in soc_collectors:
+                                timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                                point = self._points(record, "soc", None, timestamp, epoch)[0]
+                                point["module_number"] = record_module
+                                point["source"] = "pylontech"
+                                soc_collectors[record_module].add(point)
+                                for index in soc_metric_indexes:
+                                    raw_points[index] += 1
+                            if needs_stack_context:
+                                stack_records.append(record)
+                            if record_module not in selected_modules:
+                                continue
                             timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
-                            point = self._points(record, "soc", None, timestamp, epoch)[0]
-                            point["module_number"] = record_module
-                            point["source"] = "pylontech"
-                            soc_collectors[record_module].add(point)
-                            for index in soc_metric_indexes:
-                                raw_points[index] += 1
-                        if needs_stack_context:
-                            stack_records.append(record)
-                        if record_module not in selected_modules:
-                            continue
-                        timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
-                        raw_records += 1
-                        if record_module == primary_module:
-                            samples.append({"timestamp": timestamp,
-                                            "current_a": float(record["current_a"]),
-                                            "soc_percent": float(record["soc_percent"]),
-                                            "voltages_mv": [float(value) for value in record["voltages_mv"]],
-                                            "module_serial": record.get("module_serial")})
-                        for index, (metric, cell_number, selected_cells) in enumerate(normalized):
-                            per_group, metric_collectors = collectors[index]
-                            if metric in STACK_SOC_METRICS:
-                                continue
-                            if metric == "soc" and include_all_module_soc:
-                                continue
-                            for point in self._points(record, metric, cell_number, timestamp,
-                                                      epoch, selected_cells):
-                                if len(selected_modules) > 1:
-                                    point["module_number"] = record_module
-                                group = (record_module, point.get("cell_number", 0))
-                                metric_collectors.setdefault(
-                                    group,
-                                    _ExtremaCollector(per_group, start_epoch, end_epoch),
-                                ).add(point)
-                                raw_points[index] += 1
+                            raw_records += 1
+                            if record_module == primary_module:
+                                samples.append({"timestamp": timestamp,
+                                                "current_a": float(record["current_a"]),
+                                                "soc_percent": float(record["soc_percent"]),
+                                                "voltages_mv": [float(value) for value in record["voltages_mv"]],
+                                                "module_serial": record.get("module_serial")})
+                            for index, (metric, cell_number, selected_cells) in enumerate(normalized):
+                                per_group, metric_collectors = collectors[index]
+                                if metric in STACK_SOC_METRICS:
+                                    continue
+                                if metric == "soc" and include_all_module_soc:
+                                    continue
+                                for point in self._points(record, metric, cell_number, timestamp,
+                                                          epoch, selected_cells):
+                                    if len(selected_modules) > 1:
+                                        point["module_number"] = record_module
+                                    group = (record_module, point.get("cell_number", 0))
+                                    metric_collectors.setdefault(
+                                        group,
+                                        _ExtremaCollector(per_group, start_epoch, end_epoch),
+                                    ).add(point)
+                                    raw_points[index] += 1
             if stack_records:
                 snapshots = PositionHistoryLog(self.position_history_path).read_all()
                 projected_soc = project_stack_soc(stack_records, snapshots)
@@ -266,7 +279,9 @@ class CellHistorySeries:
                     cell_parsed_records=parsed, cell_parse_errors=parse_errors,
                     cell_invalid_records=invalid_records,
                     cell_records_in_window=in_window,
-                    cell_records_for_requested_modules=raw_records)
+                    cell_records_for_requested_modules=raw_records,
+                    cell_seek_mode=(next(iter(seek_modes)) if len(seek_modes) == 1 else "mixed"),
+                    cell_skipped_bytes=skipped_bytes)
             raise SeriesHistoryError(f"cell history is invalid: {exc}") from exc
 
         scan_seconds = time.perf_counter() - started
@@ -298,6 +313,8 @@ class CellHistorySeries:
                 cell_parse_errors=parse_errors, cell_invalid_records=invalid_records,
                 cell_records_in_window=in_window,
                 cell_records_for_requested_modules=raw_records,
+                cell_seek_mode=(next(iter(seek_modes)) if len(seek_modes) == 1 else "mixed"),
+                cell_skipped_bytes=skipped_bytes,
                 series_points_before_downsampling=sum(raw_points),
                 series_points_after_downsampling=sum(len(x["points"]) for x in projected))
         soc_module_series = [
