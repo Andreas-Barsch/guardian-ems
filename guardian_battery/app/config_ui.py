@@ -68,6 +68,14 @@ _HYCUBE_PROJECTION_PROVIDER = None
 _HYCUBE_BACKFILL_ACTION = None
 _DISPLAY_PROJECTION_PROVIDER = None
 _DISPLAY_PROJECTION_REBUILD_ACTION = None
+_DISPLAY_PROJECTION_STARTUP_LOCK = threading.Lock()
+_DISPLAY_PROJECTION_STARTUP = {
+    "startup_stage": "DISPLAY_INIT_00_NOT_STARTED",
+    "startup_reached_at": None,
+    "startup_completed": False,
+    "startup_error_type": None,
+    "startup_error_message": None,
+}
 _CANONICAL_PHASE_PROVIDER = None
 _CANONICAL_PHASE_REBUILD_ACTION = None
 _AUTOMATIC_POSITION_LOCK = threading.Lock()
@@ -100,6 +108,65 @@ def configure_display_projection(provider, rebuild_action):
     global _DISPLAY_PROJECTION_PROVIDER, _DISPLAY_PROJECTION_REBUILD_ACTION
     _DISPLAY_PROJECTION_PROVIDER = provider
     _DISPLAY_PROJECTION_REBUILD_ACTION = rebuild_action
+
+
+def reset_display_projection_startup():
+    """Reset the process-local trace; production naturally starts in this state."""
+    with _DISPLAY_PROJECTION_STARTUP_LOCK:
+        _DISPLAY_PROJECTION_STARTUP.update(
+            startup_stage="DISPLAY_INIT_00_NOT_STARTED",
+            startup_reached_at=None,
+            startup_completed=False,
+            startup_error_type=None,
+            startup_error_message=None,
+        )
+
+
+def update_display_projection_startup(stage, *, completed=False):
+    """Record one deterministic startup milestone without affecting control flow."""
+    with _DISPLAY_PROJECTION_STARTUP_LOCK:
+        _DISPLAY_PROJECTION_STARTUP.update(
+            startup_stage=stage,
+            startup_reached_at=datetime.now(timezone.utc).isoformat(),
+            startup_completed=bool(completed),
+        )
+        if completed or stage == "DISPLAY_INIT_01_MAIN_REACHED":
+            _DISPLAY_PROJECTION_STARTUP.update(
+                startup_error_type=None, startup_error_message=None)
+
+
+def record_display_projection_startup_error(exc):
+    """Attach an exception to the last reached stage without swallowing it."""
+    with _DISPLAY_PROJECTION_STARTUP_LOCK:
+        _DISPLAY_PROJECTION_STARTUP.update(
+            startup_completed=False,
+            startup_error_type=type(exc).__name__,
+            startup_error_message=str(exc),
+        )
+
+
+def display_projection_startup_status():
+    with _DISPLAY_PROJECTION_STARTUP_LOCK:
+        return dict(_DISPLAY_PROJECTION_STARTUP)
+
+
+def start_display_projection_traced(projection_factory, worker_factory):
+    """Run the existing startup sequence while preserving its exception behavior."""
+    try:
+        update_display_projection_startup("DISPLAY_INIT_03_CONSTRUCTOR_ENTER")
+        projection = projection_factory()
+        update_display_projection_startup("DISPLAY_INIT_04_CONSTRUCTOR_EXIT")
+        worker = worker_factory(projection)
+        configure_display_projection(worker.status, worker.request_historical_rebuild)
+        update_display_projection_startup("DISPLAY_INIT_05_PROVIDER_REGISTERED")
+        update_display_projection_startup("DISPLAY_INIT_06_WORKER_START_ENTER")
+        worker.start()
+        update_display_projection_startup("DISPLAY_INIT_07_WORKER_STARTED")
+        update_display_projection_startup("DISPLAY_INIT_08_COMPLETE", completed=True)
+        return worker
+    except Exception as exc:
+        record_display_projection_startup_error(exc)
+        raise
 
 
 def configure_canonical_phase(provider, rebuild_action):
@@ -510,7 +577,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = (_DISPLAY_PROJECTION_PROVIDER()
                        if _DISPLAY_PROJECTION_PROVIDER else
                        {"enabled": False, "state": "disabled"})
-            self._send(200, payload); return
+            self._send(200, {**payload, **display_projection_startup_status()}); return
         if self.path.rstrip('/').endswith('/api/canonical-phase/status'):
             payload = (_CANONICAL_PHASE_PROVIDER() if _CANONICAL_PHASE_PROVIDER else
                        {"enabled": False, "state": "disabled"})

@@ -35,10 +35,13 @@ from display_history_projection import (DisplayHistoryProjection,
                                         DisplayHistoryProjectionWorker)
 from canonical_phase import (CanonicalPhaseProjection, CanonicalPhaseWorker,
                              DEFAULT_CANONICAL_PHASE_DIR)
-from config_ui import (configure_canonical_phase, configure_display_projection, configure_hycube_projection,
+from config_ui import (configure_canonical_phase, configure_hycube_projection,
+                       display_projection_startup_status,
                        configure_maintenance_live_publisher,
                        configure_rs485_status_provider,
-                       record_stable_observed_positions, start_config_server)
+                       record_stable_observed_positions, start_config_server,
+                       start_display_projection_traced,
+                       update_display_projection_startup)
 from maintenance_mqtt import MaintenanceMqttPublisher
 from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
 from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
@@ -1417,6 +1420,7 @@ def log_result(modules: list[Module], status: str, alarms: list[dict], detailed:
 
 
 def main() -> None:
+    update_display_projection_startup("DISPLAY_INIT_01_MAIN_REACHED")
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
@@ -1570,17 +1574,17 @@ def main() -> None:
         hycube_collector = None
         LOG.warning("Hycube read-only collector konnte nicht gestartet werden: %s",
                     type(exc).__name__)
+    update_display_projection_startup("DISPLAY_INIT_02_DEPENDENCIES_READY")
     try:
-        display_projection_worker = DisplayHistoryProjectionWorker(
-            DisplayHistoryProjection(CELL_HISTORY_DIR, HYCUBE_PROJECTION_DIR,
-                                     DISPLAY_HISTORY_DIR))
-        configure_display_projection(display_projection_worker.status,
-                                     display_projection_worker.request_historical_rebuild)
-        display_projection_worker.start()
+        display_projection_worker = start_display_projection_traced(
+            lambda: DisplayHistoryProjection(
+                CELL_HISTORY_DIR, HYCUBE_PROJECTION_DIR, DISPLAY_HISTORY_DIR),
+            DisplayHistoryProjectionWorker)
     except Exception as exc:
         display_projection_worker = None
-        LOG.warning("Display History Projection konnte nicht gestartet werden: %s: %s",
-                    type(exc).__name__, exc)
+        startup = display_projection_startup_status()
+        LOG.warning("DisplayProjection startup failed at %s: %s: %s",
+                    startup["startup_stage"], type(exc).__name__, exc)
     try:
         canonical_phase_worker = CanonicalPhaseWorker(CanonicalPhaseProjection(
             CELL_HISTORY_DIR, DEFAULT_CANONICAL_PHASE_DIR,
