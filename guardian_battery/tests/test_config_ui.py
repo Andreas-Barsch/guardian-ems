@@ -109,9 +109,8 @@ def test_display_projection_status_and_rebuild_use_existing_ingress(monkeypatch)
     assert captured[-1][0] == 200
     assert captured[-1][1] == {
         'enabled': True, 'state': 'available',
-        'startup_stage': 'DISPLAY_INIT_00_NOT_STARTED',
-        'startup_reached_at': None, 'startup_completed': False,
-        'startup_error_type': None, 'startup_error_message': None,
+        'startup_status': 'starting', 'started_at': None,
+        'last_startup_error': None,
     }
     handler.path = '/api/hassio_ingress/token/api/display-projection/rebuild'
     handler.do_POST(); handler.do_POST()

@@ -49,6 +49,7 @@ from guardian_diagnostics_ui import render_guardian_diagnostics_html
 from config_history import ConfigHistory
 from phase_engine import PhaseEngine
 from version import GUARDIAN_VERSION, DIAGNOSTIC_ENGINE_VERSION
+from research_api import API_ROUTE as RESEARCH_API_ROUTE, GuardianResearchApi, ResearchPaths
 
 OPTIONS_FILE = Path('/data/options.json')
 CONFIG_HISTORY_FILE = Path('/share/guardian_battery/config_history.jsonl')
@@ -62,6 +63,7 @@ _HISTORY_API = None
 _HISTORY_TIMING = HistoryRequestTimingState()
 _POSITION_HISTORY_API = None
 _DIAGNOSTICS_API = None
+_RESEARCH_API = None
 _MAINTENANCE_LIVE_PUBLISHER = None
 _RS485_STATUS_PROVIDER = None
 _HYCUBE_PROJECTION_PROVIDER = None
@@ -75,6 +77,7 @@ _DISPLAY_PROJECTION_STARTUP = {
     "startup_completed": False,
     "startup_error_type": None,
     "startup_error_message": None,
+    "started_at": None,
 }
 _CANONICAL_PHASE_PROVIDER = None
 _CANONICAL_PHASE_REBUILD_ACTION = None
@@ -119,6 +122,7 @@ def reset_display_projection_startup():
             startup_completed=False,
             startup_error_type=None,
             startup_error_message=None,
+            started_at=None,
         )
 
 
@@ -130,6 +134,9 @@ def update_display_projection_startup(stage, *, completed=False):
             startup_reached_at=datetime.now(timezone.utc).isoformat(),
             startup_completed=bool(completed),
         )
+        if stage == "DISPLAY_INIT_01_MAIN_REACHED":
+            _DISPLAY_PROJECTION_STARTUP["started_at"] = (
+                _DISPLAY_PROJECTION_STARTUP["startup_reached_at"])
         if completed or stage == "DISPLAY_INIT_01_MAIN_REACHED":
             _DISPLAY_PROJECTION_STARTUP.update(
                 startup_error_type=None, startup_error_message=None)
@@ -148,6 +155,65 @@ def record_display_projection_startup_error(exc):
 def display_projection_startup_status():
     with _DISPLAY_PROJECTION_STARTUP_LOCK:
         return dict(_DISPLAY_PROJECTION_STARTUP)
+
+
+def _technical_debug_enabled():
+    return os.environ.get("GUARDIAN_TECHNICAL_DEBUG", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def public_display_projection_startup_status():
+    """Keep verbose DISPLAY_INIT stages internal unless debug is explicit."""
+    value = display_projection_startup_status()
+    if _technical_debug_enabled():
+        return value
+    return {"startup_status": ("started" if value["startup_completed"] else
+                               "error" if value["startup_error_type"] else "starting"),
+            "started_at": value["started_at"],
+            "last_startup_error": ({"type": value["startup_error_type"],
+                                    "message": value["startup_error_message"]}
+                                   if value["startup_error_type"] else None)}
+
+
+def _public_history_timing(value):
+    if _technical_debug_enabled():
+        return value
+    last = (value or {}).get("last_completed_request") or {}
+    counts = last.get("counts") or {}
+    stages = last.get("stages") or {}
+    total = last.get("total") or {}
+    return {"last_completed_request": {
+        "history_total_wall_seconds": total.get("wall_seconds"),
+        "history_source_mode": counts.get("hycube_source_mode"),
+        "fallback": counts.get("hycube_raw_fallback_reason"),
+        "records": counts.get("series_points_after_downsampling"),
+        "response_bytes": counts.get("response_bytes"),
+        "response_write_seconds": (stages.get("response_write") or {}).get("wall_seconds")}}
+
+
+def _public_collector_timing(value):
+    """Expose operational health normally; detailed profiling only in debug mode."""
+    if _technical_debug_enabled() or not isinstance(value, dict):
+        return value
+    result = {key: value.get(key) for key in (
+        "poll_target_s", "cell_target_s", "cycle_overrun_count",
+        "cycle_overrun_max_seconds", "cell_overrun_count",
+        "cell_overrun_max_seconds", "observability_error_count")}
+    for worker in ("cell_analysis_worker", "derived_persistence_worker", "derived_mqtt_worker"):
+        result[worker] = value.get(worker, {})
+    cycle = value.get("last_completed_cycle") or {}
+    mqtt = cycle.get("mqtt_subtiming") or {}
+    result["last_completed_cycle"] = {
+        key: cycle.get(key) for key in ("cycle_id", "cycle_duration_seconds",
+            "effective_poll_interval_seconds", "state")}
+    result["last_completed_cycle"]["mqtt_subtiming"] = {
+        key: mqtt.get(key) for key in ("connected_after", "mqtt_publish_count",
+            "mqtt_payload_bytes", "mqtt_publish_max_wall_seconds", "return_codes")}
+    cell = value.get("last_completed_cell_cycle") or {}
+    result["last_completed_cell_cycle"] = {
+        key: cell.get(key) for key in ("cycle_id", "cell_generation", "state",
+            "cell_total_main_thread_duration_seconds", "effective_cell_sampling_interval_seconds")}
+    return result
 
 
 def start_display_projection_traced(projection_factory, worker_factory):
@@ -255,6 +321,30 @@ def _get_diagnostics_api():
                     GuardianDiagnosticsRepository(DAILY_DIAGNOSTICS_ROOT))
                 LOG.info("Guardian Diagnostics API/UI initialisiert")
     return _DIAGNOSTICS_API
+
+
+def _get_research_api():
+    """Create the bounded read-only research facade without touching hardware."""
+    global _RESEARCH_API
+    if _RESEARCH_API is None:
+        with _MAINTENANCE_API_LOCK:
+            if _RESEARCH_API is None:
+                _RESEARCH_API = GuardianResearchApi(ResearchPaths(
+                    cell_history=DEFAULT_CELL_HISTORY_DIR,
+                    position_history=DEFAULT_POSITION_HISTORY_FILE,
+                    maintenance=DEFAULT_MAINTENANCE_EVENT_FILE,
+                    canonical_phase=DEFAULT_CANONICAL_PHASE_DIR,
+                    daily_diagnostics=DAILY_DIAGNOSTICS_ROOT,
+                    technical_events=DEFAULT_TECHNICAL_EVENT_FILE,
+                    hycube_history=DEFAULT_HYCUBE_HISTORY_DIR,
+                    hycube_projection=DEFAULT_HYCUBE_PROJECTION_DIR,
+                    hycube_policy=DEFAULT_HYCUBE_POLICY_HISTORY_DIR,
+                    display_history=DEFAULT_DISPLAY_HISTORY_DIR,
+                    config_history=CONFIG_HISTORY_FILE,
+                    rs485_history=DEFAULT_RS485_HISTORY_DIR,
+                ))
+                LOG.info("Guardian Research API initialisiert (read-only)")
+    return _RESEARCH_API
 
 
 def record_stable_observed_positions() -> bool:
@@ -527,6 +617,8 @@ class Handler(BaseHTTPRequestHandler):
         return POSITION_HISTORY_API_ROUTE in self.path.split('?',1)[0]
     def _is_diagnostics_api(self):
         return DIAGNOSTICS_API_ROUTE in self.path.split('?',1)[0]
+    def _is_research_api(self):
+        return RESEARCH_API_ROUTE in self.path.split('?',1)[0]
     def _ingress_base(self):
         header=self.headers.get('X-Ingress-Path','').rstrip('/')
         if header: return header
@@ -563,6 +655,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(response.status,response.body,headers=response.headers)
     def do_GET(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_research_api():
+            response=_get_research_api().handle('GET',self.path)
+            self._send(response.status,response.body,headers=response.headers); return
         if self._is_diagnostics_api(): self._diagnostics_request('GET'); return
         if self.path.rstrip('/').endswith('/api/hycube-projection/status'):
             payload = (_HYCUBE_PROJECTION_PROVIDER() if _HYCUBE_PROJECTION_PROVIDER else
@@ -577,7 +672,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = (_DISPLAY_PROJECTION_PROVIDER()
                        if _DISPLAY_PROJECTION_PROVIDER else
                        {"enabled": False, "state": "disabled"})
-            self._send(200, {**payload, **display_projection_startup_status()}); return
+            self._send(200, {**payload, **public_display_projection_startup_status()}); return
         if self.path.rstrip('/').endswith('/api/canonical-phase/status'):
             payload = (_CANONICAL_PHASE_PROVIDER() if _CANONICAL_PHASE_PROVIDER else
                        {"enabled": False, "state": "disabled"})
@@ -588,7 +683,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip('/').endswith('/api/rs485/status'):
             payload = (_RS485_STATUS_PROVIDER() if _RS485_STATUS_PROVIDER else
                        {"status": {"state": "disabled"}, "management": {}, "history": {}})
-            payload = {**payload, "history_timing": _HISTORY_TIMING.snapshot()}
+            payload = {**payload, "history_timing": _public_history_timing(
+                _HISTORY_TIMING.snapshot())}
+            if "collector_timing" in payload:
+                payload["collector_timing"] = _public_collector_timing(
+                    payload["collector_timing"])
             # Raw protocol frames are intentionally never exposed through ingress.
             management = {str(adr): {key: value for key, value in item.items()
                           if key != "raw_frame"} for adr, item in payload.get("management", {}).items()}
@@ -618,6 +717,9 @@ class Handler(BaseHTTPRequestHandler):
         base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history',modules_path=(base+'/module-information') or '/module-information'),'text/html')
     def do_POST(self):
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._is_research_api():
+            response=_get_research_api().handle('POST',self.path)
+            self._send(response.status,response.body,headers=response.headers); return
         if self._is_diagnostics_api(): self._diagnostics_request('POST'); return
         if self.path.rstrip('/').endswith('/api/hycube-projection/backfill'):
             if _HYCUBE_BACKFILL_ACTION is None:

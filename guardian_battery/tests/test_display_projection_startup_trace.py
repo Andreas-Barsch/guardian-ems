@@ -116,9 +116,7 @@ def test_not_reached_fallback_endpoint_contains_process_startup_state(monkeypatc
     assert captured == [(200, {
         "enabled": False,
         "state": "disabled",
-        "startup_stage": "DISPLAY_INIT_00_NOT_STARTED",
-        "startup_reached_at": None,
-        "startup_completed": False,
-        "startup_error_type": None,
-        "startup_error_message": None,
+        "startup_status": "starting",
+        "started_at": None,
+        "last_startup_error": None,
     })]

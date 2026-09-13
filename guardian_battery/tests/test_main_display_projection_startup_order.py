@@ -122,8 +122,9 @@ def assert_display_ready_and_endpoint_available():
     handler.path = "/api/hassio_ingress/token/api/display-projection/status"
     handler.do_GET()
     assert captured[0][0] == 200
-    assert captured[0][1]["startup_stage"] == "DISPLAY_INIT_08_COMPLETE"
-    assert captured[0][1]["startup_completed"] is True
+    assert captured[0][1]["startup_status"] == "started"
+    assert captured[0][1]["started_at"] is not None
+    assert "startup_stage" not in captured[0][1]
     assert captured[0][1]["enabled"] is True
 
 
