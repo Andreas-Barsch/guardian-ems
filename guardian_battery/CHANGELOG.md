@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.38 – Display Projection Startup Resilience
+
+- Verhindert, dass fehlende oder veraltete Source-Referenzen in rebuildbaren Display-Artefakten den Projektionskonstruktor abbrechen und den Statusprovider als `disabled` erscheinen lassen.
+- Beschädigte Metadaten, abweichende Source-Signaturen und ungültige Open States bleiben als `invalid` beziehungsweise `error` mit `last_error` sichtbar; der Provider wird dennoch registriert und der Worker kann starten.
+- Ungültige Open States werden aus den autoritativen Sources rekonstruiert. Nach wieder verfügbarer gültiger Source kann derselbe Prozess ohne Neustart automatisch zu `available` recovern.
+- Startup-Logs enthalten Exception-Typ und -Message; wiederkehrende Workerfehler bleiben rate-limited.
+- Bucket-, UTC-/Lokaltag-, History-Reader- und Canonical-Semantik bleiben unverändert. Diagnostic Engine bleibt `0.4.12` und Canonical Semantics bleibt `guardian_canonical_phase_v2`.
+- Guardian Battery und Add-on sind `0.7.38`; Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.37 – Display Projection UTC/Local-Day Fix
 
 - Behebt die falsche UTC-Interpretation lokal benannter Cell-History-Dateien: Ein UTC-Projektionstag liest die angrenzenden lokalen Quelldateien und ordnet Records anhand ihres tatsächlichen UTC-Zeitstempels zu.

@@ -2,6 +2,18 @@
 
 Stand: 2026-09-13
 
+## Guardian Battery 0.7.38 – Display Projection Startup Resilience
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.38`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Nach dem Add-on-Start muss `/api/display-projection/status` auch bei veralteten oder beschädigten Derived-Artefakten `enabled: true` liefern. Der Zustand darf vorübergehend `invalid` oder `error`, aber nicht wegen rebuildbarer Bestandsdaten statisch `disabled` sein.
+- `last_error` muss Typ und Ursache eines Bestands- oder Workerfehlers enthalten. Nach erfolgreicher automatischer Verarbeitung einer gültigen Source müssen `last_success` gesetzt, `last_error` geleert und der Zustand `available` sein.
+- Die Current-Day-Projection muss ohne manuellen Rebuild weiterlaufen. Einen historischen Rebuild nur als getrennte, ausdrücklich freigegebene Maintenance-Aktion auslösen.
+- Anschließend einen geeigneten History-Request kontrollieren: `display_days`, `display_bytes` und `display_buckets` müssen bei verfügbarer Projection größer null sein; `history_source_mode` darf dann nicht ausschließlich `full_resolution` sein.
+- Dieser Release ändert weder Bucket-, UTC-/Lokaltag-, Reader- oder Canonical-Semantik noch Raw Evidence, Collector, MQTT, RS485, Diagnostics, Risk, Navigation oder Anlagensteuerung.
+- Source-Release und produktive Installation bleiben getrennte Zustände. Dieser Auftrag führt kein Deployment, keinen Neustart, keinen produktiven Rebuild und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.37 – Display Projection UTC/Local-Day Fix
 
 ### Produktive Abnahme nach separatem Deployment
