@@ -1,6 +1,6 @@
 # Guardian Research MCP
 
-Development version `0.0.0-dev` is a separate, provider-neutral, read-only
+Version `0.8.0` is a separate, provider-neutral, read-only
 Streamable HTTP MCP adapter for Guardian Battery's Research API.
 
 ## Contract
@@ -14,8 +14,9 @@ Streamable HTTP MCP adapter for Guardian Battery's Research API.
 - Exposure: port 8098 is not published by default
 - Storage: the add-on has no Guardian `/share` or `/config` mount
 
-Set the same non-empty `guardian_api_token` in Guardian Battery and this
-add-on. Set a separate non-empty `mcp_auth_token` for MCP clients. Empty tokens
+Set the same non-empty secret in Guardian Battery's
+`guardian_research_api_token` option and this add-on's `guardian_api_token`
+option. Set a separate non-empty `mcp_auth_token` for MCP clients. Empty tokens
 do not enable unauthenticated production access. `development_auth_mode` is
 only for isolated tests and must remain false in production.
 

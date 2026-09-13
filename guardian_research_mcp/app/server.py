@@ -17,7 +17,7 @@ from settings import Settings, load_settings
 from tools import register_tools
 
 SERVICE = "guardian-research-mcp"
-VERSION = "0.0.0-dev"
+VERSION = "0.8.0"
 MAX_MCP_REQUEST_BYTES = 1024 * 1024
 
 

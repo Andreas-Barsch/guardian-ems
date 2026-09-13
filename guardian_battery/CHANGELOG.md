@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.8.0 – Guardian Research API Integration
+
+- Ergänzt eine interne, provider-neutrale und strikt read-only Guardian Research API mit gemeinsamem Research Envelope, zeitbezogener Physical-Serial-/Identity-Epoch-Auflösung und expliziter Data-Coverage-Semantik.
+- Stellt bounded Module-, Cell- und generische Timeseries-History sowie Canonical-Phase-, Daily-Diagnostics-, Diagnostic-Evidence-, Maintenance-, Alarm- und Low-Voltage-Evidence bereit. Fehlende Evidence wird nicht als Nullwert interpretiert.
+- Liefert deterministische SOC-Crash-Events und reproduzierbare Evidence Packages mit stabiler Provenienz und Fingerprint, ohne kausale oder `INFERRED` Aussagen zu erzeugen.
+- Aktiviert optionalen Maschinenzugang ausschließlich für `GET /api/research/*`. Die Option `guardian_research_api_token` muss denselben geheimen Wert wie `guardian_api_token` im MCP-Add-on enthalten; ein leerer Guardian-Token deaktiviert den Maschinenzugang. Andere Guardian-Routen bleiben ingress-only.
+- Phase-A-Stabilisierung reduziert frühere Startup-Diagnoseausgaben auf kompakten Betriebsstatus; Evidence Stores und wertvolle Betriebsobservability bleiben erhalten.
+- Guardian Battery und Add-on sind `0.8.0`; Diagnostic Engine bleibt `0.4.12`, Canonical Semantics bleibt `guardian_canonical_phase_v2` und Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.41 – Incremental Display Open-Day Publication
 
 - Macht Current-Day Display History bereits während des bounded Bootstrap sichtbar; Open-Day-Buckets warten nicht mehr auf den globalen Catch-up aller Quellen.

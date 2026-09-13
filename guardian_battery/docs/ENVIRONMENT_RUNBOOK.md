@@ -1,6 +1,18 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-09-13
+Stand: 2026-09-14
+
+## Guardian Battery 0.8.0 – Research API Integration
+
+### Konfiguration und spätere getrennte Abnahme
+
+- Guardian Battery und Guardian Research MCP verwenden für den internen Maschinenkanal denselben geheimen Wert, aber unterschiedliche Optionsnamen: Guardian `guardian_research_api_token`, MCP `guardian_api_token`. Ein leerer Guardian-Wert deaktiviert diesen Zugang.
+- Der separate `mcp_auth_token` authentifiziert spätere MCP-Clients und darf nicht mit dem internen Guardian-API-Token gleichgesetzt werden. `development_auth_mode` bleibt produktiv `false`.
+- Der Maschinenkanal erlaubt ausschließlich `GET /api/research/*`. POST bleibt 405; PUT, PATCH und DELETE sind nicht Teil des Research-Vertrags. Alle Nicht-Research-Routen behalten den bestehenden Ingress-Schutz.
+- Das MCP-Add-on besitzt standardmäßig keinen veröffentlichten Host-Port und keine `/share`-/`/config`-Mounts. Öffentliche Exposition, externe AI, HA-Adapter und Phase D sind nicht Bestandteil dieses Releases.
+- Nach einem späteren separaten Deployment Versionen, `/health`, Auth-, Host-/Origin-Schutz, `initialize`, exakt 15 read-only Tools und kontrolliertes Guardian-Down/Recovery-Verhalten abnehmen. Keine reale Batterie-Evidence für einen reinen Transporttest abfragen.
+- Guardian/Add-on: `0.8.0`; Guardian Research MCP: `0.8.0`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`.
+- Diese Release-Vorbereitung führt kein Deployment, keinen Neustart, keine Tokenkonfiguration und keinen produktiven `/share`- oder `/config`-Zugriff aus.
 
 ## Guardian Battery 0.7.41 – Incremental Display Open-Day Publication
 

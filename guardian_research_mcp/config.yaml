@@ -1,5 +1,5 @@
 name: Guardian Research MCP
-version: 0.0.0-dev
+version: 0.8.0
 slug: guardian_research_mcp
 description: Provider-neutral read-only MCP transport for Guardian Research API evidence.
 arch:

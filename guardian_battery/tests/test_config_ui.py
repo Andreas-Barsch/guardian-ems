@@ -196,6 +196,13 @@ def test_research_machine_access_is_bearer_protected_and_read_only(monkeypatch):
             urllib.request.urlopen(request, timeout=3)
         assert rejected.value.code == 405
         assert rejected.value.headers['Allow'] == 'GET'
+
+        non_research = urllib.request.Request(
+            url.replace('/api/research/status', '/api/rs485/status'),
+            headers={'Authorization': 'Bearer machine-secret'})
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(non_research, timeout=3)
+        assert denied.value.code == 403
     finally:
         server.shutdown()
         server.server_close()
@@ -206,6 +213,33 @@ def test_empty_research_machine_token_disables_access(monkeypatch):
     handler = object.__new__(Handler)
     handler.headers = {'Authorization': 'Bearer anything'}
     assert handler._research_machine_allowed() is False
+
+
+def test_ingress_research_access_remains_available(monkeypatch):
+    class ResearchStub:
+        def handle(self, method, target):
+            return ApiResponse(200, {'read_only': True, 'target': target})
+
+    monkeypatch.setattr(config_ui, '_RESEARCH_API', ResearchStub())
+    handler = object.__new__(Handler)
+    handler.path = '/api/hassio_ingress/session/api/research/status'
+    handler.headers = {'X-Ingress-Path': '/api/hassio_ingress/session'}
+    handler._ingress_allowed = lambda: True
+    captured = []
+    handler._send = lambda code, body, *args, **kwargs: captured.append((code, body))
+
+    handler.do_GET()
+
+    assert captured == [(200, {'read_only': True, 'target': handler.path})]
+
+
+def test_research_machine_option_name_matches_runtime_export():
+    root = Path(__file__).resolve().parents[1]
+    manifest = (root / 'config.yaml').read_text(encoding='utf-8')
+    run_script = (root / 'run.sh').read_text(encoding='utf-8')
+    assert 'guardian_research_api_token:' in manifest
+    assert "bashio::config 'guardian_research_api_token'" in run_script
+    assert '\n  research_api_token:' not in manifest
 
 
 def test_every_ingress_page_links_modules_to_explicit_prefixed_route(monkeypatch):

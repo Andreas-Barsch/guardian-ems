@@ -41,7 +41,7 @@ class GuardianResearchClient:
         headers = {
             "Authorization": "Bearer " + self.settings.guardian_api_token,
             "Accept": "application/json",
-            "User-Agent": "guardian-research-mcp/0.0.0-dev",
+            "User-Agent": "guardian-research-mcp/0.8.0",
         }
         try:
             async with httpx2.AsyncClient(

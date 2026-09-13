@@ -280,6 +280,7 @@ def test_protocol_discovery_security_health_and_read_only_catalog():
             health = http.get(base + "/health", headers={
                 "Authorization": "Bearer " + TOKEN})
             assert health.status_code == 200
+            assert health.json()["version"] == "0.8.0"
             assert set(health.json()) == {"service", "version", "transport",
                 "guardian_reachable", "active_queries", "queued_queries", "last_error"}
 
