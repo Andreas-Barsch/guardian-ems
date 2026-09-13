@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.37 – Display Projection UTC/Local-Day Fix
+
+- Behebt die falsche UTC-Interpretation lokal benannter Cell-History-Dateien: Ein UTC-Projektionstag liest die angrenzenden lokalen Quelldateien und ordnet Records anhand ihres tatsächlichen UTC-Zeitstempels zu.
+- Beseitigt den permanenten Worker-Error-Loop am ersten Record eines lokalen Tages und ermöglicht damit den produktiven Aufbau der Display Projection sowie den bestehenden schnellen History-Pfad statt Full-Resolution-Fallback.
+- Source Cursor und Signatures sind quelldateibezogen; bisherige und neue Signatur-Keys bleiben lesbar. Hycube bleibt unverändert UTC-tagesbasiert.
+- Der Worker kann nach einem korrigierten Fehlerzustand ohne Neustart weiterarbeiten, exponiert `last_error` im Status und loggt identische Fehler rate-limited.
+- Bucketsemantik, Auflösungen, Canonical Phase, History UI, Downsampling, Raw Evidence und Diagnostic Engine bleiben unverändert.
+- Guardian Battery und Add-on sind `0.7.37`; Diagnostic Engine bleibt `0.4.12`, Canonical Semantics bleibt `guardian_canonical_phase_v2` und Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.36 – History UI Contract Regression Fix
 
 - Ergänzt das fehlende `source: "hycube"` im Contract der Display-Hycube-Serie und verhindert damit den JavaScript-Abbruch der SOC-Legende.

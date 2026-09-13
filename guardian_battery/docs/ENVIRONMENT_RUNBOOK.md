@@ -1,6 +1,18 @@
 # Guardian EMS – Environment Runbook
 
-Stand: 2026-09-11
+Stand: 2026-09-13
+
+## Guardian Battery 0.7.37 – Display Projection UTC/Local-Day Fix
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.37`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Nach dem normalen Add-on-Start den Display-Projection-Status beobachten. Der Worker muss ohne manuellen Rebuild aus dem bisherigen Fehlerzustand recovern, `last_success` setzen und Current-Day-Derived-Daten erzeugen; `last_error` muss nach Erfolg leer sein.
+- Danach denselben History-Referenzrequest prüfen: `display_days`, `display_bytes` und `display_buckets` müssen größer null sein und `history_source_mode` darf bei vollständig verfügbarer Projection nicht `full_resolution` sein.
+- Falls ein Fehler verbleibt, den neuen `last_error`-Status und die rate-limited Workerwarnung dokumentieren. Wiederholte identische Fehler werden bewusst nicht in jedem Workerzyklus geloggt.
+- Vier aktive Module bei sechs konfigurierten Positionen und temporär fehlende Hycube-Samples dürfen den Display-Worker nicht blockieren. Fehlende Werte werden nicht erfunden.
+- Dieser Release ändert weder Bucketsemantik, Auflösungen, Canonical Phase, History UI, Downsampling, Raw Evidence, Diagnostics, Risk, MQTT, RS485 noch Navigation.
+- Source-Release und produktive Installation bleiben getrennte Zustände. Dieser Auftrag führt kein Deployment, keinen Neustart, keinen manuellen Rebuild und keinen produktiven `/share`- oder `/config`-Zugriff aus.
 
 ## Guardian Battery 0.7.36 – History UI Contract Regression Fix
 
