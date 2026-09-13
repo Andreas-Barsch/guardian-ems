@@ -41,6 +41,7 @@ options:
   hycube_timeout_seconds: 0.8
   mqtt_topic_prefix: guardian
   publish_discovery: true
+  research_api_token: ""
 
   warning_cell_delta_mv: 30
   critical_cell_delta_mv: 80
@@ -138,6 +139,7 @@ schema:
   hycube_timeout_seconds: float(0.1,10)
   mqtt_topic_prefix: str
   publish_discovery: bool
+  research_api_token: str
 
   warning_cell_delta_mv: int(1,1000)
   critical_cell_delta_mv: int(1,1000)

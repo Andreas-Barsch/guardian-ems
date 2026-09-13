@@ -4,9 +4,11 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+import pytest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 import config_ui
 from config_ui import DEFAULTS, Handler, validate
+from maintenance_api import ApiResponse
 
 def test_defaults_valid():
     assert validate(dict(DEFAULTS)) == []
@@ -160,6 +162,50 @@ def test_real_http_direct_ui_routes_remain_distinct(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_research_machine_access_is_bearer_protected_and_read_only(monkeypatch):
+    class ResearchStub:
+        def handle(self, method, target):
+            if method == 'GET':
+                return ApiResponse(200, {'read_only': True, 'target': target})
+            return ApiResponse(405, {'error': {'code': 'invalid_argument'}},
+                               {'Allow': 'GET'})
+
+    monkeypatch.setattr(config_ui, 'RESEARCH_API_TOKEN', 'machine-secret')
+    monkeypatch.setattr(config_ui, '_RESEARCH_API', ResearchStub())
+    server = config_ui.start_config_server(port=0, bind_host='127.0.0.1')
+    url = f"http://127.0.0.1:{server.server_address[1]}/api/research/status"
+    try:
+        for supplied in (None, 'Bearer wrong', 'Basic machine-secret'):
+            headers = {'Authorization': supplied} if supplied else {}
+            with pytest.raises(urllib.error.HTTPError) as denied:
+                urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=3)
+            assert denied.value.code == 403
+
+        request = urllib.request.Request(
+            url, headers={'Authorization': 'Bearer machine-secret'})
+        with urllib.request.urlopen(request, timeout=3) as response:
+            assert response.status == 200
+            assert json.loads(response.read())['read_only'] is True
+
+        request = urllib.request.Request(
+            url, data=b'', method='POST',
+            headers={'Authorization': 'Bearer machine-secret'})
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            urllib.request.urlopen(request, timeout=3)
+        assert rejected.value.code == 405
+        assert rejected.value.headers['Allow'] == 'GET'
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_empty_research_machine_token_disables_access(monkeypatch):
+    monkeypatch.setattr(config_ui, 'RESEARCH_API_TOKEN', '')
+    handler = object.__new__(Handler)
+    handler.headers = {'Authorization': 'Bearer anything'}
+    assert handler._research_machine_allowed() is False
 
 
 def test_every_ingress_page_links_modules_to_explicit_prefixed_route(monkeypatch):

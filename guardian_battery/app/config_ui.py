@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import urllib.error
@@ -56,6 +57,7 @@ CONFIG_HISTORY_FILE = Path('/share/guardian_battery/config_history.jsonl')
 DAILY_DIAGNOSTICS_ROOT = Path('/share/guardian_battery/diagnostics')
 SUPERVISOR = 'http://supervisor'
 TOKEN = os.environ.get('SUPERVISOR_TOKEN', '')
+RESEARCH_API_TOKEN = os.environ.get('GUARDIAN_RESEARCH_API_TOKEN', '')
 _MAINTENANCE_API = None
 _MAINTENANCE_API_LOCK = threading.Lock()
 _TIMELINE_API = None
@@ -585,6 +587,12 @@ load().catch(e=>document.getElementById('status').textContent='Fehler: '+e);</sc
 class Handler(BaseHTTPRequestHandler):
     def _ingress_allowed(self):
         return self.client_address[0] == '172.30.32.2'
+    def _research_machine_allowed(self):
+        if not RESEARCH_API_TOKEN:
+            return False
+        scheme, _, supplied = self.headers.get('Authorization', '').partition(' ')
+        return scheme.lower() == 'bearer' and bool(supplied) and secrets.compare_digest(
+            supplied, RESEARCH_API_TOKEN)
     def log_message(self,*_): pass
     def _send(self,code,body,ctype='application/json',headers=None):
         raw=body.encode() if isinstance(body,str) else json.dumps(body,ensure_ascii=False).encode()
@@ -654,6 +662,9 @@ class Handler(BaseHTTPRequestHandler):
         response=_get_maintenance_api().handle(method,self.path,dict(self.headers.items()),body)
         self._send(response.status,response.body,headers=response.headers)
     def do_GET(self):
+        if self._is_research_api() and self._research_machine_allowed():
+            response=_get_research_api().handle('GET',self.path)
+            self._send(response.status,response.body,headers=response.headers); return
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self._is_research_api():
             response=_get_research_api().handle('GET',self.path)
@@ -716,6 +727,9 @@ class Handler(BaseHTTPRequestHandler):
             base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics',modules_path=(base+'/module-information') or '/module-information'),'text/html'); return
         base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history',modules_path=(base+'/module-information') or '/module-information'),'text/html')
     def do_POST(self):
+        if self._is_research_api() and self._research_machine_allowed():
+            response=_get_research_api().handle('POST',self.path)
+            self._send(response.status,response.body,headers=response.headers); return
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
         if self._is_research_api():
             response=_get_research_api().handle('POST',self.path)

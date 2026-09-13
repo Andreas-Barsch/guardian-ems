@@ -1,0 +1,31 @@
+name: Guardian Research MCP
+version: 0.0.0-dev
+slug: guardian_research_mcp
+description: Provider-neutral read-only MCP transport for Guardian Research API evidence.
+arch:
+  - aarch64
+startup: application
+boot: manual
+init: false
+ingress: false
+hassio_api: false
+ports:
+  8098/tcp: null
+ports_description:
+  8098/tcp: MCP Streamable HTTP (explicit exposure only)
+options:
+  guardian_base_url: null
+  guardian_api_token: ""
+  mcp_auth_token: ""
+  development_auth_mode: false
+  allowed_hosts: guardian_research_mcp,localhost,127.0.0.1
+  allowed_origins: ""
+  log_level: INFO
+schema:
+  guardian_base_url: url
+  guardian_api_token: password
+  mcp_auth_token: password
+  development_auth_mode: bool
+  allowed_hosts: str
+  allowed_origins: str
+  log_level: list(DEBUG|INFO|WARNING|ERROR|CRITICAL)
