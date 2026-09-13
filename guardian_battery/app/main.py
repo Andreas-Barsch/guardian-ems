@@ -1431,6 +1431,18 @@ def main() -> None:
     )
     config_server = start_config_server()
     LOG.info("Guardian Konfigurationsmenü auf Port 8099 gestartet")
+    display_projection_worker = None
+    update_display_projection_startup("DISPLAY_INIT_02_DEPENDENCIES_READY")
+    try:
+        display_projection_worker = start_display_projection_traced(
+            lambda: DisplayHistoryProjection(
+                CELL_HISTORY_DIR, HYCUBE_PROJECTION_DIR, DISPLAY_HISTORY_DIR),
+            DisplayHistoryProjectionWorker)
+    except Exception as exc:
+        display_projection_worker = None
+        startup = display_projection_startup_status()
+        LOG.warning("DisplayProjection startup failed at %s: %s: %s",
+                    startup["startup_stage"], type(exc).__name__, exc)
     config_history = ConfigHistory(CONFIG_HISTORY_FILE)
     try:
         config_record = config_history.record_if_changed(options)
@@ -1532,7 +1544,6 @@ def main() -> None:
     module_infos: dict[int, dict] = {}
     identity_resolution_log: dict[int, tuple[str, int | None]] = {}
     daily_worker = None
-    display_projection_worker = None
     canonical_phase_worker = None
 
     if rs485_reader is not None:
@@ -1574,17 +1585,6 @@ def main() -> None:
         hycube_collector = None
         LOG.warning("Hycube read-only collector konnte nicht gestartet werden: %s",
                     type(exc).__name__)
-    update_display_projection_startup("DISPLAY_INIT_02_DEPENDENCIES_READY")
-    try:
-        display_projection_worker = start_display_projection_traced(
-            lambda: DisplayHistoryProjection(
-                CELL_HISTORY_DIR, HYCUBE_PROJECTION_DIR, DISPLAY_HISTORY_DIR),
-            DisplayHistoryProjectionWorker)
-    except Exception as exc:
-        display_projection_worker = None
-        startup = display_projection_startup_status()
-        LOG.warning("DisplayProjection startup failed at %s: %s: %s",
-                    startup["startup_stage"], type(exc).__name__, exc)
     try:
         canonical_phase_worker = CanonicalPhaseWorker(CanonicalPhaseProjection(
             CELL_HISTORY_DIR, DEFAULT_CANONICAL_PHASE_DIR,
