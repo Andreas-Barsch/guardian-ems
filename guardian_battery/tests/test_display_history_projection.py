@@ -1,4 +1,5 @@
 import json
+import gzip
 import logging
 import statistics
 import sys
@@ -348,6 +349,144 @@ def test_current_day_initializes_large_four_of_six_stack_without_hycube(tmp_path
     assert status["open_days"] == 1 and status["last_success"] is not None
 
 
+def test_current_day_publishes_closed_buckets_before_bounded_catch_up(tmp_path):
+    today = "2026-09-02"; base = datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp()
+    rows = [cell_record(base + index * 5, soc=index % 100) for index in range(180)]
+    cell = tmp_path / "cell"; output = tmp_path / "display"
+    write_rows(cell / f"{today}.jsonl", rows)
+    core = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                    max_records=150, clock=lambda: NOW)
+
+    result = core.process_chunk(today)
+
+    assert result["records_processed"] == 150 and result["caught_up"] is False
+    status = core.status()
+    assert status["days"] == 1 and status["open_days"] == 1
+    assert status["storage_bytes"] > 0
+    assert status["last_record_processed"] == NOW
+    assert status["last_projection_write"] == NOW
+    assert status["bootstrap_caught_up"] is False
+    assert status["bootstrap_records"] == 150 and status["bootstrap_bytes"] > 0
+    assert by(read_projection(output, "1m", today), "soc")
+
+    meta = json.loads((output / "1m" / f"{today}.meta.json").read_text())
+    source_key = f"cell:{today}.jsonl"
+    assert meta["status"] == "open"
+    assert 0 < meta["source_offsets"][source_key] < meta["source_sizes"][source_key]
+
+
+def test_partial_publication_uses_per_source_watermarks_for_every_resolution(tmp_path):
+    today = "2026-09-02"; base = datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp()
+    rows = [cell_record(base + second, soc=second % 101)
+            for second in range(0, 4000, 5)]
+    cell = tmp_path / "cell"; output = tmp_path / "display"
+    write_rows(cell / f"{today}.jsonl", rows)
+    core = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                    max_records=730, clock=lambda: NOW)
+    result = core.process_chunk(today)
+    assert result["caught_up"] is False
+    watermark = rows[729]["timestamp"]
+
+    for resolution in RESOLUTIONS:
+        path = output / resolution / f"{today}.jsonl.gz"
+        assert path.is_file(), resolution
+        packed = [json.loads(line) for line in gzip.open(path, "rt", encoding="utf-8")]
+        assert packed, resolution
+        assert all(datetime.fromisoformat(item["bucket_end"]).timestamp() <= watermark
+                   for item in packed)
+
+
+def test_adjacent_local_file_backlog_does_not_hide_reached_current_day_buckets(tmp_path):
+    today = "2026-09-02"; base = datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp()
+    cell = tmp_path / "cell"; output = tmp_path / "display"
+    previous = [cell_record(base - 86400 + index * 5) for index in range(80)]
+    current = [cell_record(base + index * 65, soc=index) for index in range(100)]
+    following = [cell_record(base + 22 * 3600 + index * 5) for index in range(100)]
+    write_rows(cell / "2026-09-01.jsonl", previous)
+    write_rows(cell / f"{today}.jsonl", current)
+    write_rows(cell / "2026-09-03.jsonl", following)
+    core = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                    max_records=150, clock=lambda: NOW)
+
+    result = core.process_chunk(today)
+
+    assert result["caught_up"] is False
+    assert core.status()["open_days"] == 1
+    assert by(read_projection(output, "1m", today), "soc")
+
+
+def test_large_hycube_tail_does_not_block_closed_cell_buckets(tmp_path):
+    today = "2026-09-02"; base = datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp()
+    cell = tmp_path / "cell"; hycube = tmp_path / "hycube"; output = tmp_path / "display"
+    write_rows(cell / f"{today}.jsonl", [
+        cell_record(base + index * 65, soc=index) for index in range(100)])
+    write_rows(hycube / f"{today}.jsonl", [hycube_record(
+        datetime.fromtimestamp(base + index * 5, timezone.utc).isoformat(), index % 100)
+        for index in range(1000)])
+    core = DisplayHistoryProjection(cell, hycube, output,
+                                    max_records=150, clock=lambda: NOW)
+
+    result = core.process_chunk(today)
+
+    assert result["caught_up"] is False
+    assert by(read_projection(output, "1m", today), "soc")
+    assert core.status()["open_days"] == 1
+
+
+def test_partial_open_day_restart_resumes_without_duplicates_and_matches_full_result(tmp_path):
+    today = "2026-09-02"; base = datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp()
+    rows = [cell_record(base + index * 5, soc=(index * 7) % 101,
+                        current=(index % 17) - 8) for index in range(1200)]
+    cell = tmp_path / "cell"; output = tmp_path / "display"
+    write_rows(cell / f"{today}.jsonl", rows)
+    partial = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                       max_records=730, clock=lambda: NOW)
+    assert partial.process_chunk(today)["caught_up"] is False
+    prefix = {resolution: (output / resolution / f"{today}.jsonl.gz").read_bytes()
+              for resolution in RESOLUTIONS}
+
+    resumed = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                       max_records=370, clock=lambda: NOW)
+    assert resumed.process_chunk(today)["caught_up"] is False
+    for resolution in RESOLUTIONS:
+        assert (output / resolution / f"{today}.jsonl.gz").read_bytes().startswith(
+            prefix[resolution])
+    while not resumed.process_chunk(today)["caught_up"]:
+        pass
+
+    expected_output = tmp_path / "expected"
+    expected = DisplayHistoryProjection(cell, tmp_path / "hycube", expected_output,
+                                        max_records=5000, clock=lambda: NOW)
+    assert expected.process_chunk(today)["caught_up"] is True
+    for resolution in RESOLUTIONS:
+        assert read_projection(output, resolution, today) == read_projection(
+            expected_output, resolution, today)
+
+
+def test_partial_open_day_is_used_by_history_before_global_catch_up(tmp_path):
+    today = "2026-09-02"; base = datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp()
+    cell = tmp_path / "cell"; output = tmp_path / "display"
+    write_rows(cell / f"{today}.jsonl", [
+        cell_record(base + index * 5, soc=index % 100) for index in range(180)])
+    core = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                    max_records=150, clock=lambda: NOW)
+    assert core.process_chunk(today)["caught_up"] is False
+
+    from display_history_reader import DisplayHistoryReader
+    from history_series import CellHistorySeries
+    history = DisplayHistoryReader(output, cell, tmp_path / "hycube",
+                                   CellHistorySeries(cell)).query_bundles(
+        requests=({"metric": "soc"},),
+        timestamp_from="2026-09-02T00:00:00+00:00",
+        timestamp_to="2026-09-03T00:00:00+00:00",
+        module_number=1, module_numbers=(1,), include_all_module_soc=True)
+    observability = history["display_observability"]
+    assert observability["display_days"] > 0
+    assert observability["display_bytes"] > 0
+    assert observability["display_buckets"] > 0
+    assert observability["history_source_mode"] != "full_resolution"
+
+
 def _current_day_projection(tmp_path):
     today = "2026-09-02"
     cell = tmp_path / "cell"
@@ -475,7 +614,10 @@ def test_clean_start_remains_enabled_and_idle(tmp_path):
     assert core.status() == {
         "enabled": True, "state": "idle", "days": 0, "complete_days": 0,
         "open_days": 0, "invalid_days": 0, "storage_bytes": 0,
-        "last_success": None, "failure_count": 0, "last_error": None,
+        "last_success": None, "last_record_processed": None,
+        "last_projection_write": None, "bootstrap_caught_up": False,
+        "bootstrap_records": 0, "bootstrap_bytes": 0,
+        "failure_count": 0, "last_error": None,
         "rebuild": {"status": "idle", "days_total": 0, "days_completed": 0,
                     "current_file": None, "records": 0, "bytes": 0,
                     "buckets": 0, "errors": 0},

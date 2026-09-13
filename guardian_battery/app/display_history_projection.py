@@ -230,6 +230,10 @@ class DisplayHistoryProjection:
         self._status = {"enabled": True, "state": "idle", "days": 0,
                         "complete_days": 0, "open_days": 0, "invalid_days": 0,
                         "storage_bytes": 0, "last_success": None,
+                        "last_record_processed": None,
+                        "last_projection_write": None,
+                        "bootstrap_caught_up": False,
+                        "bootstrap_records": 0, "bootstrap_bytes": 0,
                         "failure_count": 0, "last_error": None}
         self._rebuild = {"status": "idle", "days_total": 0, "days_completed": 0,
                          "current_file": None, "records": 0, "bytes": 0,
@@ -357,14 +361,25 @@ class DisplayHistoryProjection:
                         for _kind, source_key, path in sources)
         current_day = datetime.fromtimestamp(self.clock(), timezone.utc).date().isoformat()
         should_finalize = caught_up and (finalize if finalize is not None else day < current_day)
+        projection_written = False
         if should_finalize:
             self._publish(day, state, sources, complete=True)
-        elif caught_up:
+            projection_written = True
+        elif caught_up or day == current_day:
             self._publish_open(day, state, sources)
             _atomic_json(self._state_path(day), state)
+            projection_written = True
+        completed_at = self.clock()
         with self._lock:
-            self._status.update(state="available", last_success=self.clock(),
-                                last_error=None)
+            self._status.update(
+                state="available", last_success=completed_at,
+                last_record_processed=(completed_at if processed else
+                                       self._status["last_record_processed"]),
+                last_projection_write=(completed_at if projection_written else
+                                       self._status["last_projection_write"]),
+                bootstrap_caught_up=caught_up,
+                bootstrap_records=state["records"], bootstrap_bytes=state["bytes"],
+                last_error=None)
         self.refresh_status(validate_contents=False)
         return {"day": day, "records_processed": processed,
                 "bytes_processed": consumed, "caught_up": caught_up,
@@ -449,6 +464,11 @@ class DisplayHistoryProjection:
                         "config_revision": None, "phase_version": None,
                         "status": "open", "day": day, "resolution": resolution,
                         "source_signatures": signatures, "bucket_count": total,
+                        "source_offsets": {source_key: int(
+                            state["offsets"].get(source_key, 0))
+                            for _kind, source_key, _path in sources},
+                        "source_sizes": {source_key: path.stat().st_size
+                            for _kind, source_key, path in sources},
                         "channel_bucket_count": channel_count,
                         "channel_value_fields": list(CHANNEL_VALUE_FIELDS),
                         "channel_timestamp_encoding": "seconds_from_bucket_start",
