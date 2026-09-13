@@ -2,6 +2,17 @@
 
 Stand: 2026-09-13
 
+## Guardian Battery 0.7.40 – Display Projection Startup Order Fix
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.40`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Nach dem Add-on-Start `/api/display-projection/status` lesen. `startup_stage` muss `DISPLAY_INIT_08_COMPLETE` und `startup_completed` muss `true` sein, bevor Verzögerungen in Console Discovery, MQTT, historischen Backfills, RS485, Daily Worker oder Hycube Startup bewertet werden.
+- Der registrierte Provider muss einen aktiven beziehungsweise gestarteten Display Worker ausweisen. Nach vorhandenen Quelldaten müssen `last_success` sowie `days`/`open_days` fortgeschrieben werden; ein geeigneter History-Request darf bei verfügbarer Projection nicht ausschließlich `full_resolution` verwenden.
+- Falls Display Projection selbst scheitert, weiterhin die erreichte Startup-Stage, Exception-Typ und Message sichern. Die bestehende Fehlerisolierung und der Startup-Trace aus 0.7.39 bleiben maßgeblich.
+- Dieser Release ändert weder Display-/History-/Canonical-Semantik noch Collector, MQTT, RS485, Diagnostics, Risk, Navigation oder Performance.
+- Source-Release und produktive Installation bleiben getrennte Zustände. Dieser Auftrag führt kein Deployment, keinen Neustart, keinen Rebuild und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.39 – Display Projection Startup Trace
 
 ### Produktive Diagnose nach separatem Deployment

@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.40 – Display Projection Startup Order Fix
+
+- Startet die Display Projection unmittelbar nach dem erfolgreichen Start des Config-HTTP-Servers und damit vor potenziell blockierenden Runtime-Initialisierungen.
+- Providerregistrierung, Workerstart und `DISPLAY_INIT_08_COMPLETE` werden jetzt vor Console Discovery, MQTT, historischen Backfills, RS485, Daily Worker und Hycube Startup erreicht.
+- Behebt den produktiv beobachteten Zustand, in dem der Startup-Trace nur `DISPLAY_INIT_01_MAIN_REACHED` erreichte, obwohl der weitere synchrone Startup noch nicht bis zur Display Projection gelangt war.
+- Der vollständige Startup-Trace aus 0.7.39 sowie seine bestehende Fehlerisolierung bleiben erhalten.
+- Display Projection, Recovery, History Reader, History API, Canonical Phase, History UI, MQTT, RS485, Diagnostics, Risk, Navigation und Performance-Semantik bleiben unverändert.
+- Guardian Battery und Add-on sind `0.7.40`; Diagnostic Engine bleibt `0.4.12`, Canonical Semantics bleibt `guardian_canonical_phase_v2` und Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.39 – Display Projection Startup Trace
 
 - Ergänzt den Display-Projection-Status additiv um deterministische Startup-Stages von `DISPLAY_INIT_00_NOT_STARTED` bis `DISPLAY_INIT_08_COMPLETE`.
