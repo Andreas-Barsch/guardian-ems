@@ -1,5 +1,13 @@
 # Guardian Battery Changelog
 
+## 0.7.39 – Display Projection Startup Trace
+
+- Ergänzt den Display-Projection-Status additiv um deterministische Startup-Stages von `DISPLAY_INIT_00_NOT_STARTED` bis `DISPLAY_INIT_08_COMPLETE`.
+- Der Statusendpoint zeigt unabhängig von der Providerregistrierung die zuletzt erreichte Stage, ihren Zeitpunkt, den Abschlussstatus sowie Exception-Typ und -Message.
+- Ein einmaliger Startup-Fehlerlog nennt Stage, Exception-Typ und Message; bestehende wiederkehrende Workerlogs bleiben unverändert rate-limited.
+- Dieser Diagnostic Release ändert weder Display-Projection-Verhalten und Recovery noch History Reader, Canonical Phase, History UI, MQTT, RS485, Diagnostics, Risk, Navigation oder Performance.
+- Guardian Battery und Add-on sind `0.7.39`; Diagnostic Engine bleibt `0.4.12`, Canonical Semantics bleibt unverändert `guardian_canonical_phase_v2` und Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.38 – Display Projection Startup Resilience
 
 - Verhindert, dass fehlende oder veraltete Source-Referenzen in rebuildbaren Display-Artefakten den Projektionskonstruktor abbrechen und den Statusprovider als `disabled` erscheinen lassen.

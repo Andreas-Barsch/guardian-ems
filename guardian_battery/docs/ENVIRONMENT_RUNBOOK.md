@@ -2,6 +2,18 @@
 
 Stand: 2026-09-13
 
+## Guardian Battery 0.7.39 – Display Projection Startup Trace
+
+### Produktive Diagnose nach separatem Deployment
+
+- Guardian/Add-on: `0.7.39`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Nach dem Add-on-Start genau einmal `/api/display-projection/status` lesen und `startup_stage`, `startup_reached_at`, `startup_completed`, `startup_error_type` und `startup_error_message` dokumentieren.
+- `DISPLAY_INIT_00_NOT_STARTED` belegt, dass der Display-Startup-Block noch nicht erreicht wurde. Eine Stage `03`, `04` oder `06` zusammen mit Exceptiondaten grenzt Constructor-, Providerregistrierungs- beziehungsweise Workerstartfehler ein. `DISPLAY_INIT_08_COMPLETE` bestätigt den vollständigen Startup-Pfad.
+- Die Diagnosefelder werden auch beim bisherigen statischen `enabled: false`/`state: disabled`-Fallback geliefert und verändern den bestehenden Providerstatus nicht.
+- Bei einem Startupfehler zusätzlich genau die einmalige Logzeile `DisplayProjection startup failed at <stage>: <type>: <message>` sichern. Keine Ursache ohne diese Evidence ableiten.
+- Dieser Diagnostic Release verändert weder Display Projection, Recovery, History/Canonical-Semantik, Collector, MQTT, RS485, Diagnostics, Risk, Navigation noch Performance.
+- Source-Release und produktive Installation bleiben getrennte Zustände. Dieser Auftrag führt kein Deployment, keinen Neustart, keinen Rebuild und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.38 – Display Projection Startup Resilience
 
 ### Produktive Abnahme nach separatem Deployment
