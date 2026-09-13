@@ -1,5 +1,14 @@
 # Guardian Battery Changelog
 
+## 0.7.41 – Incremental Display Open-Day Publication
+
+- Macht Current-Day Display History bereits während des bounded Bootstrap sichtbar; Open-Day-Buckets warten nicht mehr auf den globalen Catch-up aller Quellen.
+- Publiziert ausschließlich anhand source-spezifischer Timestamp-Watermarks sicher geschlossene Buckets. Offene Buckets und Cursor verbleiben im State.
+- Late-Data- und Complete-Day-Semantik bleiben unverändert; ein Tag wird weiterhin erst nach vollständigem Catch-up finalisiert.
+- Ergebnisgleichheit nach vollständigem Catch-up ist für First, Last, Min, Max, Mean, Sample Count, Timestamps und Provenienz bestätigt.
+- Ergänzt bounded Bootstrap-Observability mit letztem verarbeiteten Record, letztem Projection Write, Catch-up-Status sowie Records/Bytes und bestätigten Source-Offsets/-Größen.
+- Guardian Battery und Add-on sind `0.7.41`; Diagnostic Engine bleibt `0.4.12`, Canonical Semantics bleibt `guardian_canonical_phase_v2` und Cell Risk bleibt `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+
 ## 0.7.40 – Display Projection Startup Order Fix
 
 - Startet die Display Projection unmittelbar nach dem erfolgreichen Start des Config-HTTP-Servers und damit vor potenziell blockierenden Runtime-Initialisierungen.

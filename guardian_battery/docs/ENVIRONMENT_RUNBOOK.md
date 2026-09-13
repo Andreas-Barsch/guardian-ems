@@ -2,6 +2,17 @@
 
 Stand: 2026-09-13
 
+## Guardian Battery 0.7.41 – Incremental Display Open-Day Publication
+
+### Produktive Abnahme nach separatem Deployment
+
+- Guardian/Add-on: `0.7.41`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`; Cell Risk unverändert `guardian_cell_risk_v2_1` mit Formel `2.0.0` und Klassifikation `1.0.0`.
+- Nach dem Add-on-Start `/api/display-projection/status` beobachten. Während eines bounded Current-Day-Bootstrap dürfen `bootstrap_caught_up=false` und gleichzeitig `days>0`, `open_days>0` sowie `storage_bytes>0` auftreten.
+- `last_record_processed`, `last_projection_write`, `bootstrap_records` und `bootstrap_bytes` dokumentieren. Open-Day-Metadaten weisen die bestätigten `source_offsets` und aktuellen `source_sizes` aus.
+- Ein geeigneter Current-Day-History-Request muss bereits vor globalem Catch-up `display_days`, `display_bytes` und `display_buckets` größer null liefern und darf für den sicher publizierten Bereich nicht ausschließlich `full_resolution` verwenden.
+- Nach vollständigem Catch-up muss `bootstrap_caught_up=true` werden. Late-Data-Rebuild und Complete-Day-Finalisierung bleiben unverändert; keinen manuellen Rebuild als Teil dieser Abnahme auslösen.
+- Source-Release und produktive Installation bleiben getrennte Zustände. Dieser Auftrag führt kein Deployment, keinen Neustart, keinen Rebuild und keinen produktiven `/share`- oder `/config`-Zugriff aus.
+
 ## Guardian Battery 0.7.40 – Display Projection Startup Order Fix
 
 ### Produktive Abnahme nach separatem Deployment
