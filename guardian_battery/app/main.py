@@ -1579,8 +1579,8 @@ def main() -> None:
         display_projection_worker.start()
     except Exception as exc:
         display_projection_worker = None
-        LOG.warning("Display History Projection konnte nicht gestartet werden: %s",
-                    type(exc).__name__)
+        LOG.warning("Display History Projection konnte nicht gestartet werden: %s: %s",
+                    type(exc).__name__, exc)
     try:
         canonical_phase_worker = CanonicalPhaseWorker(CanonicalPhaseProjection(
             CELL_HISTORY_DIR, DEFAULT_CANONICAL_PHASE_DIR,

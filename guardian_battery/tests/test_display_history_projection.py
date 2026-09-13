@@ -346,3 +346,137 @@ def test_current_day_initializes_large_four_of_six_stack_without_hycube(tmp_path
     assert not any(item.get("module_position") in {5, 6} for item in records)
     status = core.status()
     assert status["open_days"] == 1 and status["last_success"] is not None
+
+
+def _current_day_projection(tmp_path):
+    today = "2026-09-02"
+    cell = tmp_path / "cell"
+    source = cell / f"{today}.jsonl"
+    rows = [cell_record(NOW + 5, module=1, serial="SERIAL-1"),
+            cell_record(NOW + 65, module=1, serial="SERIAL-1")]
+    write_rows(source, rows)
+    output = tmp_path / "display"
+    core = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                    clock=lambda: NOW)
+    core.process_chunk(today)
+    return today, cell, source, rows, output
+
+
+def test_restart_with_missing_persisted_source_keeps_provider_and_recovers(tmp_path,
+                                                                            monkeypatch):
+    today, cell, source, rows, output = _current_day_projection(tmp_path)
+    source.unlink()
+
+    restarted = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                         clock=lambda: NOW)
+    status = restarted.status()
+    assert status["enabled"] is True and status["state"] == "invalid"
+    assert status["invalid_days"] == 1
+    assert "missing cell source" in status["last_error"]
+
+    import config_ui
+    monkeypatch.setattr(config_ui, "_DISPLAY_PROJECTION_PROVIDER", None)
+    config_ui.configure_display_projection(restarted.status, restarted.rebuild)
+    assert config_ui._DISPLAY_PROJECTION_PROVIDER()["enabled"] is True
+
+    write_rows(source, rows)
+    worker = DisplayHistoryProjectionWorker(restarted, interval_seconds=.01)
+    assert worker.start()
+    deadline = time.time() + 1
+    while worker.status()["last_success"] is None and time.time() < deadline:
+        time.sleep(.01)
+    recovered = worker.status()
+    assert worker.stop(timeout=1)
+    assert recovered["state"] == "available"
+    assert recovered["last_error"] is None
+    assert recovered["last_success"] is not None
+    assert recovered["days"] > 0 and recovered["open_days"] > 0
+    assert read_projection(output, "1m", today)
+
+    from display_history_reader import DisplayHistoryReader
+    from history_series import CellHistorySeries
+    history = DisplayHistoryReader(output, cell, tmp_path / "hycube",
+                                   CellHistorySeries(cell)).query_bundles(
+        requests=({"metric": "soc"},),
+        timestamp_from="2026-09-02T00:00:00+00:00",
+        timestamp_to="2026-09-03T00:00:00+00:00",
+        module_number=1, module_numbers=(1,), include_all_module_soc=True,
+    )
+    observability = history["display_observability"]
+    assert observability["display_days"] > 0
+    assert observability["display_bytes"] > 0
+    assert observability["display_buckets"] > 0
+    assert observability["history_source_mode"] != "full_resolution"
+
+
+def test_restart_with_corrupt_metadata_is_invalid_not_disabled(tmp_path):
+    today, cell, _source, _rows, output = _current_day_projection(tmp_path)
+    (output / "1m" / f"{today}.meta.json").write_text("{")
+    restarted = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                         clock=lambda: NOW)
+    status = restarted.status()
+    assert status["enabled"] is True and status["state"] == "invalid"
+    assert status["invalid_days"] == 1
+    assert status["last_error"].startswith("JSONDecodeError:")
+    assert restarted.process_chunk(today)["caught_up"]
+    recovered = restarted.status()
+    assert recovered["state"] == "available" and recovered["last_error"] is None
+
+
+def test_restart_with_source_signature_mismatch_is_invalid_not_disabled(tmp_path):
+    _today, cell, source, rows, output = _current_day_projection(tmp_path)
+    write_rows(source, rows + [cell_record(NOW + 10, module=1, serial="SERIAL-1")])
+    restarted = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                         clock=lambda: NOW)
+    status = restarted.status()
+    assert status["enabled"] is True and status["state"] == "invalid"
+    assert status["invalid_days"] == 1
+    assert status["last_error"] == (
+        "ValueError: cell source signature mismatch for 2026-09-02")
+
+
+def test_invalid_open_state_is_rebuilt_without_process_restart(tmp_path):
+    today, cell, _source, _rows, output = _current_day_projection(tmp_path)
+    state = output / ".state" / f"{today}.json"
+    state.write_text(json.dumps({
+        "display_projection_schema_version": DISPLAY_PROJECTION_SCHEMA_VERSION,
+        "aggregation_algorithm_version": AGGREGATION_ALGORITHM_VERSION,
+        "day": today,
+        "offsets": None,
+    }))
+    restarted = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                         clock=lambda: NOW)
+    result = restarted.process_chunk(today)
+    status = restarted.status()
+    assert result["caught_up"]
+    assert status["enabled"] is True and status["state"] == "available"
+    assert status["last_error"] is None and status["last_success"] is not None
+
+
+def test_legacy_source_signature_restart_with_missing_source_is_observable(tmp_path):
+    today, cell, source, _rows, output = _current_day_projection(tmp_path)
+    for meta_path in output.glob("*/*.meta.json"):
+        meta = json.loads(meta_path.read_text())
+        signature = meta["source_signatures"].pop(f"cell:{source.name}")
+        meta["source_signatures"]["cell"] = signature
+        meta_path.write_text(json.dumps(meta))
+    source.unlink()
+
+    upgraded = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
+                                        clock=lambda: NOW)
+    status = upgraded.status()
+    assert status["enabled"] is True and status["state"] == "invalid"
+    assert status["invalid_days"] == 1
+
+
+def test_clean_start_remains_enabled_and_idle(tmp_path):
+    core = DisplayHistoryProjection(tmp_path / "cell", tmp_path / "hycube",
+                                    tmp_path / "display", clock=lambda: NOW)
+    assert core.status() == {
+        "enabled": True, "state": "idle", "days": 0, "complete_days": 0,
+        "open_days": 0, "invalid_days": 0, "storage_bytes": 0,
+        "last_success": None, "failure_count": 0, "last_error": None,
+        "rebuild": {"status": "idle", "days_total": 0, "days_completed": 0,
+                    "current_file": None, "records": 0, "bytes": 0,
+                    "buckets": 0, "errors": 0},
+    }

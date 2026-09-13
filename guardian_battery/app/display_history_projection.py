@@ -234,7 +234,16 @@ class DisplayHistoryProjection:
         self._rebuild = {"status": "idle", "days_total": 0, "days_completed": 0,
                          "current_file": None, "records": 0, "bytes": 0,
                          "buckets": 0, "errors": 0}
-        self.refresh_status(validate_contents=False)
+        try:
+            self.refresh_status(validate_contents=False)
+        except Exception as exc:
+            # Derived artifacts are disposable.  A damaged inventory must remain
+            # observable and rebuildable instead of preventing provider startup.
+            with self._lock:
+                self._status.update(
+                    state="error",
+                    last_error=f"{type(exc).__name__}: {exc}",
+                )
 
     def _state_path(self, day):
         return self.output_directory / ".state" / f"{day}.json"
@@ -274,8 +283,22 @@ class DisplayHistoryProjection:
                     value.get("aggregation_algorithm_version") !=
                     AGGREGATION_ALGORITHM_VERSION):
                 return fresh
+            if (not isinstance(value.get("offsets"), dict)
+                    or not isinstance(value.get("orders"), dict)
+                    or not isinstance(value.get("buckets"), dict)
+                    or not isinstance(value.get("watermarks"), dict)
+                    or not isinstance(value.get("closed_before"), dict)):
+                raise ValueError("invalid open-state structure")
             return value
         except FileNotFoundError:
+            return fresh
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            # Open state is derived and can be rebuilt from authoritative sources.
+            with self._lock:
+                self._status.update(
+                    state="invalid",
+                    last_error=f"{type(exc).__name__}: invalid open state for {day}: {exc}",
+                )
             return fresh
 
     def process_chunk(self, day: str, *, finalize: bool | None = None) -> dict:
@@ -488,7 +511,8 @@ class DisplayHistoryProjection:
             return {**self._status, "rebuild": dict(self._rebuild)}
 
     def refresh_status(self, *, validate_contents=True):
-        days = set(); complete = open_days = invalid = storage = 0
+        days = set(); invalid_days = set(); complete = open_days = storage = 0
+        first_error = None
         for resolution in RESOLUTIONS:
             directory = self.output_directory / resolution
             if not directory.exists():
@@ -514,6 +538,9 @@ class DisplayHistoryProjection:
                                   else self.hycube_directory) / signature["filename"]
                         actual = _source_signature(source, content_hash=(
                             validate_contents and meta.get("status") == "complete"))
+                        if actual is None:
+                            raise ValueError(
+                                f"missing {kind} source {signature['filename']} for {day}")
                         comparable = (actual if validate_contents else {
                             key: actual.get(key) for key in
                             ("filename", "size", "mtime_ns", "source_schema_version")})
@@ -521,19 +548,25 @@ class DisplayHistoryProjection:
                             key: signature.get(key) for key in
                             ("filename", "size", "mtime_ns", "source_schema_version")})
                         if comparable != expected:
-                            valid = False
-                    if not valid: raise ValueError
+                            raise ValueError(
+                                f"{kind} source signature mismatch for {day}")
+                    if not valid:
+                        raise ValueError(f"invalid projection metadata for {day}")
                     if resolution == "1m":
                         if meta["status"] == "complete": complete += 1
                         else: open_days += 1
-                except (OSError, EOFError, gzip.BadGzipFile, KeyError, TypeError,
-                        ValueError, json.JSONDecodeError):
-                    if resolution == "1m": invalid += 1
+                except (OSError, EOFError, gzip.BadGzipFile, AttributeError, KeyError,
+                        TypeError, ValueError, json.JSONDecodeError) as exc:
+                    invalid_days.add(day)
+                    if first_error is None:
+                        first_error = f"{type(exc).__name__}: {exc}"
         with self._lock:
-            self._status.update(days=len(days), complete_days=complete,
-                                open_days=open_days, invalid_days=invalid,
-                                storage_bytes=storage,
-                                state="invalid" if invalid else self._status["state"])
+            self._status.update(
+                days=len(days), complete_days=complete, open_days=open_days,
+                invalid_days=len(invalid_days), storage_bytes=storage,
+                state="invalid" if invalid_days else self._status["state"],
+                last_error=first_error if invalid_days else self._status["last_error"],
+            )
 
 
 def read_projection(directory, resolution, day) -> list[dict]:
