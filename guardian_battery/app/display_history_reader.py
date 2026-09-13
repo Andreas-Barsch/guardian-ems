@@ -134,7 +134,8 @@ class DisplayHistoryReader:
                     meta["status"] not in {"complete", "open"} or
                     not data.is_file()):
                 return None
-            for kind, expected in meta.get("source_signatures", {}).items():
+            for source_key, expected in meta.get("source_signatures", {}).items():
+                kind = source_key.split(":", 1)[0]
                 source_dir = self.cell_directory if kind == "cell" else self.hycube_directory
                 source = source_dir / expected["filename"]
                 stat = source.stat()
@@ -357,7 +358,8 @@ class DisplayHistoryReader:
                     timestamp_to=datetime.fromtimestamp(day_end,timezone.utc).isoformat(),
                     max_points=max_points,timing=None)
                 points.extend(fallback["points"]);return fallback["raw_records"]
-            if meta is None or "hycube" not in meta.get("source_signatures",{}):
+            if meta is None or not any(key.split(":", 1)[0] == "hycube"
+                                      for key in meta.get("source_signatures",{})):
                 if self.full_hycube is None:return None
                 raw+=fallback_day();used_full=True;continue
             try:records,size=self._read(resolution,day)

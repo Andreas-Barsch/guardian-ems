@@ -1,4 +1,5 @@
 import json
+import logging
 import statistics
 import sys
 import time
@@ -193,7 +194,11 @@ def test_day_change_invalid_record_corruption_and_source_invalidation(tmp_path):
     core.refresh_status(); assert core.status()["invalid_days"] == 1
     next_day = cell_record(datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp())
     other, _ = builder(tmp_path / "other", [next_day])
-    with pytest.raises(DisplayProjectionError): other.process_chunk(DAY)
+    assert other.process_chunk(DAY)["complete"]
+    assert read_projection(tmp_path / "other" / "display", "1m", DAY) == []
+    assert other.build_day("2026-09-02")["records"] == 1
+    assert by(read_projection(tmp_path / "other" / "display", "1m",
+                              "2026-09-02"), "soc")
     broken, _ = builder(tmp_path / "broken", [{"schema_version": 1, "timestamp": base}])
     with pytest.raises(DisplayProjectionError): broken.process_chunk(DAY)
 
@@ -276,3 +281,68 @@ def test_worker_crash_recovery_rebuilds_only_open_day(tmp_path):
     records = by(read_projection(output, "1m", today), "soc")
     assert len(records) == 2
     assert sum(item["sample_count"] for item in records) == 2
+
+
+def test_utc_day_reads_adjacent_local_day_files_without_retry_loop(tmp_path):
+    day = "2026-09-13"
+    previous_local = tmp_path / "cell" / "2026-09-13.jsonl"
+    next_local = tmp_path / "cell" / "2026-09-14.jsonl"
+    write_rows(previous_local, [
+        cell_record(datetime(2026, 9, 12, 22, 5, tzinfo=timezone.utc).timestamp(),
+                    module=1, serial="PREVIOUS-UTC"),
+        cell_record(datetime(2026, 9, 13, 8, 0, tzinfo=timezone.utc).timestamp(),
+                    module=1, serial="SERIAL-1")])
+    write_rows(next_local, [
+        cell_record(datetime(2026, 9, 13, 22, 5, tzinfo=timezone.utc).timestamp(),
+                    module=2, serial="SERIAL-2")])
+    clock = lambda: datetime(2026, 9, 14, 12, tzinfo=timezone.utc).timestamp()
+    core = DisplayHistoryProjection(tmp_path / "cell", tmp_path / "hycube",
+                                    tmp_path / "display", clock=clock)
+    result = core.build_day(day)
+    records = read_projection(tmp_path / "display", "1m", day)
+    assert result["records"] == 3
+    assert {item.get("physical_serial") for item in by(records, "soc")} == {
+        "SERIAL-1", "SERIAL-2"}
+    assert core.status()["failure_count"] == 0
+
+
+def test_worker_reports_rate_limits_and_recovers_without_restart(tmp_path, caplog):
+    today = "2026-09-02"; cell = tmp_path / "cell"; path = cell / f"{today}.jsonl"
+    write_rows(path, [{"schema_version": 1, "timestamp": NOW}])
+    core = DisplayHistoryProjection(cell, tmp_path / "hycube", tmp_path / "display",
+                                    clock=lambda: NOW)
+    worker = DisplayHistoryProjectionWorker(core, interval_seconds=.01)
+    with caplog.at_level(logging.WARNING):
+        assert worker.start()
+        deadline = time.time() + 1
+        while worker.status()["failure_count"] < 2 and time.time() < deadline:
+            time.sleep(.01)
+        failed = worker.status()
+        assert failed["days"] == 0 and failed["last_success"] is None
+        assert failed["last_error"] == "DisplayProjectionError: invalid cell source record"
+        assert sum("Display History Projection worker failed" in item.message
+                   for item in caplog.records) == 1
+        write_rows(path, [cell_record(NOW + 5, module=1, serial="SERIAL-1")])
+        deadline = time.time() + 1
+        while worker.status()["last_success"] is None and time.time() < deadline:
+            time.sleep(.01)
+        recovered = worker.status()
+        assert worker.stop(timeout=1)
+    assert recovered["state"] == "available" and recovered["last_error"] is None
+    assert recovered["last_success"] is not None and recovered["open_days"] == 1
+
+
+def test_current_day_initializes_large_four_of_six_stack_without_hycube(tmp_path):
+    today = "2026-09-02"; cell = tmp_path / "cell"; path = cell / f"{today}.jsonl"
+    rows = [cell_record(NOW + index, module=(index % 4) + 1,
+                        serial=f"SERIAL-{(index % 4) + 1}") for index in range(1200)]
+    write_rows(path, rows)
+    core = DisplayHistoryProjection(cell, tmp_path / "hycube", tmp_path / "display",
+                                    max_records=257, clock=lambda: NOW)
+    while not core.process_chunk(today)["caught_up"]:
+        pass
+    records = read_projection(tmp_path / "display", "1m", today)
+    assert {item.get("module_position") for item in by(records, "soc")} == {1, 2, 3, 4}
+    assert not any(item.get("module_position") in {5, 6} for item in records)
+    status = core.status()
+    assert status["open_days"] == 1 and status["last_success"] is not None

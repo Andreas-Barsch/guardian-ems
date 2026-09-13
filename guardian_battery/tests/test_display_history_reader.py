@@ -154,7 +154,11 @@ def test_history_api_prefers_projection_but_keeps_exact_phase_samples(tmp_path):
     assert response.status==200
     assert [p["value"] for p in response.body["series"]["points"]]==[80,30,78]
     assert [sample["soc_percent"] for sample in phase.samples]==[80,30,78]
-    assert response.body["performance"]["history_source_mode"]=="display_projection"
+    performance=response.body["performance"]
+    assert performance["history_source_mode"]=="display_projection"
+    assert performance["display_days"]>0
+    assert performance["display_bytes"]>0
+    assert performance["display_buckets"]>0
 
 
 def test_history_api_uses_complete_canonical_phase_without_full_phase_read(tmp_path):

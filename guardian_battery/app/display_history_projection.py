@@ -10,10 +10,11 @@ import hashlib
 import gzip
 import io
 import json
+import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -27,6 +28,7 @@ CHANNEL_VALUE_FIELDS = ("first_value", "first_timestamp", "last_value",
                         "max_value", "max_timestamp", "mean", "sample_count")
 TIMESTAMP_FIELDS = frozenset({"first_timestamp", "last_timestamp",
                               "min_timestamp", "max_timestamp"})
+LOG = logging.getLogger(__name__)
 
 
 class DisplayProjectionError(ValueError):
@@ -228,7 +230,7 @@ class DisplayHistoryProjection:
         self._status = {"enabled": True, "state": "idle", "days": 0,
                         "complete_days": 0, "open_days": 0, "invalid_days": 0,
                         "storage_bytes": 0, "last_success": None,
-                        "failure_count": 0}
+                        "failure_count": 0, "last_error": None}
         self._rebuild = {"status": "idle", "days_total": 0, "days_completed": 0,
                          "current_file": None, "records": 0, "bytes": 0,
                          "buckets": 0, "errors": 0}
@@ -246,9 +248,18 @@ class DisplayHistoryProjection:
         return self.output_directory / resolution / f"{day}{suffix}"
 
     def _sources(self, day):
-        candidates = (("cell", self.cell_directory / f"{day}.jsonl"),
-                      ("hycube", self.hycube_directory / f"{day}.jsonl"))
-        return [(kind, path) for kind, path in candidates if path.is_file()]
+        utc_day = date.fromisoformat(day)
+        # CellHistoryWriter historically names files in the runtime-local timezone.
+        # One UTC day can therefore span the adjacent local-day files. Hycube
+        # projection files are already named by UTC day.
+        cell_paths = [self.cell_directory / f"{candidate.isoformat()}.jsonl"
+                      for candidate in (utc_day - timedelta(days=1), utc_day,
+                                        utc_day + timedelta(days=1))]
+        candidates = [("cell", f"cell:{path.name}", path) for path in cell_paths]
+        hycube = self.hycube_directory / f"{day}.jsonl"
+        candidates.append(("hycube", f"hycube:{hycube.name}", hycube))
+        return [(kind, source_key, path) for kind, source_key, path in candidates
+                if path.is_file()]
 
     def _load_state(self, day):
         fresh = {"display_projection_schema_version": DISPLAY_PROJECTION_SCHEMA_VERSION,
@@ -274,8 +285,8 @@ class DisplayHistoryProjection:
         if not sources:
             raise DisplayProjectionError("no source history for day")
         processed = consumed = 0
-        for kind, path in sources:
-            offset = int(state["offsets"].get(kind, 0))
+        for kind, source_key, path in sources:
+            offset = int(state["offsets"].get(source_key, 0))
             order = int(state["orders"].get(kind, 0))
             with path.open("rb") as handle:
                 handle.seek(offset)
@@ -289,7 +300,7 @@ class DisplayHistoryProjection:
                         timestamp = _timestamp(record, kind)
                         epoch = datetime.fromisoformat(timestamp).timestamp()
                         if datetime.fromtimestamp(epoch, timezone.utc).date().isoformat() != day:
-                            raise DisplayProjectionError("record outside UTC day")
+                            continue
                         state["watermarks"][kind] = max(
                             epoch, float(state["watermarks"].get(kind, epoch)))
                         for channel, metric, value in _channels(record, kind):
@@ -313,14 +324,14 @@ class DisplayHistoryProjection:
                     except (json.JSONDecodeError, KeyError, TypeError, ValueError,
                             IndexError) as exc:
                         raise DisplayProjectionError(f"invalid {kind} source record") from exc
-                state["offsets"][kind] = handle.tell()
+                state["offsets"][source_key] = handle.tell()
                 state["orders"][kind] = order
             if processed >= self.max_records or consumed >= self.max_bytes:
                 break
         state["records"] += processed; state["bytes"] += consumed
         _atomic_json(self._state_path(day), state)
-        caught_up = all(int(state["offsets"].get(kind, 0)) == path.stat().st_size
-                        for kind, path in sources)
+        caught_up = all(int(state["offsets"].get(source_key, 0)) == path.stat().st_size
+                        for _kind, source_key, path in sources)
         current_day = datetime.fromtimestamp(self.clock(), timezone.utc).date().isoformat()
         should_finalize = caught_up and (finalize if finalize is not None else day < current_day)
         if should_finalize:
@@ -329,7 +340,8 @@ class DisplayHistoryProjection:
             self._publish_open(day, state, sources)
             _atomic_json(self._state_path(day), state)
         with self._lock:
-            self._status.update(state="available", last_success=self.clock())
+            self._status.update(state="available", last_success=self.clock(),
+                                last_error=None)
         self.refresh_status(validate_contents=False)
         return {"day": day, "records_processed": processed,
                 "bytes_processed": consumed, "caught_up": caught_up,
@@ -337,8 +349,8 @@ class DisplayHistoryProjection:
                 "bucket_count": len(state["buckets"])}
 
     def _publish(self, day, state, sources, *, complete):
-        signatures = {kind: _source_signature(path, content_hash=complete)
-                      for kind, path in sources}
+        signatures = {source_key: _source_signature(path, content_hash=complete)
+                      for _kind, source_key, path in sources}
         by_resolution = {resolution: [] for resolution in RESOLUTIONS}
         for bucket in state["buckets"].values():
             by_resolution[bucket["resolution"]].append(_public(bucket))
@@ -374,8 +386,8 @@ class DisplayHistoryProjection:
 
     def _publish_open(self, day, state, sources):
         """Append immutable closed buckets; retain only open buckets in state."""
-        signatures = {kind: _source_signature(path, content_hash=False)
-                      for kind, path in sources}
+        signatures = {source_key: _source_signature(path, content_hash=False)
+                      for _kind, source_key, path in sources}
         source_kind = {"cell_history": "cell", "hycube": "hycube"}
         closed = {resolution: [] for resolution in RESOLUTIONS}
         retained = {}
@@ -496,7 +508,8 @@ class DisplayHistoryProjection:
                         valid = valid and meta["bucket_count"] == sum(1 for line in
                                 (gzip.open(path, "rt", encoding="utf-8")
                                  if path.exists() else []) if line.strip())
-                    for kind, signature in meta.get("source_signatures", {}).items():
+                    for source_key, signature in meta.get("source_signatures", {}).items():
+                        kind = source_key.split(":", 1)[0]
                         source = (self.cell_directory if kind == "cell"
                                   else self.hycube_directory) / signature["filename"]
                         actual = _source_signature(source, content_hash=(
@@ -547,6 +560,9 @@ class DisplayHistoryProjectionWorker:
         self.interval_seconds = max(0.01, float(interval_seconds))
         self._stop = threading.Event(); self._rebuild = threading.Event()
         self._thread = None
+        self._last_logged_error = None
+        self._last_error_log_at = float("-inf")
+        self._error_log_interval_seconds = 300.0
 
     def start(self):
         if self._thread and self._thread.is_alive(): return False
@@ -583,8 +599,16 @@ class DisplayHistoryProjectionWorker:
                     recovering = False
                 if self.projection._sources(day):
                     self.projection.process_chunk(day)
-            except Exception:
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
                 with self.projection._lock:
                     self.projection._status["failure_count"] += 1
                     self.projection._status["state"] = "error"
+                    self.projection._status["last_error"] = error
+                now = time.monotonic()
+                if (error != self._last_logged_error or
+                        now - self._last_error_log_at >= self._error_log_interval_seconds):
+                    LOG.warning("Display History Projection worker failed: %s", error)
+                    self._last_logged_error = error
+                    self._last_error_log_at = now
             self._stop.wait(self.interval_seconds)
