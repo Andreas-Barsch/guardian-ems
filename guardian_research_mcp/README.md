@@ -1,6 +1,6 @@
 # Guardian Research MCP
 
-Version `0.8.0` is a separate, provider-neutral, read-only
+Version `0.8.1` is a separate, provider-neutral, read-only
 Streamable HTTP MCP adapter for Guardian Battery's Research API.
 
 ## Contract
@@ -28,3 +28,10 @@ credentials.
 
 The MCP layer never reads Guardian evidence files, writes MQTT/RS485/Hycube,
 calls Home Assistant services, rebuilds projections, or stores conversations.
+
+For the local Home Assistant application network, the safe default Host
+allowlist is `guardian_research_mcp,3195b09a-guardian-research-mcp,localhost,127.0.0.1`.
+The repository-qualified DNS name is the Host used by Guardian MCP Tunnel's
+default internal URL. Keep the explicit entries and do not replace them with a
+wildcard. An HTTP 421 `Misdirected Request` from the tunnel preflight indicates
+that the configured internal MCP hostname is missing from this allowlist.

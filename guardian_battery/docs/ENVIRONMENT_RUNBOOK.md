@@ -2,6 +2,38 @@
 
 Stand: 2026-09-14
 
+## Guardian MCP Tunnel 0.8.1 – HA Green Production Acceptance
+
+- Home Assistant Green/aarch64 successfully updated the local outbound-only
+  Guardian MCP Tunnel from 0.8.0 to 0.8.1. tunnel-client 0.0.14 started,
+  reached the OpenAI control plane and loaded tunnel metadata without ingress,
+  an inbound port, a public MCP endpoint, reverse proxy or external computer.
+- The accepted path is ChatGPT → OpenAI Secure MCP Tunnel → Guardian MCP Tunnel
+  → private Guardian Research MCP → read-only Guardian Battery Research API.
+  A new ChatGPT conversation successfully called `guardian_status` end to end.
+- Guardian Research MCP must explicitly allow both `guardian_research_mcp` and
+  the actual repository-qualified HA DNS host
+  `3195b09a-guardian-research-mcp`, plus localhost/127.0.0.1. HTTP 421 means the
+  configured Host is absent; wildcards remain forbidden.
+- Authentication remains three-tiered: Battery Research API token ↔ MCP
+  Guardian client token, a separate MCP Bearer token supplied by Tunnel via a
+  `file:` header, and an independent restricted OpenAI tunnel runtime key.
+  ChatGPT-side “no additional authentication” does not disable either internal
+  Guardian boundary.
+- tunnel-client 0.0.14 Doctor remains enabled with JSON output. Only the sole
+  known `oauth_metadata` failure containing `protected resource metadata
+  missing resource` is tolerated after file-backed Bearer setup. All other
+  preflight failures remain fatal.
+- 0.8.1 records OCI identity and build-time SHA-256 values for `startup.sh` and
+  `run.sh`, verifies both at runtime, and logs the version/revision/hashes plus
+  the active Doctor policy without secrets.
+- Treat `ha apps info` and all app option output as sensitive. Never publish an
+  unreviewed options section in screenshots, tickets, logs or chats. Rotate any
+  accidentally exposed token immediately; never document its old or new value.
+- Source release and the completed production acceptance remain separate. This
+  documentation update performs no HA deployment, restart, token change or
+  tunnel modification.
+
 ## Guardian Battery 0.8.0 – Research API Integration
 
 ### Konfiguration und spätere getrennte Abnahme

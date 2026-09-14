@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx2
 import pytest
 import uvicorn
+import yaml
 from mcp.client import Client
 from mcp.client.streamable_http import streamable_http_client
 
@@ -22,7 +23,7 @@ from errors import GatewayError
 from gateway import MAX_FULL_RESOLUTION, MAX_PARALLEL, MAX_QUEUE, QueryGate
 from guardian_client import GuardianResearchClient, MAX_RESPONSE_BYTES
 from server import build_app
-from settings import Settings
+from settings import Settings, load_settings
 
 
 TOKEN = "mcp-test-secret"
@@ -158,6 +159,31 @@ def test_settings_default_closed_and_no_wildcards():
     assert settings(development_auth_mode=True, mcp_auth_token="").development_auth_mode
 
 
+def test_manifest_and_runtime_defaults_allow_exact_ha_app_dns_without_wildcard(
+    tmp_path, monkeypatch,
+):
+    manifest = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    )
+    expected = {
+        "guardian_research_mcp",
+        "3195b09a-guardian-research-mcp",
+        "localhost",
+        "127.0.0.1",
+    }
+    assert manifest["version"] == "0.8.1"
+    assert set(manifest["options"]["allowed_hosts"].split(",")) == expected
+    assert "*" not in manifest["options"]["allowed_hosts"]
+    options = tmp_path / "options.json"
+    options.write_text(json.dumps({
+        "guardian_base_url": "http://guardian.test:8099/api/research",
+        "guardian_api_token": GUARDIAN_TOKEN,
+        "mcp_auth_token": TOKEN,
+    }), encoding="utf-8")
+    monkeypatch.delenv("GUARDIAN_MCP_ALLOWED_HOSTS", raising=False)
+    assert set(load_settings(options).allowed_hosts) == expected
+
+
 def test_guardian_client_get_only_preserves_envelope_and_cursor():
     stub = GuardianStub()
     async def run():
@@ -280,7 +306,7 @@ def test_protocol_discovery_security_health_and_read_only_catalog():
             health = http.get(base + "/health", headers={
                 "Authorization": "Bearer " + TOKEN})
             assert health.status_code == 200
-            assert health.json()["version"] == "0.8.0"
+            assert health.json()["version"] == "0.8.1"
             assert set(health.json()) == {"service", "version", "transport",
                 "guardian_reachable", "active_queries", "queued_queries", "last_error"}
 
@@ -314,6 +340,27 @@ def test_guardian_down_recovery_without_mcp_restart():
         health = httpx2.get(base + "/health", headers={"Authorization": "Bearer " + TOKEN})
         assert health.json()["guardian_reachable"] is True
         assert health.json()["last_error"] is None
+
+
+def test_repository_qualified_ha_dns_host_is_allowed_without_wildcard():
+    host = "3195b09a-guardian-research-mcp"
+    stub = GuardianStub()
+    cfg = settings(allowed_hosts=(
+        "guardian_research_mcp", host, "localhost", "127.0.0.1",
+    ))
+    app = build_app(cfg, client=GuardianResearchClient(
+        cfg, transport=httpx2.MockTransport(stub),
+    ))
+    with running_app(app) as base:
+        response = httpx2.get(base + "/health", headers={
+            "Authorization": "Bearer " + TOKEN,
+            "Host": host,
+        })
+        assert response.status_code == 200
+        assert httpx2.get(base + "/health", headers={
+            "Authorization": "Bearer " + TOKEN,
+            "Host": "unlisted.internal",
+        }).status_code == 421
 
 
 def test_every_tool_maps_to_exact_get_only_research_endpoint():

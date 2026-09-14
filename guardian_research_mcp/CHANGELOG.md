@@ -1,5 +1,12 @@
 # Guardian Research MCP Changelog
 
+## 0.8.1 – Home Assistant Tunnel Host Compatibility
+
+- Adds the repository-qualified internal Home Assistant DNS name
+  `3195b09a-guardian-research-mcp` to the explicit safe Host allowlist default.
+- Retains Bearer authentication, DNS-rebinding protection, all existing Host
+  entries, the wildcard prohibition, read-only tools and private port default.
+
 ## 0.8.0 – Read-only Guardian Research Transport
 
 - Adds a separate provider-neutral MCP 2.2.0 add-on using stateless Streamable HTTP at `/mcp`.

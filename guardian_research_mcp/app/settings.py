@@ -61,7 +61,10 @@ def load_settings(path: Path = OPTIONS_FILE) -> Settings:
         guardian_api_token=str(option("guardian_api_token")),
         mcp_auth_token=str(option("mcp_auth_token")),
         development_auth_mode=_bool(option("development_auth_mode", False)),
-        allowed_hosts=_csv(option("allowed_hosts", "guardian_research_mcp,localhost,127.0.0.1")),
+        allowed_hosts=_csv(option(
+            "allowed_hosts",
+            "guardian_research_mcp,3195b09a-guardian-research-mcp,localhost,127.0.0.1",
+        )),
         allowed_origins=_csv(option("allowed_origins", "")),
         log_level=str(option("log_level", "INFO")).upper(),
         bind_host=str(option("bind_host", "0.0.0.0")),

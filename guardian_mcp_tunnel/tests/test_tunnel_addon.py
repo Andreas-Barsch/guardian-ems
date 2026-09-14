@@ -326,3 +326,13 @@ def test_readme_distinguishes_all_secret_roles_and_forbids_public_port():
         assert term in source
     assert "does not publish a host port" in source
     assert "No router port-forward is required" in source
+    for evidence in (
+        "Home Assistant Green/aarch64",
+        "3195b09a-guardian-research-mcp",
+        "Misdirected Request",
+        "protected resource metadata missing resource",
+        "guardian_status",
+        "rotate it immediately",
+        "static-bearer-oauth-metadata-v1 active",
+    ):
+        assert evidence in source
