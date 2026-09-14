@@ -31,11 +31,12 @@ def fake_tunnel_client(tmp_path: Path) -> Path:
         "  doctor)\n"
         "    case \"${FAKE_DOCTOR_RESULT:-pass}\" in\n"
         "      pass) printf '%s\\n' '{\"result\":\"ok\",\"checks\":[]}' ;;\n"
-        "      oauth) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"oauth_metadata\"],\"checks\":[{\"id\":\"oauth_metadata\",\"status\":\"FAIL\",\"summary\":\"oauth discovery invalid metadata: protected resource metadata missing resource\"}]}' ; exit 2 ;;\n"
+        "      oauth) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"oauth_metadata\"],\"checks\":[{\"id\":\"config_source\",\"status\":\"PASS\",\"summary\":\"flags/environment only\"},{\"id\":\"profile_load\",\"status\":\"PASS\",\"summary\":\"flags/environment only\"},{\"id\":\"tunnel_id\",\"status\":\"PASS\",\"summary\":\"tunnel_0123456789abcdef0123456789abcdef\"},{\"id\":\"control_plane_api_key\",\"status\":\"PASS\",\"summary\":\"file:/run/guardian-mcp-tunnel/control-plane-api-key\"},{\"id\":\"mcp_target\",\"status\":\"PASS\",\"summary\":\"http://3195b09a-guardian-research-mcp:8098/mcp\"},{\"id\":\"mcp_server_reachable\",\"status\":\"PASS\",\"summary\":\"HTTP 421 from http://3195b09a-guardian-research-mcp:8098/mcp\"},{\"id\":\"oauth_metadata\",\"status\":\"FAIL\",\"summary\":\"oauth discovery invalid metadata from http://3195b09a-guardian-research-mcp:8098: protected resource metadata missing resource\"},{\"id\":\"health_listener\",\"status\":\"PASS\",\"summary\":\"will bind http://127.0.0.1:8080\"},{\"id\":\"ui\",\"status\":\"PASS\",\"summary\":\"http://127.0.0.1:8080/ui\"},{\"id\":\"codex_plugin\",\"status\":\"SKIP\",\"summary\":\"Codex not detected locally\"}]}' ; exit 2 ;;\n"
         "      other) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"mcp_server_reachable\"],\"checks\":[{\"id\":\"mcp_server_reachable\",\"status\":\"FAIL\",\"summary\":\"connection refused\"}]}' ; exit 2 ;;\n"
         "      mixed) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"oauth_metadata\",\"mcp_server_reachable\"],\"checks\":[{\"id\":\"oauth_metadata\",\"status\":\"FAIL\",\"summary\":\"protected resource metadata missing resource\"},{\"id\":\"mcp_server_reachable\",\"status\":\"FAIL\",\"summary\":\"connection refused\"}]}' ; exit 2 ;;\n"
         "      oauth_other) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"oauth_metadata\"],\"checks\":[{\"id\":\"oauth_metadata\",\"status\":\"FAIL\",\"summary\":\"authorization server metadata unavailable\"}]}' ; exit 2 ;;\n"
         "      malformed) printf '%s\\n' 'not-json' ; exit 2 ;;\n"
+        "      text_oauth) printf '%s\\n' 'CHECK oauth_metadata FAIL protected resource metadata missing resource' '' 'RESULT fail' 'FAILED_CHECKS oauth_metadata' 'EXIT_CODE 2' ; exit 2 ;;\n"
         "      *) exit 7 ;;\n"
         "    esac ;;\n"
         "  run)\n"
@@ -158,12 +159,13 @@ def test_known_oauth_metadata_failure_is_nonfatal_for_static_bearer(tmp_path):
     result = run_startup(tmp_path, FAKE_DOCTOR_RESULT="oauth")
     calls = (tmp_path / "calls.txt").read_text(encoding="utf-8")
     assert result.returncode == 0
+    assert "doctor policy static-bearer-oauth-metadata-v1 active" in result.stdout
     assert "doctor OAuth metadata failure accepted" in result.stdout
     assert "protected resource metadata missing resource" in result.stdout
     assert calls.splitlines()[2].startswith("run --control-plane.api-key=file:")
 
 
-@pytest.mark.parametrize("doctor_result", ["mixed", "oauth_other", "malformed"])
+@pytest.mark.parametrize("doctor_result", ["mixed", "oauth_other", "malformed", "text_oauth"])
 def test_doctor_exception_does_not_hide_other_or_unknown_failures(tmp_path, doctor_result):
     result = run_startup(tmp_path, FAKE_DOCTOR_RESULT=doctor_result)
     calls = (tmp_path / "calls.txt").read_text(encoding="utf-8")

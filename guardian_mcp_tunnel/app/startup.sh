@@ -56,6 +56,7 @@ printf '%s\n' 'Guardian MCP Tunnel: configuration validated; secrets redacted.'
 
 if [ "$GUARDIAN_RUN_DOCTOR" = true ]; then
     printf '%s\n' 'Guardian MCP Tunnel: running tunnel-client doctor.'
+    printf '%s\n' 'Guardian MCP Tunnel: doctor policy static-bearer-oauth-metadata-v1 active.'
     DOCTOR_REPORT_FILE="$SECRET_DIR/doctor-report.json"
     if "$TUNNEL_CLIENT_BIN" doctor --json \
         --control-plane.api-key="file:$CONTROL_PLANE_KEY_FILE" \
