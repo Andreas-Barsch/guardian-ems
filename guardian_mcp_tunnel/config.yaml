@@ -1,5 +1,5 @@
 name: Guardian MCP Tunnel
-version: 0.8.0
+version: 0.8.1
 slug: guardian_mcp_tunnel
 description: Outbound-only OpenAI Secure MCP Tunnel for Guardian Research MCP.
 arch:

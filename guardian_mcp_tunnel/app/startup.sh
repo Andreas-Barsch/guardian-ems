@@ -6,6 +6,69 @@ fail() {
     exit 1
 }
 
+STARTUP_FILE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"
+RUN_FILE="$(dirname -- "$STARTUP_FILE")/../run.sh"
+BUILD_INFO_FILE="$(dirname -- "$STARTUP_FILE")/build-info"
+
+if ! python3 - "$BUILD_INFO_FILE" "$STARTUP_FILE" "$RUN_FILE" <<'PY'
+import hashlib
+import re
+import sys
+
+build_info_path, startup_path, run_path = sys.argv[1:]
+required = {
+    "addon_version",
+    "source_revision",
+    "tunnel_client_version",
+    "startup_sha256",
+    "run_sha256",
+}
+try:
+    values = {}
+    with open(build_info_path, encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\n")
+            key, separator, value = line.partition("=")
+            if not separator or key in values or key not in required:
+                raise ValueError("invalid field")
+            values[key] = value
+    if set(values) != required:
+        raise ValueError("missing field")
+    safe_value = re.compile(r"[0-9A-Za-z._+-]{1,128}\Z")
+    for key in ("addon_version", "source_revision", "tunnel_client_version"):
+        if not safe_value.fullmatch(values[key]):
+            raise ValueError("invalid identity")
+    sha256 = re.compile(r"[0-9a-f]{64}\Z")
+    if not sha256.fullmatch(values["startup_sha256"]) or not sha256.fullmatch(values["run_sha256"]):
+        raise ValueError("invalid fingerprint")
+
+    def digest(path):
+        value = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                value.update(chunk)
+        return value.hexdigest()
+
+    if digest(startup_path) != values["startup_sha256"]:
+        raise ValueError("startup_sha256 mismatch")
+    if digest(run_path) != values["run_sha256"]:
+        raise ValueError("run_sha256 mismatch")
+except (OSError, ValueError) as error:
+    print(f"Guardian MCP Tunnel: build identity verification failed ({error}).", file=sys.stderr)
+    raise SystemExit(1)
+
+print(
+    "Guardian MCP Tunnel: build "
+    f"version={values['addon_version']} "
+    f"revision={values['source_revision']} "
+    f"startup_sha256={values['startup_sha256']} "
+    f"run_sha256={values['run_sha256']}"
+)
+PY
+then
+    fail build_identity
+fi
+
 case "${GUARDIAN_TUNNEL_ID:-}" in
     tunnel_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
     *) fail tunnel_id ;;

@@ -1,4 +1,7 @@
+import hashlib
 import os
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,6 +15,7 @@ DEFAULT_MCP_URL = "http://3195b09a-guardian-research-mcp:8098/mcp"
 TUNNEL_ID = "tunnel_0123456789abcdef0123456789abcdef"
 CONTROL_SECRET = "control-secret-must-not-leak"
 MCP_SECRET = "mcp-secret-must-not-leak"
+SOURCE_REVISION = "guardian-mcp-tunnel-0.8.1"
 
 
 def manifest():
@@ -69,9 +73,56 @@ def environment(tmp_path: Path, **changes):
     return {**os.environ, **values}
 
 
-def run_startup(tmp_path: Path, **changes):
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def image_startup(
+    tmp_path: Path,
+    *,
+    build_info_changes=None,
+    omit_build_info=False,
+    invalid_build_info=False,
+) -> Path:
+    image_root = tmp_path / "image"
+    app_dir = image_root / "app"
+    app_dir.mkdir(parents=True)
+    startup = app_dir / "startup.sh"
+    run_script = image_root / "run.sh"
+    shutil.copy2(STARTUP, startup)
+    shutil.copy2(ROOT / "run.sh", run_script)
+    if not omit_build_info:
+        values = {
+            "addon_version": "0.8.1",
+            "source_revision": SOURCE_REVISION,
+            "tunnel_client_version": "0.0.14",
+            "startup_sha256": sha256(startup),
+            "run_sha256": sha256(run_script),
+        }
+        values.update(build_info_changes or {})
+        content = "invalid build info\n" if invalid_build_info else "".join(
+            f"{key}={value}\n" for key, value in values.items()
+        )
+        (app_dir / "build-info").write_text(content, encoding="utf-8")
+    return startup
+
+
+def run_startup(
+    tmp_path: Path,
+    *,
+    build_info_changes=None,
+    omit_build_info=False,
+    invalid_build_info=False,
+    **changes,
+):
+    startup = image_startup(
+        tmp_path,
+        build_info_changes=build_info_changes,
+        omit_build_info=omit_build_info,
+        invalid_build_info=invalid_build_info,
+    )
     return subprocess.run(
-        [str(STARTUP)],
+        [str(startup)],
         env=environment(tmp_path, **changes),
         text=True,
         capture_output=True,
@@ -82,7 +133,7 @@ def run_startup(tmp_path: Path, **changes):
 
 def test_manifest_is_private_aarch64_addon_with_secret_schema():
     value = manifest()
-    assert value["version"] == "0.8.0"
+    assert value["version"] == "0.8.1"
     assert value["slug"] == "guardian_mcp_tunnel"
     assert value["arch"] == ["aarch64"]
     assert value["ingress"] is False
@@ -140,6 +191,34 @@ def test_startup_uses_file_backed_local_bearer_and_secret_free_arguments(tmp_pat
     assert CONTROL_SECRET not in combined
     assert MCP_SECRET not in combined
     assert DEFAULT_MCP_URL not in combined
+    identity = next(
+        line for line in result.stdout.splitlines()
+        if line.startswith("Guardian MCP Tunnel: build version=")
+    )
+    assert "version=0.8.1" in identity
+    assert f"revision={SOURCE_REVISION}" in identity
+    assert re.search(r"startup_sha256=[0-9a-f]{64}(?: |$)", identity)
+    assert re.search(r"run_sha256=[0-9a-f]{64}(?: |$)", identity)
+    assert CONTROL_SECRET not in identity and MCP_SECRET not in identity
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"omit_build_info": True}, "build identity verification failed"),
+        ({"invalid_build_info": True}, "invalid field"),
+        ({"build_info_changes": {"startup_sha256": "0" * 64}}, "startup_sha256 mismatch"),
+        ({"build_info_changes": {"run_sha256": "0" * 64}}, "run_sha256 mismatch"),
+        ({"build_info_changes": {"startup_sha256": "invalid"}}, "invalid fingerprint"),
+    ],
+)
+def test_build_identity_failures_stop_before_configuration(tmp_path, kwargs, error):
+    result = run_startup(tmp_path, **kwargs)
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert "preflight failed (build_identity)" in result.stderr
+    calls = tmp_path / "calls.txt"
+    assert not calls.exists()
 
 
 def test_doctor_failure_for_unreachable_mcp_is_fatal_and_redacted(tmp_path):
@@ -205,6 +284,22 @@ def test_dockerfile_pins_official_v0014_arm64_asset_and_integrity():
     assert "curl --fail" in source and "--proto '=https'" in source
     assert "aarch64-base-python:3.12-alpine3.20" in source
     assert "tunnel-client --version" in source
+
+
+def test_dockerfile_build_identity_contract_and_oci_labels():
+    source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    for contract in (
+        "ARG BUILD_VERSION=0.8.1",
+        f"ARG SOURCE_REVISION={SOURCE_REVISION}",
+        "org.opencontainers.image.version",
+        "org.opencontainers.image.revision",
+        "io.guardian.tunnel-client.version",
+        "startup_sha256=",
+        "run_sha256=",
+        "> /app/build-info",
+    ):
+        assert contract in source
+    assert "COPY .git" not in source and "git rev-parse" not in source
 
 
 def test_runtime_has_no_build_toolchain_and_no_guardian_changes_or_mounts():

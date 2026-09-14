@@ -1,6 +1,6 @@
 # Guardian MCP Tunnel
 
-Guardian MCP Tunnel `0.8.0` connects the private Guardian Research MCP to an
+Guardian MCP Tunnel `0.8.1` connects the private Guardian Research MCP to an
 OpenAI Secure MCP Tunnel. It runs outbound-only on Home Assistant Green; it
 does not publish a host port and does not make Guardian port 8098 public.
 
@@ -26,6 +26,13 @@ The Docker build downloads only the official
 pinned SHA-256 before installation. To upgrade, update the version, exact
 official release URL and published checksum together, then repeat build and
 runtime acceptance on aarch64.
+
+Home Assistant supplies `BUILD_VERSION` from `config.yaml`. The Dockerfile also
+supports a non-secret `SOURCE_REVISION` build argument; its deterministic local
+build default is `guardian-mcp-tunnel-0.8.1` because the Supervisor does not
+inject a Git revision. Release builds may override it with an approved source
+revision without requiring `.git` in the build context. Both values and the
+pinned tunnel-client version are recorded as OCI labels.
 
 ## Configuration
 
@@ -63,6 +70,14 @@ The resolved header is scoped to the configured MCP origin and is not sent to
 the OpenAI control plane. After the optional `doctor` preflight, `run` becomes
 the container's foreground process. Fatal validation or preflight errors exit
 non-zero for Supervisor visibility; tunnel-client handles normal reconnects.
+
+At build time `/app/build-info` records the add-on version, source revision,
+tunnel-client version, and SHA-256 fingerprints of `/app/startup.sh` and
+`/run.sh`. Startup recalculates both fingerprints and exits fail-closed on a
+missing, malformed, or mismatching identity. A successful check emits one
+compact `Guardian MCP Tunnel: build version=...` line without configuration or
+secret values. Revalidate both this fingerprint contract and the Doctor
+contract whenever tunnel-client is upgraded.
 
 Verify Supervisor state and redacted logs, then confirm the tunnel connector
 in OpenAI Platform and call `guardian_status` from the assigned ChatGPT
