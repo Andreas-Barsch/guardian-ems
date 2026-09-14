@@ -1,0 +1,25 @@
+name: Guardian MCP Tunnel
+version: 0.8.0
+slug: guardian_mcp_tunnel
+description: Outbound-only OpenAI Secure MCP Tunnel for Guardian Research MCP.
+arch:
+  - aarch64
+startup: application
+boot: auto
+init: false
+ingress: false
+hassio_api: false
+options:
+  tunnel_id: ""
+  control_plane_api_key: ""
+  mcp_auth_token: ""
+  mcp_server_url: http://3195b09a-guardian-research-mcp:8098/mcp
+  run_doctor: true
+  log_level: info
+schema:
+  tunnel_id: str
+  control_plane_api_key: password
+  mcp_auth_token: password
+  mcp_server_url: url
+  run_doctor: bool
+  log_level: list(debug|info|warn|error)
