@@ -56,8 +56,44 @@ printf '%s\n' 'Guardian MCP Tunnel: configuration validated; secrets redacted.'
 
 if [ "$GUARDIAN_RUN_DOCTOR" = true ]; then
     printf '%s\n' 'Guardian MCP Tunnel: running tunnel-client doctor.'
-    "$TUNNEL_CLIENT_BIN" doctor \
-        --control-plane.api-key="file:$CONTROL_PLANE_KEY_FILE" || fail doctor
+    DOCTOR_REPORT_FILE="$SECRET_DIR/doctor-report.json"
+    if "$TUNNEL_CLIENT_BIN" doctor --json \
+        --control-plane.api-key="file:$CONTROL_PLANE_KEY_FILE" \
+        > "$DOCTOR_REPORT_FILE"; then
+        cat "$DOCTOR_REPORT_FILE"
+    elif python3 - "$DOCTOR_REPORT_FILE" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        report = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+failed = report.get("failed_checks")
+checks = report.get("checks")
+if report.get("result") != "fail" or failed != ["oauth_metadata"] or not isinstance(checks, list):
+    raise SystemExit(1)
+
+oauth_failures = [
+    check for check in checks
+    if check.get("id") == "oauth_metadata" and check.get("status") == "FAIL"
+]
+if len(oauth_failures) != 1:
+    raise SystemExit(1)
+summary = oauth_failures[0].get("summary", "")
+if "protected resource metadata missing resource" not in summary:
+    raise SystemExit(1)
+PY
+    then
+        cat "$DOCTOR_REPORT_FILE"
+        printf '%s\n' \
+            'Guardian MCP Tunnel: doctor OAuth metadata failure accepted for configured static Bearer authentication.'
+    else
+        cat "$DOCTOR_REPORT_FILE"
+        fail doctor
+    fi
 fi
 
 printf '%s\n' 'Guardian MCP Tunnel: starting outbound tunnel runtime.'

@@ -28,7 +28,16 @@ def fake_tunnel_client(tmp_path: Path) -> Path:
         "[ -z \"${GUARDIAN_MCP_AUTH_TOKEN+x}\" ]\n"
         "case \"$1\" in\n"
         "  --version) printf '%s\\n' 'tunnel-client version 0.0.14' ;;\n"
-        "  doctor) [ \"${FAKE_DOCTOR_FAIL:-0}\" = 0 ] || exit 7 ;;\n"
+        "  doctor)\n"
+        "    case \"${FAKE_DOCTOR_RESULT:-pass}\" in\n"
+        "      pass) printf '%s\\n' '{\"result\":\"ok\",\"checks\":[]}' ;;\n"
+        "      oauth) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"oauth_metadata\"],\"checks\":[{\"id\":\"oauth_metadata\",\"status\":\"FAIL\",\"summary\":\"oauth discovery invalid metadata: protected resource metadata missing resource\"}]}' ; exit 2 ;;\n"
+        "      other) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"mcp_server_reachable\"],\"checks\":[{\"id\":\"mcp_server_reachable\",\"status\":\"FAIL\",\"summary\":\"connection refused\"}]}' ; exit 2 ;;\n"
+        "      mixed) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"oauth_metadata\",\"mcp_server_reachable\"],\"checks\":[{\"id\":\"oauth_metadata\",\"status\":\"FAIL\",\"summary\":\"protected resource metadata missing resource\"},{\"id\":\"mcp_server_reachable\",\"status\":\"FAIL\",\"summary\":\"connection refused\"}]}' ; exit 2 ;;\n"
+        "      oauth_other) printf '%s\\n' '{\"result\":\"fail\",\"failed_checks\":[\"oauth_metadata\"],\"checks\":[{\"id\":\"oauth_metadata\",\"status\":\"FAIL\",\"summary\":\"authorization server metadata unavailable\"}]}' ; exit 2 ;;\n"
+        "      malformed) printf '%s\\n' 'not-json' ; exit 2 ;;\n"
+        "      *) exit 7 ;;\n"
+        "    esac ;;\n"
         "  run)\n"
         "    [ \"$CONTROL_PLANE_TUNNEL_ID\" = \"$GUARDIAN_TUNNEL_ID\" ]\n"
         "    [ \"$MCP_SERVER_URL\" = \"$GUARDIAN_MCP_SERVER_URL\" ]\n"
@@ -123,7 +132,7 @@ def test_startup_uses_file_backed_local_bearer_and_secret_free_arguments(tmp_pat
     assert result.returncode == 0
     lines = calls.splitlines()
     assert lines[0] == "--version"
-    assert lines[1].startswith("doctor --control-plane.api-key=file:")
+    assert lines[1].startswith("doctor --json --control-plane.api-key=file:")
     assert lines[2].startswith("run --control-plane.api-key=file:")
     assert lines[2].endswith(" --log.level=info --log.format=json")
     assert "configuration validated; secrets redacted" in result.stdout
@@ -133,16 +142,34 @@ def test_startup_uses_file_backed_local_bearer_and_secret_free_arguments(tmp_pat
 
 
 def test_doctor_failure_for_unreachable_mcp_is_fatal_and_redacted(tmp_path):
-    result = run_startup(tmp_path, FAKE_DOCTOR_FAIL="1")
+    result = run_startup(tmp_path, FAKE_DOCTOR_RESULT="other")
     calls = (tmp_path / "calls.txt").read_text(encoding="utf-8")
     combined = result.stdout + result.stderr + calls
     assert result.returncode != 0
     lines = calls.splitlines()
     assert lines[0] == "--version"
-    assert lines[1].startswith("doctor --control-plane.api-key=file:")
+    assert lines[1].startswith("doctor --json --control-plane.api-key=file:")
     assert "preflight failed (doctor)" in result.stderr
     assert " run " not in calls
     assert CONTROL_SECRET not in combined and MCP_SECRET not in combined
+
+
+def test_known_oauth_metadata_failure_is_nonfatal_for_static_bearer(tmp_path):
+    result = run_startup(tmp_path, FAKE_DOCTOR_RESULT="oauth")
+    calls = (tmp_path / "calls.txt").read_text(encoding="utf-8")
+    assert result.returncode == 0
+    assert "doctor OAuth metadata failure accepted" in result.stdout
+    assert "protected resource metadata missing resource" in result.stdout
+    assert calls.splitlines()[2].startswith("run --control-plane.api-key=file:")
+
+
+@pytest.mark.parametrize("doctor_result", ["mixed", "oauth_other", "malformed"])
+def test_doctor_exception_does_not_hide_other_or_unknown_failures(tmp_path, doctor_result):
+    result = run_startup(tmp_path, FAKE_DOCTOR_RESULT=doctor_result)
+    calls = (tmp_path / "calls.txt").read_text(encoding="utf-8")
+    assert result.returncode != 0
+    assert "preflight failed (doctor)" in result.stderr
+    assert not any(line.startswith("run ") for line in calls.splitlines())
 
 
 def test_doctor_can_be_explicitly_skipped_for_supervisor_recovery(tmp_path):
