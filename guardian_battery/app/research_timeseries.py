@@ -130,6 +130,16 @@ class ResearchTimeseriesService:
             if path.is_file(): yield path
             day += timedelta(days=1)
 
+    @staticmethod
+    def _bounded_ranges(path, start_epoch, end_epoch):
+        present = index_path(path).is_file()
+        try:
+            ranges, _ = selected_ranges(path, start_epoch, end_epoch,
+                timestamp_field="timestamp", iso_timestamp=False)
+            return ranges, present, True, "indexed_chunk"
+        except Exception:
+            return ((0, path.stat().st_size),), present, False, "full_scan_fallback"
+
     def soc_current_by_serial(self, physical_serials, timestamp_from, timestamp_to,
                               deadline=None, profile=None):
         """Read SOC/current for several identities in one authoritative scan."""
@@ -313,73 +323,186 @@ class ResearchTimeseriesService:
         end_epoch = datetime.fromisoformat(end).timestamp()
         wanted = set(physical_serials)
         result = {serial: deque(maxlen=max_records) for serial in wanted}
-        truncated = False
+        truncated = False; truncated_serials = set()
         selected_paths = list(self._paths(start, end))
         if io_profile is not None:
             io_profile.update({"files_discovered": len(selected_paths), "files_opened": 0,
                 "bytes_read": 0, "records_inspected": 0, "samples_returned": 0,
-                "index_present": any(index_path(path).is_file() for path in selected_paths),
-                "index_valid": None, "read_mode": "full_scan"})
+                "index_present": False, "index_valid": True,
+                "read_mode": "indexed_chunk"})
         for path in selected_paths:
-            with path.open(encoding="utf-8") as handle:
+            ranges, present, valid, mode = self._bounded_ranges(path, start_epoch, end_epoch)
+            if io_profile is not None:
+                io_profile["index_present"] = io_profile["index_present"] or present
+                io_profile["index_valid"] = io_profile["index_valid"] and valid
+                if mode != "indexed_chunk": io_profile["read_mode"] = mode
+            with path.open("rb") as handle:
                 if io_profile is not None: io_profile["files_opened"] += 1
-                for line in handle:
-                    if io_profile is not None:
-                        io_profile["bytes_read"] += len(line.encode("utf-8"))
-                        io_profile["records_inspected"] += 1
-                    if deadline is not None and time.monotonic() > deadline:
-                        raise ResearchQueryError("timeout", "research query timed out", 503)
-                    try:
-                        record = json.loads(line); epoch = float(record["timestamp"])
-                    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-                        continue
-                    if not start_epoch <= epoch <= end_epoch:
-                        continue
-                    timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
-                    position = int(record.get("module", 0))
-                    observed = record.get("module_serial")
-                    if observed is None and 1 <= position <= 6:
-                        observed = self.identity.serial_at(position, timestamp).get("physical_serial")
-                    if observed not in wanted:
-                        continue
-                    if len(result[observed]) >= max_records:
-                        truncated = True
-                    identity = self.identity.position_at(observed, timestamp)
-                    voltages = tuple(float(value) for value in record.get("voltages_mv", ()))
-                    temperatures = tuple(float(value) for value in record.get("temperatures_c", ()))
-                    median = statistics.median(voltages) if voltages else None
-                    row = {"timestamp": timestamp, "physical_serial": observed,
-                        "position_at_time": identity.get("position_at_time"),
-                        "position_history_id": identity.get("position_history_id"),
-                        "identity_epoch_id": identity.get("identity_epoch_id"),
-                        "identity_resolved": identity.get("resolved", False),
-                        "soc": record.get("soc_percent"), "module_current_a": record.get("current_a"),
-                        "module_voltage_v": record.get("module_voltage_v"),
-                        "module_power_w": record.get("power_w"),
-                        "cell_voltages_mv": list(voltages), "cell_temperatures_c": list(temperatures),
-                        "balancing": record.get("balancing")}
-                    if row["module_voltage_v"] is None and voltages:
-                        row["module_voltage_v"] = sum(voltages) / 1000
-                    if row["module_power_w"] is None and row["module_voltage_v"] is not None \
-                            and row["module_current_a"] is not None:
-                        row["module_power_w"] = (float(row["module_voltage_v"])
-                                                  * float(row["module_current_a"]))
-                    row["derived"] = {"minimum_cell_voltage_mv": min(voltages) if voltages else None,
-                        "maximum_cell_voltage_mv": max(voltages) if voltages else None,
-                        "cell_spread_mv": max(voltages) - min(voltages) if voltages else None,
-                        "lowest_cell": voltages.index(min(voltages)) + 1 if voltages else None,
-                        "highest_cell": voltages.index(max(voltages)) + 1 if voltages else None,
-                        "cell_deviation_from_module_median_mv": [value - median for value in voltages]
-                        if voltages else []}
-                    result[observed].append(row)
+                for range_start, range_end in ranges:
+                    for line in iter_binary_range_lines(handle, range_start, range_end,
+                                                        deadline=deadline):
+                        if io_profile is not None:
+                            io_profile["bytes_read"] += len(line)
+                            io_profile["records_inspected"] += 1
+                        if deadline is not None and time.monotonic() > deadline:
+                            raise ResearchQueryError("timeout", "research query timed out", 503)
+                        serial_token = _SERIAL_TOKEN_BYTES.search(line)
+                        if serial_token is not None:
+                            try: explicit_serial = json.loads(serial_token.group(1))
+                            except (UnicodeDecodeError, json.JSONDecodeError): explicit_serial = None
+                            if isinstance(explicit_serial, str) and explicit_serial not in wanted:
+                                continue
+                        try:
+                            record = json.loads(line); epoch = float(record["timestamp"])
+                        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                            continue
+                        if not start_epoch <= epoch <= end_epoch:
+                            continue
+                        timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                        position = int(record.get("module", 0))
+                        observed = record.get("module_serial")
+                        if observed is None and 1 <= position <= 6:
+                            observed = self.identity.serial_at(position, timestamp).get("physical_serial")
+                        if observed not in wanted:
+                            continue
+                        if len(result[observed]) >= max_records:
+                            truncated = True
+                            truncated_serials.add(observed)
+                        identity = self.identity.position_at(observed, timestamp)
+                        voltages = tuple(float(value) for value in record.get("voltages_mv", ()))
+                        temperatures = tuple(float(value) for value in record.get("temperatures_c", ()))
+                        median = statistics.median(voltages) if voltages else None
+                        row = {"timestamp": timestamp, "physical_serial": observed,
+                            "position_at_time": identity.get("position_at_time"),
+                            "position_history_id": identity.get("position_history_id"),
+                            "identity_epoch_id": identity.get("identity_epoch_id"),
+                            "identity_resolved": identity.get("resolved", False),
+                            "identity_source": ("record_module_serial"
+                                if record.get("module_serial") is not None else "position_history"),
+                            "soc": record.get("soc_percent"), "module_current_a": record.get("current_a"),
+                            "module_voltage_v": record.get("module_voltage_v"),
+                            "module_power_w": record.get("power_w"),
+                            "cell_voltages_mv": list(voltages), "cell_temperatures_c": list(temperatures),
+                            "balancing": record.get("balancing")}
+                        if row["module_voltage_v"] is None and voltages:
+                            row["module_voltage_v"] = sum(voltages) / 1000
+                        if row["module_power_w"] is None and row["module_voltage_v"] is not None \
+                                and row["module_current_a"] is not None:
+                            row["module_power_w"] = (float(row["module_voltage_v"])
+                                                      * float(row["module_current_a"]))
+                        row["derived"] = {"minimum_cell_voltage_mv": min(voltages) if voltages else None,
+                            "maximum_cell_voltage_mv": max(voltages) if voltages else None,
+                            "cell_spread_mv": max(voltages) - min(voltages) if voltages else None,
+                            "lowest_cell": voltages.index(min(voltages)) + 1 if voltages else None,
+                            "highest_cell": voltages.index(max(voltages)) + 1 if voltages else None,
+                            "cell_deviation_from_module_median_mv": [value - median for value in voltages]
+                            if voltages else []}
+                        result[observed].append(row)
         records = {serial: sorted(rows, key=lambda item: item["timestamp"])
                    for serial, rows in result.items()}
         if io_profile is not None:
             io_profile["samples_returned"] = sum(len(rows) for rows in records.values())
+        source_signature = [(path.name, path.stat().st_size, path.stat().st_mtime_ns)
+                            for path in selected_paths]
         return {"records": records, "truncated": truncated,
-                "source_fingerprint": hashlib.sha256(json.dumps([
-                    (path.name, path.stat().st_size, path.stat().st_mtime_ns)
-                    for path in self._paths(start, end)], separators=(",", ":")).encode()).hexdigest()}
+                "truncated_serials": sorted(truncated_serials),
+                "source_signature": source_signature,
+                "source_fingerprint": hashlib.sha256(json.dumps(
+                    source_signature, separators=(",", ":")).encode()).hexdigest()}
+
+    def queries_from_evidence(self, evidence, *, physical_serial, timestamp_from,
+                              timestamp_to, metrics, resolution="auto", max_points=MAX_POINTS):
+        """Project several existing query contracts from one bounded evidence scan."""
+        start, end = self.normalize_range(timestamp_from, timestamp_to)
+        span = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+        selected_resolution = ("full" if span <= FULL_DEFAULT_SECONDS else "display") \
+            if resolution == "auto" else resolution
+        if selected_resolution not in {"full", "display"}:
+            raise ResearchQueryError("invalid_argument", "resolution must be auto, full, or display")
+        if span > (FULL_MAX_SECONDS if selected_resolution == "full" else DISPLAY_MAX_SECONDS):
+            raise ResearchQueryError("range_too_large", "requested range exceeds resolution limit")
+        if type(max_points) is not int or not 1 <= max_points <= MAX_POINTS:
+            raise ResearchQueryError("invalid_argument", f"max_points must be 1..{MAX_POINTS}")
+        start_epoch = datetime.fromisoformat(start).timestamp()
+        end_epoch = datetime.fromisoformat(end).timestamp()
+        rows = [row for row in evidence["records"].get(physical_serial, ())
+                if start_epoch <= datetime.fromisoformat(row["timestamp"]).timestamp() <= end_epoch]
+        results = {}
+        for metric in metrics:
+            if metric not in self.METRICS:
+                raise ResearchQueryError("invalid_argument", "metric is unsupported")
+            points, observation_times = [], []
+            for row in rows:
+                epoch = datetime.fromisoformat(row["timestamp"]).timestamp()
+                pseudo_record = {"soc_percent": row.get("soc"),
+                    "current_a": row.get("module_current_a"),
+                    "module_voltage_v": row.get("module_voltage_v"),
+                    "voltages_mv": row.get("cell_voltages_mv", ()),
+                    "temperatures_c": row.get("cell_temperatures_c", ())}
+                observed_values = self._values(pseudo_record, metric, ())
+                if any(value is not None for _, value in observed_values):
+                    observation_times.append(epoch)
+                for cell, value in observed_values:
+                    if value is None: continue
+                    point = {"timestamp": row["timestamp"], "value": float(value),
+                        "physical_serial": physical_serial,
+                        "position_at_time": row.get("position_at_time"),
+                        "position_history_id": row.get("position_history_id"),
+                        "identity_epoch_id": row.get("identity_epoch_id"),
+                        "identity_resolved": row.get("identity_resolved", False),
+                        "identity_source": row.get("identity_source", "position_history")}
+                    if cell is not None: point["cell_number"] = cell
+                    points.append(point)
+            points.sort(key=lambda item: (item["timestamp"], item.get("cell_number", 0)))
+            source_points = len(points)
+            if selected_resolution == "display" and len(points) > max_points:
+                if max_points == 1: points = points[:1]
+                else:
+                    step = (len(points) - 1) / (max_points - 1)
+                    points = [points[round(index * step)] for index in range(max_points)]
+            page = points[:min(max_points, MAX_RECORDS)]
+            truncated = (len(page) < len(points)
+                         or physical_serial in evidence.get("truncated_serials", ()))
+            observation_times = sorted(set(observation_times))
+            gaps = [right - left for left, right in zip(observation_times,
+                    observation_times[1:]) if right >= left]
+            cadence = statistics.median(gaps) if gaps else None
+            gap_limit = cadence * 3 if cadence else None
+            missing = [{"from": datetime.fromtimestamp(left, timezone.utc).isoformat(),
+                        "to": datetime.fromtimestamp(right, timezone.utc).isoformat()}
+                       for left, right in zip(observation_times, observation_times[1:])
+                       if gap_limit is not None and right - left > gap_limit]
+            covered = []
+            if observation_times:
+                interval_start = observation_times[0]
+                for left, right in zip(observation_times, observation_times[1:]):
+                    if gap_limit is not None and right - left > gap_limit:
+                        covered.append({"from": datetime.fromtimestamp(
+                            interval_start, timezone.utc).isoformat(),
+                            "to": datetime.fromtimestamp(left, timezone.utc).isoformat()})
+                        interval_start = right
+                covered.append({"from": datetime.fromtimestamp(
+                    interval_start, timezone.utc).isoformat(),
+                    "to": datetime.fromtimestamp(observation_times[-1], timezone.utc).isoformat()})
+            first = (datetime.fromtimestamp(min(observation_times), timezone.utc).isoformat()
+                     if observation_times else None)
+            last = (datetime.fromtimestamp(max(observation_times), timezone.utc).isoformat()
+                    if observation_times else None)
+            coverage = {"requested_range": {"from": start, "to": end},
+                "covered_intervals": covered,
+                "missing_intervals": missing if observation_times else [{"from": start, "to": end}],
+                "first_observation": first, "last_observation": last,
+                "sample_count": len(observation_times), "expected_cadence_seconds": cadence,
+                "largest_gap_seconds": max(gaps) if gaps else None,
+                "quality": "complete" if observation_times and not missing and not truncated else
+                           "partial" if observation_times else "absent"}
+            results[metric] = {"metric": metric, "physical_serial": physical_serial,
+                "points": page, "point_count": len(page), "source_point_count": source_points,
+                "resolution": selected_resolution, "coverage": coverage,
+                "truncated": truncated, "next_cursor": None,
+                "source_fingerprint": hashlib.sha256(json.dumps(
+                    evidence["source_signature"]).encode()).hexdigest()}
+        return results
 
     @staticmethod
     def _values(record, metric, cells):
@@ -427,8 +550,8 @@ class ResearchTimeseriesService:
         if io_profile is not None:
             io_profile.update({"files_discovered": len(selected_paths), "files_opened": 0,
                 "bytes_read": 0, "records_inspected": 0, "samples_returned": 0,
-                "index_present": any(index_path(path).is_file() for path in selected_paths),
-                "index_valid": None, "read_mode": "full_scan"})
+                "index_present": False, "index_valid": True,
+                "read_mode": "indexed_chunk"})
         source_signature = [(path.name, path.stat().st_size, path.stat().st_mtime_ns)
                             for path in selected_paths]
         query_hash = hashlib.sha256(json.dumps((metric, physical_serial, start, end,
@@ -439,14 +562,27 @@ class ResearchTimeseriesService:
         points, observation_times, signatures = [], [], []
         for path in selected_paths:
             stat = path.stat(); signatures.append((path.name, stat.st_size, stat.st_mtime_ns))
-            with path.open(encoding="utf-8") as handle:
+            ranges, present, valid, mode = self._bounded_ranges(path, start_epoch, end_epoch)
+            if io_profile is not None:
+                io_profile["index_present"] = io_profile["index_present"] or present
+                io_profile["index_valid"] = io_profile["index_valid"] and valid
+                if mode != "indexed_chunk": io_profile["read_mode"] = mode
+            with path.open("rb") as handle:
                 if io_profile is not None: io_profile["files_opened"] += 1
-                for line in handle:
+                for range_start, range_end in ranges:
+                  for line in iter_binary_range_lines(handle, range_start, range_end,
+                                                       deadline=deadline):
                     if io_profile is not None:
-                        io_profile["bytes_read"] += len(line.encode("utf-8"))
+                        io_profile["bytes_read"] += len(line)
                         io_profile["records_inspected"] += 1
                     if deadline is not None and time.monotonic() > deadline:
                         raise ResearchQueryError("timeout", "research query timed out", 503)
+                    serial_token = _SERIAL_TOKEN_BYTES.search(line)
+                    if serial_token is not None:
+                        try: explicit_serial = json.loads(serial_token.group(1))
+                        except (UnicodeDecodeError, json.JSONDecodeError): explicit_serial = None
+                        if isinstance(explicit_serial, str) and explicit_serial != physical_serial:
+                            continue
                     try:
                         record = json.loads(line); epoch = float(record["timestamp"])
                     except (ValueError, TypeError, KeyError, json.JSONDecodeError):

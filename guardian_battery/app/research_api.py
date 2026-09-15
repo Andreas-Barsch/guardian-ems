@@ -42,7 +42,7 @@ LOG = logging.getLogger("guardian_battery.research")
 PACKAGE_PROFILE_STAGES = (
     "event_id_decode_checksum", "bounded_event_reconstruction", "event_match",
     "identity_epoch_resolution", "historical_position_resolution",
-    "evidence_window_calculation", "module_soc", "module_current",
+    "evidence_window_calculation", "main_multi_metric_read", "module_soc", "module_current",
     "module_voltage", "power_derived", "cell_voltages", "temperature_channels",
     "cell_context_derived", "cell_minimum", "cell_maximum", "cell_spread",
     "lowest_cell", "highest_cell", "median_deviations", "canonical_phase",
@@ -640,10 +640,11 @@ class GuardianResearchApi:
                     "discharge_current_below_a": -0.2, "merge_gap_seconds": 600}},
             semantics_version=SOC_CRASH_VERSION)
 
-    def _low_voltage(self, values, deadline, io_profile=None):
+    def _low_voltage(self, values, deadline, io_profile=None, series_result=None):
         self._required(values, "physical_serial"); start, end = self._range(values)
-        result = self.series.query(metric="cell_voltage", physical_serial=values["physical_serial"],
-            timestamp_from=start, timestamp_to=end, resolution=values.get("resolution", "auto"),
+        result = series_result or self.series.query(metric="cell_voltage",
+            physical_serial=values["physical_serial"], timestamp_from=start, timestamp_to=end,
+            resolution=values.get("resolution", "auto"),
             max_points=int(values.get("max_points", MAX_POINTS)), deadline=deadline,
             io_profile=io_profile)
         alarms = self._alarms({"physical_serial": values["physical_serial"],
@@ -906,20 +907,48 @@ class GuardianResearchApi:
                     timedelta(seconds=duration(values.get("after"), "PT30M"))).isoformat())
         start, end = self._run_package_stage(
             profile, "evidence_window_calculation", deadline, evidence_window)
+        identity = self._run_package_stage(profile, "historical_position_resolution", deadline,
+            lambda: self.identity.position_at(serial, event["start"]))
+        self._run_package_stage(profile, "identity_epoch_resolution", deadline,
+            lambda: identity.get("identity_epoch_id"))
+        stack = self._run_package_stage(profile, "peer_topology_resolution", deadline,
+            lambda: self.identity.topology_at(event["start"]))
+        peer_serials = [row["physical_serial"] for row in stack["positions"]
+                        if row["physical_serial"] and row["physical_serial"] != serial]
+        if profile is not None:
+            profile["counts"]["peer_modules"] = len(peer_serials)
+            profile["counts"]["peer_history_queries"] = 0
+            profile["counts"]["cell_history_queries"] += 1
+            profile["counts"]["cell_history_scans"] += 1
+        main_io = {} if profile is not None else None
+        cell_evidence = self._run_package_stage(profile, "main_multi_metric_read", deadline,
+            lambda: self.series.evidence_by_serial(
+                [serial, *peer_serials], start, end, deadline=deadline,
+                io_profile=main_io), io_profile=main_io)
+        self._run_package_stage(profile, "peer_module_evidence", deadline,
+            lambda: sum(len(cell_evidence["records"].get(peer, ())) for peer in peer_serials))
+        if profile is not None:
+            profile["stages"]["peer_module_evidence"]["samples_returned"] = sum(
+                len(cell_evidence["records"].get(peer, ())) for peer in peer_serials)
+            profile["coverage_status"]["peer_module_evidence"] = (
+                "partial" if cell_evidence.get("truncated") else
+                "complete" if any(cell_evidence["records"].values()) else "unavailable")
         series = {}
         metric_stages = {"soc": "module_soc", "module_current": "module_current",
             "module_voltage": "module_voltage", "cell_voltage": "cell_voltages",
             "cell_temperature": "temperature_channels"}
+        projected = self.series.queries_from_evidence(cell_evidence,
+            physical_serial=serial, timestamp_from=start, timestamp_to=end,
+            metrics=tuple(metric_stages), resolution="auto", max_points=800)
         for metric, stage_name in metric_stages.items():
-            io_profile = {} if profile is not None else None
-            if profile is not None:
-                profile["counts"]["cell_history_queries"] += 1
-                profile["counts"]["cell_history_scans"] += 1
             result = self._run_package_stage(profile, stage_name, deadline,
-                lambda metric=metric, io_profile=io_profile: self.series.query(
-                    metric=metric, physical_serial=serial, timestamp_from=start,
-                    timestamp_to=end, resolution="auto", max_points=800,
-                    deadline=deadline, io_profile=io_profile), io_profile=io_profile)
+                lambda metric=metric: projected[metric])
+            if profile is not None:
+                stage = profile["stages"][stage_name]
+                stage["samples_returned"] = result["point_count"]
+                stage["read_mode"] = main_io.get("read_mode", "not_observed")
+                stage["index_present"] = main_io.get("index_present")
+                stage["index_valid"] = main_io.get("index_valid")
             series[metric] = {**result, "evidence_class": (
                 "DERIVED" if metric == "module_voltage" else "OBSERVED")}
             if profile is not None:
@@ -932,15 +961,22 @@ class GuardianResearchApi:
         event_end = datetime.fromisoformat(event["end"])
         for window in trend_windows:
             window_start = (event_end - timedelta(seconds=duration(window, window))).isoformat()
-            io_profile = {} if profile is not None else None
-            if profile is not None:
-                profile["counts"]["cell_history_queries"] += 1
-                profile["counts"]["cell_history_scans"] += 1
-            trends[window] = self._run_package_stage(profile, "module_soc", deadline,
-                lambda window_start=window_start, io_profile=io_profile: self.series.query(
-                    metric="soc", physical_serial=serial, timestamp_from=window_start,
-                    timestamp_to=event["end"], resolution="auto", max_points=200,
-                    deadline=deadline, io_profile=io_profile), io_profile=io_profile)
+            if window_start >= start:
+                trends[window] = self._run_package_stage(profile, "module_soc", deadline,
+                    lambda window_start=window_start: self.series.queries_from_evidence(
+                        cell_evidence, physical_serial=serial, timestamp_from=window_start,
+                        timestamp_to=event["end"], metrics=("soc",), resolution="auto",
+                        max_points=200)["soc"])
+            else:
+                io_profile = {} if profile is not None else None
+                if profile is not None:
+                    profile["counts"]["cell_history_queries"] += 1
+                    profile["counts"]["cell_history_scans"] += 1
+                trends[window] = self._run_package_stage(profile, "module_soc", deadline,
+                    lambda window_start=window_start, io_profile=io_profile: self.series.query(
+                        metric="soc", physical_serial=serial, timestamp_from=window_start,
+                        timestamp_to=event["end"], resolution="auto", max_points=200,
+                        deadline=deadline, io_profile=io_profile), io_profile=io_profile)
         def isolated(name, callback):
             try: return callback()
             except Exception as exc:
@@ -965,28 +1001,6 @@ class GuardianResearchApi:
                            "complete" if policy.get("segments") else "unavailable"),
                 "daily_diagnostics": ("unavailable" if daily.get("quality") == "unknown"
                                       else "complete")})
-        identity = self._run_package_stage(profile, "historical_position_resolution", deadline,
-            lambda: self.identity.position_at(serial, event["start"]))
-        self._run_package_stage(profile, "identity_epoch_resolution", deadline,
-            lambda: identity.get("identity_epoch_id"))
-        stack = self._run_package_stage(profile, "peer_topology_resolution", deadline,
-            lambda: self.identity.topology_at(event["start"]))
-        peer_serials = [row["physical_serial"] for row in stack["positions"]
-                        if row["physical_serial"] and row["physical_serial"] != serial]
-        if profile is not None:
-            profile["counts"]["peer_modules"] = len(peer_serials)
-            profile["counts"]["peer_history_queries"] = 1 if peer_serials else 0
-            profile["counts"]["cell_history_queries"] += 1
-            profile["counts"]["cell_history_scans"] += 1
-        peer_io = {} if profile is not None else None
-        cell_evidence = self._run_package_stage(profile, "peer_module_evidence", deadline,
-            lambda: self.series.evidence_by_serial(
-                [serial, *peer_serials], start, end, deadline=deadline,
-                io_profile=peer_io), io_profile=peer_io)
-        if profile is not None:
-            profile["coverage_status"]["peer_module_evidence"] = (
-                "partial" if cell_evidence.get("truncated") else
-                "complete" if any(cell_evidence["records"].values()) else "unavailable")
         target_records_all = cell_evidence["records"].get(serial, [])
         crash_start = datetime.fromisoformat(event["start"])
         crash_end = datetime.fromisoformat(event["end"])
@@ -1077,14 +1091,13 @@ class GuardianResearchApi:
         alarms = self._run_package_stage(profile, "alarms", deadline,
             lambda: self._alarms({"physical_serial": serial, "from": start,
                                   "to": end})["data"])
-        low_voltage_io = {} if profile is not None else None
-        if profile is not None:
-            profile["counts"]["cell_history_queries"] += 1
-            profile["counts"]["cell_history_scans"] += 1
+        low_voltage_result = self.series.queries_from_evidence(cell_evidence,
+            physical_serial=serial, timestamp_from=start, timestamp_to=end,
+            metrics=("cell_voltage",), resolution="auto", max_points=200)["cell_voltage"]
         low_voltage = self._run_package_stage(profile, "low_voltage", deadline,
             lambda: self._low_voltage({"physical_serial": serial, "from": start,
                 "to": end, "max_points": "200"}, deadline,
-                io_profile=low_voltage_io)["data"], io_profile=low_voltage_io)
+                series_result=low_voltage_result)["data"])
         coverage_started = time.perf_counter()
         coverage = {key: value["coverage"] for key, value in series.items()}
         coverage["cell_evidence"] = self._evidence_coverage(start, end,

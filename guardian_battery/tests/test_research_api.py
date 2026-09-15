@@ -391,7 +391,7 @@ def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
     assert profile["stages"]["module_soc"]["calls"] == 4
     assert profile["stages"]["module_soc"]["files_opened"] >= 1
     assert profile["stages"]["module_soc"]["bytes_read"] > 0
-    assert profile["stages"]["peer_module_evidence"]["samples_returned"] > 0
+    assert profile["stages"]["main_multi_metric_read"]["samples_returned"] > 0
     assert profile["coverage_status"]["module_soc"] in {"complete", "partial"}
     assert profile["stages"]["soc_recalibration"]["status"] == "unavailable"
 
@@ -416,33 +416,92 @@ def test_evidence_package_profile_adds_no_history_scans(tmp_path, monkeypatch, c
     counts.update(query=0, evidence=0)
     with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
         get(api, suffix + "&profile=true")
-    assert counts == normal == {"query": 9, "evidence": 1}
+    assert counts == normal == {"query": 1, "evidence": 1}
 
 
 def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monkeypatch, caplog):
     api, _, _ = environment(tmp_path)
     event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
-    original = api.series.query
-    def timeout_on_current(*args, **kwargs):
-        if kwargs.get("metric") == "module_current":
-            raise research_timeseries.ResearchQueryError(
-                "timeout", "research query timed out", 503)
-        return original(*args, **kwargs)
-    monkeypatch.setattr(api.series, "query", timeout_on_current)
+    def timeout_on_main_scan(*args, **kwargs):
+        raise research_timeseries.ResearchQueryError(
+            "timeout", "research query timed out", 503)
+    monkeypatch.setattr(api.series, "evidence_by_serial", timeout_on_main_scan)
     with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
         response = get(api, "evidence-package?event_id=" + event["event_id"] + "&profile=true")
     assert response.status == 503 and response.body["error"]["code"] == "timeout"
     profile = package_profile(caplog)
     assert profile["status"] == "timeout"
-    assert profile["stages"]["module_soc"]["status"] == "complete"
-    assert profile["stages"]["module_current"]["status"] == "timeout"
+    assert profile["stages"]["main_multi_metric_read"]["status"] == "timeout"
+    assert profile["stages"]["module_soc"]["status"] == "not_run"
+    assert profile["stages"]["module_current"]["status"] == "not_run"
     assert profile["stages"]["module_voltage"]["status"] == "not_run"
     encoded = json.dumps(profile)
     assert event["event_id"] not in encoded
     assert "SERIAL-M4" not in encoded
     assert "soc_percent" not in encoded
     assert "token" not in encoded.lower() and "secret" not in encoded.lower()
+
+
+def test_package_single_scan_projections_match_existing_query_contracts(tmp_path):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    start, end = "2026-09-10T10:02:00+00:00", "2026-09-11T10:36:00+00:00"
+    metrics = ("soc", "module_current", "module_voltage", "cell_voltage",
+               "cell_temperature")
+    expected = {metric: api.series.query(metric=metric, physical_serial="SERIAL-M4",
+        timestamp_from=start, timestamp_to=end, resolution="auto", max_points=800)
+        for metric in metrics}
+    expected_low_voltage = api.series.query(metric="cell_voltage",
+        physical_serial="SERIAL-M4", timestamp_from=start, timestamp_to=end,
+        resolution="auto", max_points=200)
+
+    package = get(api, "evidence-package?event_id=" + event["event_id"])
+
+    assert package.status == 200
+    for metric in metrics:
+        actual = dict(package.body["data"]["timeseries"][metric])
+        assert actual.pop("evidence_class") in {"OBSERVED", "DERIVED"}
+        assert actual == expected[metric]
+    assert package.body["data"]["low_voltage"]["points"] == expected_low_voltage["points"]
+    assert package.body["data"]["low_voltage"]["coverage"] == expected_low_voltage["coverage"]
+    assert package.body["data"]["evidence_classes"] == ["OBSERVED", "DERIVED"]
+    assert package.body["data"]["inferred"] is False
+
+
+def test_package_uses_indexed_chunks_across_two_utc_days_without_source_changes(
+        tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    first_path = api.paths.cell_history / "2026-09-11.jsonl"
+    second_path = api.paths.cell_history / "2026-09-12.jsonl"
+    first_epoch = datetime(2026, 9, 11, 23, 59, tzinfo=timezone.utc).timestamp()
+    before = {"schema_version": 1, "timestamp": first_epoch, "module": 4,
+        "module_serial": "SERIAL-M4", "soc_percent": 70, "current_a": -1,
+        "voltages_mv": [3300] * 15, "temperatures_c": [20] * 15}
+    after = {**before, "timestamp": first_epoch + 60, "module": 2, "soc_percent": 68}
+    write_jsonl(first_path, [before])
+    write_jsonl(second_path, [after])
+    for path in (first_path, second_path):
+        build_index(path, timestamp_field="timestamp", iso_timestamp=False,
+                    block_records=1)
+    source = [path.read_bytes() for path in (first_path, second_path)]
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T23:58:00Z&to=2026-09-12T00:01:00Z").body["data"]["events"][0]
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        package = get(api, "evidence-package?event_id=" + event["event_id"] + "&profile=true")
+
+    assert package.status == 200
+    assert package.body["data"]["event"]["event_id"] == event["event_id"]
+    assert package.body["data"]["identity_topology"]["position_at_time"] == 4
+    profile = package_profile(caplog)
+    assert profile["counts"]["cell_history_scans"] == 2
+    assert profile["stages"]["main_multi_metric_read"]["files_opened"] == 2
+    assert profile["stages"]["main_multi_metric_read"]["read_mode"] == "indexed_chunk"
+    for stage in ("module_soc", "module_current", "module_voltage",
+                  "cell_voltages", "temperature_channels"):
+        assert profile["stages"][stage]["read_mode"] == "indexed_chunk"
+    assert [path.read_bytes() for path in (first_path, second_path)] == source
 
 
 def package_for_crash(api):
