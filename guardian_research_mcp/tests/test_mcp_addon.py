@@ -21,7 +21,8 @@ sys.path.insert(0, str(APP))
 
 from errors import GatewayError
 from gateway import MAX_FULL_RESOLUTION, MAX_PARALLEL, MAX_QUEUE, QueryGate
-from guardian_client import GuardianResearchClient, MAX_RESPONSE_BYTES
+from guardian_client import (EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS,
+                             GuardianResearchClient, MAX_RESPONSE_BYTES)
 from server import build_app
 from settings import Settings, load_settings
 
@@ -217,6 +218,22 @@ def test_error_mapping_payload_limit_and_no_backend_path():
         assert large.value.code == "response_too_large"
         assert "/share" not in str(known.value) + str(large.value)
     asyncio.run(run())
+
+
+def test_evidence_package_transport_allows_margin_above_guardian_deadline():
+    observed = {}
+    async def handler(request):
+        observed[request.url.path] = dict(request.extensions["timeout"])
+        return httpx2.Response(200, json=envelope({}))
+    client = GuardianResearchClient(settings(), transport=httpx2.MockTransport(handler))
+    async def run():
+        await client.get("status", {})
+        await client.get("evidence-package", {"event_id": "opaque"})
+    asyncio.run(run())
+    assert set(observed["/api/research/status"].values()) == {2}
+    assert set(observed["/api/research/evidence-package"].values()) == {
+        EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS}
+    assert EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS == 20
 
 
 def test_client_cancellation_closes_inflight_guardian_request():

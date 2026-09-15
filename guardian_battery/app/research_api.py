@@ -33,8 +33,8 @@ API_ROUTE = "/api/research"
 SCHEMA_VERSION = 1
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_SERIALS = 6
-HARD_TIMEOUT_SECONDS = 15
 QUERY_TIMEOUT_SECONDS = 10
+EVIDENCE_PACKAGE_TIMEOUT_SECONDS = 15
 SOC_CRASH_VERSION = "guardian_soc_crash_v1"
 EVIDENCE_PACKAGE_VERSION = "research_soc_crash_evidence_v2"
 LOG = logging.getLogger("guardian_battery.research")
@@ -114,8 +114,11 @@ class QueryGate:
                 if not acquired_raw:
                     raise ResearchQueryError("busy", "full-resolution query busy", 429)
             with self.lock: self.active += 1
-            result = callback(started + QUERY_TIMEOUT_SECONDS)
-            if time.monotonic() - started > HARD_TIMEOUT_SECONDS:
+            timeout_seconds = (EVIDENCE_PACKAGE_TIMEOUT_SECONDS
+                               if endpoint == "evidence-package" else QUERY_TIMEOUT_SECONDS)
+            deadline = started + timeout_seconds
+            result = callback(deadline)
+            if time.monotonic() > deadline:
                 raise ResearchQueryError("timeout", "research query exceeded hard deadline", 503)
             size = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode())
             if size > MAX_RESPONSE_BYTES:

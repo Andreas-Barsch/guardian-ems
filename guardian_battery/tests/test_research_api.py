@@ -10,8 +10,10 @@ from urllib.parse import quote
 import pytest
 
 from position_history import PositionSnapshot
-from research_api import (GuardianResearchApi, PACKAGE_PROFILE_STAGES,
-                          READER_ACCOUNTED_TIMINGS, ResearchPaths, research_envelope)
+from research_api import (EVIDENCE_PACKAGE_TIMEOUT_SECONDS, GuardianResearchApi,
+                          PACKAGE_PROFILE_STAGES, QUERY_TIMEOUT_SECONDS,
+                          QueryGate, READER_ACCOUNTED_TIMINGS, ResearchPaths,
+                          research_envelope)
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
 from history_block_index import build_index, index_path
@@ -58,6 +60,31 @@ def environment(tmp_path):
 
 def get(api, suffix):
     return api.handle("GET", "/api/research/" + suffix)
+
+
+@pytest.mark.parametrize("endpoint,seconds", [
+    ("timeseries", 10), ("events/soc-crashes", 10), ("evidence-package", 15)])
+def test_query_gate_uses_fixed_endpoint_specific_absolute_deadline(
+        monkeypatch, endpoint, seconds):
+    clock = iter((100.0, 100.25, 100.5))
+    monkeypatch.setattr("research_api.time.monotonic", lambda: next(clock))
+    captured = []
+    result = QueryGate().run(endpoint, False,
+        lambda deadline: captured.append(deadline) or {"data": {}})
+    assert result == {"data": {}}
+    assert captured == [100.0 + seconds]
+    assert (QUERY_TIMEOUT_SECONDS, EVIDENCE_PACKAGE_TIMEOUT_SECONDS) == (10, 15)
+
+
+@pytest.mark.parametrize("endpoint,elapsed", [
+    ("timeseries", 10.001), ("evidence-package", 15.001)])
+def test_query_gate_endpoint_deadlines_remain_hard_and_fail_closed(
+        monkeypatch, endpoint, elapsed):
+    clock = iter((100.0, 100.0 + elapsed, 100.0 + elapsed))
+    monkeypatch.setattr("research_api.time.monotonic", lambda: next(clock))
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        QueryGate().run(endpoint, False, lambda deadline: {"data": {}})
+    assert error.value.code == "timeout" and error.value.status == 503
 
 
 def test_envelope_contract_contains_only_observed_or_derived():
@@ -506,6 +533,8 @@ def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
     assert (api.paths.cell_history / "2026-09-11.jsonl").read_bytes() == source
     profile = package_profile(caplog)
     assert profile["status"] == "ok"
+    assert 14 < profile["stages"]["event_id_decode_checksum"][
+        "deadline_remaining_seconds_at_entry"] <= EVIDENCE_PACKAGE_TIMEOUT_SECONDS
     assert set(profile["stages"]) == set(PACKAGE_PROFILE_STAGES)
     assert profile["stages"]["module_soc"]["calls"] == 4
     soc_reader = profile["stages"]["module_soc"]["reader"]
@@ -550,6 +579,38 @@ def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
         0.0, profile["stages"]["target_multi_metric_read"]["elapsed_seconds"] - accounted))
     assert profile["coverage_status"]["module_soc"] in {"complete", "partial"}
     assert profile["stages"]["soc_recalibration"]["status"] == "unavailable"
+
+
+def test_evidence_package_passes_one_absolute_deadline_to_detector_and_readers(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    deadlines = []
+    original_detector = api.series.soc_current_by_serial
+    original_evidence = api.series.evidence_by_serial
+    def detector(*args, **kwargs):
+        deadlines.append(kwargs.get("deadline", args[3]))
+        return original_detector(*args, **kwargs)
+    def evidence(*args, **kwargs):
+        deadlines.append(kwargs["deadline"])
+        return original_evidence(*args, **kwargs)
+    monkeypatch.setattr(api.series, "soc_current_by_serial", detector)
+    monkeypatch.setattr(api.series, "evidence_by_serial", evidence)
+    response = get(api, "evidence-package?event_id=" + event["event_id"])
+    assert response.status == 200
+    assert len(deadlines) >= 3 and len(set(deadlines)) == 1
+
+
+def test_unknown_evidence_event_fails_before_history_package_reads(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    reads = []
+    monkeypatch.setattr(api.series, "evidence_by_serial",
+                        lambda *args, **kwargs: reads.append(True))
+    response = get(api, "evidence-package?event_id=invalid")
+    assert response.status == 400
+    assert response.body["error"]["code"] == "invalid_argument"
+    assert reads == []
 
 
 def test_evidence_package_profile_adds_no_history_scans(tmp_path, monkeypatch, caplog):

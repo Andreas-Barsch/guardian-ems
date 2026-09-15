@@ -11,6 +11,7 @@ from errors import GatewayError
 from settings import Settings
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS = 20.0
 
 
 class GuardianResearchClient:
@@ -43,13 +44,16 @@ class GuardianResearchClient:
             "Accept": "application/json",
             "User-Agent": "guardian-research-mcp/0.8.1",
         }
+        timeout_seconds = (EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS
+                           if endpoint.strip("/") == "evidence-package"
+                           else self.settings.guardian_timeout_seconds)
         try:
             async with httpx2.AsyncClient(
                 transport=self.transport,
-                timeout=self.settings.guardian_timeout_seconds,
+                timeout=timeout_seconds,
                 follow_redirects=False,
             ) as client:
-                async with asyncio.timeout(self.settings.guardian_timeout_seconds):
+                async with asyncio.timeout(timeout_seconds):
                     async with client.stream("GET", url, headers=headers) as response:
                         content_length = response.headers.get("content-length")
                         if content_length:
