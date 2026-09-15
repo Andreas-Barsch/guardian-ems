@@ -2,6 +2,23 @@
 
 Stand: 2026-09-14
 
+## Guardian Battery 0.8.1 – SOC Crash Evidence v2 Acceptance Build
+
+- `0.8.1` is an acceptance-build identifier, not yet a final release decision.
+- Runtime identity is logged without configuration values or secrets as Guardian
+  Battery `0.8.1`, source commit
+  `43c04ab0b67fec4bcf2e4bcdb34b31767a90b620`, and Research semantics
+  `research_soc_crash_evidence_v2`.
+- The acceptance build changes no detector, Evidence Package content, coverage,
+  identity, peer, BMS, diagnostic, MQTT, RS485 or Hycube behavior beyond the
+  already validated source commit.
+- Never run the repository and local Guardian Battery apps concurrently. If the
+  existing custom repository cannot safely serve a branch with its production
+  repository identity, stop the production Battery before starting the local
+  acceptance app and preserve all existing options explicitly.
+- Guardian Research MCP and Guardian MCP Tunnel remain `0.8.1`; their tokens,
+  allowlists and security boundaries remain unchanged.
+
 ## Guardian MCP Tunnel 0.8.1 – HA Green Production Acceptance
 
 - Home Assistant Green/aarch64 successfully updated the local outbound-only

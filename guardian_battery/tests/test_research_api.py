@@ -10,6 +10,8 @@ from position_history import PositionSnapshot
 from research_api import GuardianResearchApi, ResearchPaths, research_envelope
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
+from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
+                     RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT)
 
 
 def snapshot(at, positions):
@@ -58,6 +60,13 @@ def test_envelope_contract_contains_only_observed_or_derived():
     assert value["research_schema_version"] == 1
     assert value["evidence_class"] in {"OBSERVED", "DERIVED"}
     assert value["quality"]["status"] == "complete"
+
+
+def test_acceptance_build_identity_is_explicit_and_non_secret():
+    assert GUARDIAN_VERSION == "0.8.1"
+    assert DIAGNOSTIC_ENGINE_VERSION == "0.4.12"
+    assert SOURCE_COMMIT == "43c04ab0b67fec4bcf2e4bcdb34b31767a90b620"
+    assert RESEARCH_SEMANTICS_VERSION == "research_soc_crash_evidence_v2"
 
 
 def test_identity_is_time_valid_across_position_change(tmp_path):
