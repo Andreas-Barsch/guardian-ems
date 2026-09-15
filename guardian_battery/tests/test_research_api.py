@@ -1,4 +1,5 @@
 import json
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,8 @@ from position_history import PositionSnapshot
 from research_api import GuardianResearchApi, ResearchPaths, research_envelope
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
+from history_block_index import build_index
+import research_timeseries
 from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
                      RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT)
 
@@ -199,6 +202,49 @@ def test_soc_crash_is_deterministic_and_requires_discharge(tmp_path):
     assert events[0]["detector_version"] == "guardian_soc_crash_v1"
     assert events[0]["lowest_cell"] == 1 and events[0]["cell_spread_mv"] == 14
     assert events[0]["event_id"] == second.body["data"]["events"][0]["event_id"]
+
+
+def test_soc_crash_event_is_identical_to_legacy_authoritative_scan(tmp_path):
+    api, _, _ = environment(tmp_path)
+    start, end = "2026-09-11T09:00:00+00:00", "2026-09-11T12:00:00+00:00"
+    optimized = api._soc_crashes({"physical_serial": "SERIAL-M4",
+                                  "from": start, "to": end}, float("inf"))
+    original = api.series.soc_current_by_serial
+    def legacy(serials, timestamp_from, timestamp_to, deadline=None):
+        normalized_start, normalized_end = api.series.normalize_range(
+            timestamp_from, timestamp_to)
+        lower = datetime.fromisoformat(normalized_start).timestamp()
+        upper = datetime.fromisoformat(normalized_end).timestamp()
+        wanted = set(serials); result = {serial: [] for serial in wanted}
+        for path in api.series._paths(normalized_start, normalized_end):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line); epoch = float(record["timestamp"])
+                if not lower <= epoch <= upper:
+                    continue
+                timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                observed = record.get("module_serial")
+                if observed is None:
+                    observed = api.identity.serial_at(int(record.get("module", 0)), timestamp)[
+                        "physical_serial"]
+                if observed not in wanted:
+                    continue
+                identity = api.identity.position_at(observed, timestamp)
+                voltages = record.get("voltages_mv") or []
+                result[observed].append({"timestamp": timestamp,
+                    "soc": float(record["soc_percent"]),
+                    "current": float(record["current_a"]),
+                    "identity_epoch_id": identity.get("identity_epoch_id"),
+                    "position_at_time": identity.get("position_at_time"),
+                    "lowest_cell": voltages.index(min(voltages)) + 1 if voltages else None,
+                    "cell_spread_mv": max(voltages) - min(voltages) if voltages else None})
+        return result
+    api.series.soc_current_by_serial = legacy
+    try:
+        legacy_result = api._soc_crashes({"physical_serial": "SERIAL-M4",
+                                          "from": start, "to": end}, float("inf"))
+    finally:
+        api.series.soc_current_by_serial = original
+    assert optimized == legacy_result
 
 
 def test_low_voltage_returns_evidence_without_invented_alarm(tmp_path):
@@ -431,6 +477,86 @@ def test_soc_crash_package_remains_bounded_for_large_24h_input(tmp_path):
     assert evidence["source_sample_count"] > 600
     assert len(evidence["records"]) == 600 and evidence["truncated"] is True
     assert len(json.dumps(response.body).encode()) < 2 * 1024 * 1024
+
+
+def test_soc_crash_single_serial_realistic_24h_stays_within_deadline(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    start = datetime(2026, 9, 11, tzinfo=timezone.utc).timestamp()
+    rows = []
+    for minute in range(24 * 60):
+        for module in range(1, 7):
+            rows.append({"schema_version": 1, "timestamp": start + minute * 60,
+                "module": module, "module_serial": f"SERIAL-M{module}",
+                "soc_percent": 70 - (2 if module == 4 and minute == 721 else 0),
+                "current_a": -1, "voltages_mv": [3300 + cell for cell in range(15)]})
+    write_jsonl(path, rows)
+    started = time.monotonic()
+    response = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T00:00:00Z&to=2026-09-11T23:59:59Z")
+    elapsed = time.monotonic() - started
+    assert response.status == 200
+    assert response.body["data"]["events"][0]["soc_loss"] == 2
+    assert elapsed < 5
+
+
+def test_soc_crash_scan_uses_indexed_time_range_and_rejects_foreign_serial_early(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    start = datetime(2026, 9, 11, tzinfo=timezone.utc).timestamp()
+    rows = []
+    for hour in range(24):
+        for module in range(1, 7):
+            rows.append({"schema_version": 1, "timestamp": start + hour * 3600,
+                "module": module, "module_serial": f"SERIAL-M{module}",
+                "soc_percent": 70, "current_a": -1, "voltages_mv": [3300] * 15})
+    write_jsonl(path, rows)
+    build_index(path, timestamp_field="timestamp", iso_timestamp=False,
+                block_records=6)
+    original = research_timeseries.json.loads
+    decoded_records = []
+    def tracked(value, *args, **kwargs):
+        result = original(value, *args, **kwargs)
+        if isinstance(result, dict) and "module_serial" in result:
+            decoded_records.append(result)
+        return result
+    monkeypatch.setattr(research_timeseries.json, "loads", tracked)
+    response = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T10:00:00Z&to=2026-09-11T11:00:00Z")
+    assert response.status == 200
+    assert decoded_records
+    assert {item["module_serial"] for item in decoded_records} == {"SERIAL-M4"}
+    assert all(start + 10 * 3600 <= item["timestamp"] <= start + 11 * 3600
+               for item in decoded_records)
+
+
+def test_soc_crash_timeout_remains_fail_closed(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    clock = iter((0, 0, 20, 20, 20, 20))
+    monkeypatch.setattr(research_timeseries.time, "monotonic", lambda: next(clock, 20))
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        api.series.soc_current_by_serial(["SERIAL-M4"],
+            "2026-09-11T09:00:00Z", "2026-09-11T12:00:00Z", deadline=10)
+    assert error.value.code == "timeout" and error.value.status == 503
+
+
+def test_soc_crash_scan_preserves_inclusive_utc_epoch_boundaries(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    start = datetime(2026, 9, 11, 10, tzinfo=timezone.utc).timestamp()
+    rows = [{"schema_version": 1, "timestamp": epoch, "module": 4,
+        "module_serial": "SERIAL-M4", "soc_percent": soc, "current_a": -1,
+        "voltages_mv": [3300] * 15}
+        for epoch, soc in ((start - 1, 90), (start, 70), (start + 60, 68),
+                           (start + 120, 66), (start + 121, 40))]
+    write_jsonl(path, rows)
+    result = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T10:00:00Z&to=2026-09-11T10:02:00Z")
+    event = result.body["data"]["events"][0]
+    assert event["start"] == "2026-09-11T10:00:00+00:00"
+    assert event["end"] == "2026-09-11T10:02:00+00:00"
+    assert event["soc_before"] == 70 and event["soc_after"] == 66
 
 
 def test_evidence_package_event_id_survives_api_restart(tmp_path):

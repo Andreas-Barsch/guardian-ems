@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import statistics
 import time
 from collections import deque
@@ -12,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from maintenance import normalize_utc_timestamp
+from history_block_index import selected_ranges
 
 MAX_RECORDS = 10_000
 MAX_POINTS = 6_000
@@ -19,6 +21,7 @@ MAX_CELLS = 15
 FULL_DEFAULT_SECONDS = 86400
 FULL_MAX_SECONDS = 7 * 86400
 DISPLAY_MAX_SECONDS = 90 * 86400
+_SERIAL_TOKEN_BYTES = re.compile(rb'"module_serial"\s*:\s*("(?:[^"\\]|\\.)*")')
 
 
 class ResearchQueryError(ValueError):
@@ -86,10 +89,26 @@ class ResearchTimeseriesService:
         wanted = set(physical_serials)
         result = {serial: [] for serial in wanted}
         for path in self._paths(start, end):
-            with path.open(encoding="utf-8") as handle:
-                for line in handle:
+            try:
+                ranges, _ = selected_ranges(path, start_epoch, end_epoch,
+                    timestamp_field="timestamp", iso_timestamp=False)
+            except Exception:
+                ranges = ((0, path.stat().st_size),)
+            with path.open("rb") as handle:
+              for range_start, range_end in ranges:
+                handle.seek(range_start)
+                while handle.tell() < range_end:
+                    line = handle.readline()
                     if deadline is not None and time.monotonic() > deadline:
                         raise ResearchQueryError("timeout", "research query timed out", 503)
+                    serial_token = _SERIAL_TOKEN_BYTES.search(line)
+                    if serial_token is not None:
+                        try:
+                            explicit_serial = json.loads(serial_token.group(1))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            explicit_serial = None
+                        if isinstance(explicit_serial, str) and explicit_serial not in wanted:
+                            continue
                     try:
                         record = json.loads(line); epoch = float(record["timestamp"])
                     except (ValueError, TypeError, KeyError, json.JSONDecodeError):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from bisect import bisect_right
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,8 @@ class ResearchIdentityResolver:
     def __init__(self, snapshots):
         self.snapshots = sorted(snapshots, key=lambda item: (
             item.effective_at, item.created_at, item.position_history_id))
+        self._effective_at = [item.effective_at for item in self.snapshots]
+        self._epochs_by_serial = None
 
     @classmethod
     def from_path(cls, path: Path | str):
@@ -27,8 +30,8 @@ class ResearchIdentityResolver:
 
     def topology_at(self, timestamp):
         target = normalize_utc_timestamp(timestamp, "timestamp")
-        matches = [item for item in self.snapshots if item.effective_at <= target]
-        snapshot = matches[-1] if matches else None
+        index = bisect_right(self._effective_at, target) - 1
+        snapshot = self.snapshots[index] if index >= 0 else None
         positions = []
         for position in range(1, 7):
             serial = snapshot.positions[str(position)] if snapshot else None
@@ -41,33 +44,46 @@ class ResearchIdentityResolver:
                 snapshot.position_history_id if snapshot else None, "positions": positions}
 
     def position_at(self, physical_serial, timestamp):
-        topology = self.topology_at(timestamp)
-        matches = [item for item in topology["positions"]
-                   if item["physical_serial"] == physical_serial]
+        target = normalize_utc_timestamp(timestamp, "timestamp")
+        index = bisect_right(self._effective_at, target) - 1
+        snapshot = self.snapshots[index] if index >= 0 else None
+        matches = ([int(position) for position, serial in snapshot.positions.items()
+                    if serial == physical_serial] if snapshot else [])
         if len(matches) != 1:
             return {"physical_serial": physical_serial, "position_at_time": None,
-                "resolved": False, "position_history_id": topology["position_history_id"],
+                "resolved": False, "position_history_id":
+                snapshot.position_history_id if snapshot else None,
                 "identity_epoch_id": None}
-        item = matches[0]
-        return {"physical_serial": physical_serial, "position_at_time": item["position"],
-            "resolved": True, "position_history_id": item["position_history_id"],
-            "identity_epoch_id": item["identity_epoch_id"]}
+        epoch = self.epoch_at(physical_serial, target)
+        return {"physical_serial": physical_serial, "position_at_time": matches[0],
+            "resolved": True, "position_history_id": snapshot.position_history_id,
+            "identity_epoch_id": epoch.get("identity_epoch_id") if epoch else None}
 
     def serial_at(self, position, timestamp):
         if not isinstance(position, int) or not 1 <= position <= 6:
             raise ValueError("position must be between 1 and 6")
-        item = self.topology_at(timestamp)["positions"][position - 1]
-        return {**item, "position_at_time": position}
+        target = normalize_utc_timestamp(timestamp, "timestamp")
+        index = bisect_right(self._effective_at, target) - 1
+        snapshot = self.snapshots[index] if index >= 0 else None
+        serial = snapshot.positions[str(position)] if snapshot else None
+        epoch = self.epoch_at(serial, target) if serial else None
+        return {"position": position, "physical_serial": serial,
+            "resolved": serial is not None, "position_history_id":
+            snapshot.position_history_id if snapshot else None,
+            "identity_epoch_id": epoch.get("identity_epoch_id") if epoch else None,
+            "position_at_time": position}
 
-    def epochs(self, physical_serial=None, timestamp_from=None, timestamp_to=None):
+    def _all_epochs(self):
+        if self._epochs_by_serial is not None:
+            return self._epochs_by_serial
+        result = {}
         serials = sorted({serial for snapshot in self.snapshots
-                          for serial in snapshot.positions.values() if serial and
-                          (physical_serial is None or serial == physical_serial)})
-        result = []
+                          for serial in snapshot.positions.values() if serial})
         for serial in serials:
-            current = None
+            values = []
             first_known = next(index for index, snapshot in enumerate(self.snapshots)
                                if serial in snapshot.positions.values())
+            current = None
             for index in range(first_known, len(self.snapshots)):
                 snapshot = self.snapshots[index]
                 position = next((int(key) for key, value in snapshot.positions.items()
@@ -82,7 +98,15 @@ class ResearchIdentityResolver:
                     "position_history_id": snapshot.position_history_id,
                     "identity_epoch_id": self._epoch_id(
                         serial, snapshot.effective_at, position)}
-                result.append(current)
+                values.append(current)
+            result[serial] = values
+        self._epochs_by_serial = result
+        return result
+
+    def epochs(self, physical_serial=None, timestamp_from=None, timestamp_to=None):
+        cached = self._all_epochs()
+        serials = [physical_serial] if physical_serial is not None else sorted(cached)
+        result = [dict(item) for serial in serials for item in cached.get(serial, ())]
         if timestamp_from:
             start = datetime.fromisoformat(normalize_utc_timestamp(timestamp_from, "from"))
             result = [item for item in result if item["valid_to"] is None or
