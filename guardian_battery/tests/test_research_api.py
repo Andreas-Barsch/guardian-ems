@@ -10,8 +10,8 @@ from urllib.parse import quote
 import pytest
 
 from position_history import PositionSnapshot
-from research_api import (GuardianResearchApi, PACKAGE_PROFILE_STAGES, ResearchPaths,
-                          research_envelope)
+from research_api import (GuardianResearchApi, PACKAGE_PROFILE_STAGES,
+                          READER_ACCOUNTED_TIMINGS, ResearchPaths, research_envelope)
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
 from history_block_index import build_index
@@ -414,7 +414,19 @@ def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
         "raw_chunk_read", "serial_prefilter", "full_json_decode",
         "timestamp_range_check", "identity_assignment", "cell_array_conversion",
         "derived_cell_context", "record_materialization", "deadline_check",
-        "balancing_extraction", "temperature_extraction", "module_metric_extraction"}
+        "balancing_extraction", "temperature_extraction", "module_metric_extraction",
+        "file_discovery_setup", "block_index_load_validate_select",
+        "source_open_range_seek", "binary_line_framing",
+        "result_sort_signature_fingerprint"}
+    assert all(reader["timings_seconds"][name] >= 0 for name in (
+        "file_discovery_setup", "block_index_load_validate_select",
+        "source_open_range_seek", "binary_line_framing",
+        "result_sort_signature_fingerprint"))
+    accounted = sum(reader["timings_seconds"][name]
+                    for name in READER_ACCOUNTED_TIMINGS)
+    assert reader["reader_accounted_seconds"] == pytest.approx(accounted)
+    assert reader["reader_unattributed_seconds"] == pytest.approx(max(
+        0.0, profile["stages"]["target_multi_metric_read"]["elapsed_seconds"] - accounted))
     assert profile["coverage_status"]["module_soc"] in {"complete", "partial"}
     assert profile["stages"]["soc_recalibration"]["status"] == "unavailable"
 
@@ -470,7 +482,10 @@ def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monke
                 "raw_chunk_read", "serial_prefilter", "full_json_decode",
                 "timestamp_range_check", "identity_assignment", "cell_array_conversion",
                 "derived_cell_context", "record_materialization", "deadline_check",
-                "balancing_extraction", "temperature_extraction", "module_metric_extraction")}})
+                "balancing_extraction", "temperature_extraction", "module_metric_extraction",
+                "file_discovery_setup", "block_index_load_validate_select",
+                "source_open_range_seek", "binary_line_framing",
+                "result_sort_signature_fingerprint")}})
         raise research_timeseries.ResearchQueryError(
             "timeout", "research query timed out", 503)
     monkeypatch.setattr(api.series, "evidence_by_serial", timeout_on_main_scan)
@@ -489,6 +504,9 @@ def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monke
     assert reader["selected_progress_percent"] == 25
     assert reader["target_records_accepted"] + reader["peer_records_accepted"] == 2
     assert reader["timings_seconds"]["raw_chunk_read"] == pytest.approx(0.001)
+    assert reader["reader_accounted_seconds"] == pytest.approx(
+        len(READER_ACCOUNTED_TIMINGS) * 0.001)
+    assert reader["reader_unattributed_seconds"] >= 0
     encoded = json.dumps(profile)
     assert event["event_id"] not in encoded
     assert "SERIAL-M4" not in encoded
@@ -1036,6 +1054,24 @@ def test_chunk_reader_reassembles_record_spanning_many_chunks_and_large_line():
         io.BytesIO(blob), 0, len(blob), chunk_size=257))
     assert actual == expected
     assert len(actual) == 2 and len(actual[0]) > 100_000
+
+
+def test_chunk_reader_framing_timer_excludes_consumer_time():
+    io_profile = {"raw_chunk_reads": 0, "timings_seconds": {
+        "raw_chunk_read": 0.0, "deadline_check": 0.0,
+        "source_open_range_seek": 0.0, "binary_line_framing": 0.0}}
+    iterator = research_timeseries.iter_binary_range_lines(
+        io.BytesIO(b"first\nsecond\n"), 0, 13, chunk_size=13,
+        io_profile=io_profile)
+
+    assert next(iterator) == b"first\n"
+    measured_before_wait = io_profile["timings_seconds"]["binary_line_framing"]
+    time.sleep(0.05)
+    assert next(iterator) == b"second\n"
+
+    assert io_profile["timings_seconds"]["binary_line_framing"] < 0.01
+    assert (io_profile["timings_seconds"]["binary_line_framing"]
+            - measured_before_wait) < 0.01
 
 
 def test_soc_crash_chunk_reader_preserves_two_day_utc_boundary_and_bad_line(tmp_path):

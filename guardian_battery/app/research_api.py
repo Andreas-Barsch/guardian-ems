@@ -39,6 +39,14 @@ SOC_CRASH_VERSION = "guardian_soc_crash_v1"
 EVIDENCE_PACKAGE_VERSION = "research_soc_crash_evidence_v2"
 LOG = logging.getLogger("guardian_battery.research")
 
+READER_ACCOUNTED_TIMINGS = (
+    "file_discovery_setup", "block_index_load_validate_select",
+    "source_open_range_seek", "raw_chunk_read", "binary_line_framing",
+    "serial_prefilter", "full_json_decode", "timestamp_range_check",
+    "identity_assignment", "cell_array_conversion", "derived_cell_context",
+    "balancing_extraction", "module_metric_extraction", "record_materialization",
+    "deadline_check", "result_sort_signature_fingerprint")
+
 PACKAGE_PROFILE_STAGES = (
     "event_id_decode_checksum", "bounded_event_reconstruction", "event_match",
     "identity_epoch_resolution", "historical_position_resolution",
@@ -843,6 +851,12 @@ class GuardianResearchApi:
                 stage["index_present"] = io_profile.get("index_present")
                 stage["index_valid"] = io_profile.get("index_valid")
                 stage["read_mode"] = io_profile.get("read_mode", "not_observed")
+                timings = io_profile.get("timings_seconds", {})
+                accounted = sum(float(timings.get(key, 0.0))
+                                for key in READER_ACCOUNTED_TIMINGS)
+                io_profile["reader_accounted_seconds"] = accounted
+                io_profile["reader_unattributed_seconds"] = max(
+                    0.0, stage["elapsed_seconds"] - accounted)
                 stage["reader"] = dict(io_profile)
 
     def _package(self, values, deadline):

@@ -32,6 +32,9 @@ def iter_binary_range_lines(handle, range_start, range_end, *,
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     started = time.perf_counter(); handle.seek(range_start)
+    if io_profile is not None:
+        io_profile["timings_seconds"]["source_open_range_seek"] += (
+            time.perf_counter() - started)
     if profile is not None:
         profile["stages_seconds"]["range_seek"] += time.perf_counter() - started
     remaining = max(0, range_end - range_start)
@@ -60,14 +63,31 @@ def iter_binary_range_lines(handle, range_start, range_end, *,
         if deadline_exceeded:
             raise ResearchQueryError("timeout", "research query timed out", 503)
         remaining -= len(chunk)
+        framing_started = time.perf_counter() if io_profile is not None else None
         parts = chunk.split(b"\n")
         if len(parts) == 1:
             carry.extend(chunk)
+            if io_profile is not None:
+                io_profile["timings_seconds"]["binary_line_framing"] += (
+                    time.perf_counter() - framing_started)
             continue
-        carry.extend(parts[0]); yield bytes(carry) + b"\n"; carry.clear()
+        carry.extend(parts[0]); framed = bytes(carry) + b"\n"; carry.clear()
+        if io_profile is not None:
+            io_profile["timings_seconds"]["binary_line_framing"] += (
+                time.perf_counter() - framing_started)
+        yield framed
         for part in parts[1:-1]:
-            yield part + b"\n"
+            framing_started = time.perf_counter() if io_profile is not None else None
+            framed = part + b"\n"
+            if io_profile is not None:
+                io_profile["timings_seconds"]["binary_line_framing"] += (
+                    time.perf_counter() - framing_started)
+            yield framed
+        framing_started = time.perf_counter() if io_profile is not None else None
         carry.extend(parts[-1])
+        if io_profile is not None:
+            io_profile["timings_seconds"]["binary_line_framing"] += (
+                time.perf_counter() - framing_started)
     if carry:
         # The index contract is line-aligned. Preserve legacy readline behavior
         # fail-closed even for an externally supplied partial range boundary.
@@ -81,8 +101,12 @@ def iter_binary_range_lines(handle, range_start, range_end, *,
             profile["counts"]["range_tail_reads"] += 1
             profile["counts"]["raw_bytes_read"] += len(tail)
             file_profile["raw_bytes_read"] += len(tail)
-        carry.extend(tail)
-        yield bytes(carry)
+        framing_started = time.perf_counter() if io_profile is not None else None
+        carry.extend(tail); framed = bytes(carry)
+        if io_profile is not None:
+            io_profile["timings_seconds"]["binary_line_framing"] += (
+                time.perf_counter() - framing_started)
+        yield framed
 
 
 class ResearchQueryError(ValueError):
@@ -333,6 +357,7 @@ class ResearchTimeseriesService:
         start, end = self.normalize_range(timestamp_from, timestamp_to)
         start_epoch = datetime.fromisoformat(start).timestamp()
         end_epoch = datetime.fromisoformat(end).timestamp()
+        setup_started = time.perf_counter() if io_profile is not None else None
         wanted = set(physical_serials)
         result = {serial: deque(maxlen=max_records) for serial in wanted}
         truncated = False; truncated_serials = set()
@@ -361,16 +386,28 @@ class ResearchTimeseriesService:
                     "cell_array_conversion", "derived_cell_context",
                     "record_materialization", "deadline_check",
                     "balancing_extraction", "temperature_extraction",
-                    "module_metric_extraction")}})
+                    "module_metric_extraction", "file_discovery_setup",
+                    "block_index_load_validate_select", "source_open_range_seek",
+                    "binary_line_framing", "result_sort_signature_fingerprint")}})
+            io_profile["timings_seconds"]["file_discovery_setup"] += (
+                time.perf_counter() - setup_started)
         for path in selected_paths:
+            operation_started = time.perf_counter() if io_profile is not None else None
             ranges, present, valid, mode = self._bounded_ranges(path, start_epoch, end_epoch)
             if io_profile is not None:
+                io_profile["timings_seconds"]["block_index_load_validate_select"] += (
+                    time.perf_counter() - operation_started)
                 io_profile["index_present"] = io_profile["index_present"] or present
                 io_profile["index_valid"] = io_profile["index_valid"] and valid
                 if mode != "indexed_chunk": io_profile["read_mode"] = mode
                 io_profile["selected_bytes"] += sum(end - begin for begin, end in ranges)
                 io_profile["range_count"] += len(ranges)
-            with path.open("rb") as handle:
+            operation_started = time.perf_counter() if io_profile is not None else None
+            handle = path.open("rb")
+            if io_profile is not None:
+                io_profile["timings_seconds"]["source_open_range_seek"] += (
+                    time.perf_counter() - operation_started)
+            with handle:
                 if io_profile is not None: io_profile["files_opened"] += 1
                 for range_start, range_end in ranges:
                     for line in iter_binary_range_lines(handle, range_start, range_end,
@@ -510,6 +547,7 @@ class ResearchTimeseriesService:
                             io_profile["timings_seconds"]["record_materialization"] += (
                                 time.perf_counter() - operation_started)
                             io_profile["record_materialization_count"] += 1
+        operation_started = time.perf_counter() if io_profile is not None else None
         records = {serial: sorted(rows, key=lambda item: item["timestamp"])
                    for serial, rows in result.items()}
         if io_profile is not None:
@@ -521,11 +559,15 @@ class ResearchTimeseriesService:
                 if io_profile["selected_bytes"] else 100.0)
         source_signature = [(path.name, path.stat().st_size, path.stat().st_mtime_ns)
                             for path in selected_paths]
-        return {"records": records, "truncated": truncated,
+        response = {"records": records, "truncated": truncated,
                 "truncated_serials": sorted(truncated_serials),
                 "source_signature": source_signature,
                 "source_fingerprint": hashlib.sha256(json.dumps(
                     source_signature, separators=(",", ":")).encode()).hexdigest()}
+        if io_profile is not None:
+            io_profile["timings_seconds"]["result_sort_signature_fingerprint"] += (
+                time.perf_counter() - operation_started)
+        return response
 
     def queries_from_evidence(self, evidence, *, physical_serial, timestamp_from,
                               timestamp_to, metrics, resolution="auto", max_points=MAX_POINTS):
