@@ -519,14 +519,22 @@ class GuardianResearchApi:
                 "request_range_validation": 0.0, "identity_epoch_preparation": 0.0,
                 "file_discovery": 0.0, "block_index_discovery": 0.0,
                 "indexed_range_selection": 0.0,
-                "jsonl_scan": 0.0, "identity_assignment": 0.0,
+                "jsonl_scan": 0.0, "range_seek": 0.0,
+                "range_position_check": 0.0, "raw_line_read": 0.0,
+                "serial_prefilter": 0.0, "serial_token_decode": 0.0,
+                "full_json_decode": 0.0, "timestamp_parse_range_check": 0.0,
+                "timestamp_format": 0.0, "identity_assignment": 0.0,
+                "soc_current_extract": 0.0, "cell_context_extract": 0.0,
+                "deadline_check": 0.0,
                 "candidate_detection": 0.0, "grouping": 0.0,
                 "historical_position_resolution": 0.0},
             "counts": {"requested_serials": 0, "files_discovered": 0,
                 "raw_records_inspected": 0, "records_skipped_serial_prefilter": 0,
                 "records_skipped_timestamp": 0, "records_fully_decoded": 0,
                 "relevant_soc_current_samples": 0, "candidates": 0,
-                "groups": 0, "events": 0}, "files": []}
+                "groups": 0, "events": 0, "raw_bytes_read": 0,
+                "average_raw_line_bytes": 0.0, "maximum_raw_line_bytes": 0},
+            "files": []}
 
     def _soc_crashes(self, values, deadline):
         profiling = values.get("profile")

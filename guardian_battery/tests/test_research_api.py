@@ -579,13 +579,21 @@ def test_soc_crash_profiling_is_opt_in_and_response_neutral(tmp_path, caplog):
     assert set(record["stages_seconds"]) == {
         "request_range_validation", "identity_epoch_preparation", "file_discovery",
         "block_index_discovery", "indexed_range_selection", "jsonl_scan",
-        "identity_assignment",
+        "range_seek", "range_position_check", "raw_line_read", "serial_prefilter",
+        "serial_token_decode", "full_json_decode", "timestamp_parse_range_check",
+        "timestamp_format", "identity_assignment", "soc_current_extract",
+        "cell_context_extract", "deadline_check",
         "candidate_detection", "grouping", "historical_position_resolution"}
     assert record["counts"]["raw_records_inspected"] == 7
     assert record["counts"]["records_skipped_serial_prefilter"] == 2
     assert record["counts"]["relevant_soc_current_samples"] == 5
+    assert record["counts"]["raw_bytes_read"] == len(source)
+    assert record["counts"]["average_raw_line_bytes"] > 0
+    assert record["counts"]["maximum_raw_line_bytes"] > 0
     assert record["files"][0]["file"] == "2026-09-11.jsonl"
     assert record["files"][0]["size_bytes"] == len(source)
+    assert record["files"][0]["raw_bytes_read"] == len(source)
+    assert record["files"][0]["selected_progress_percent"] == 100
     assert "SERIAL-M4" not in caplog.text and "soc_percent" not in caplog.text
 
 
@@ -603,6 +611,8 @@ def test_soc_crash_timeout_still_logs_bounded_profile(tmp_path, caplog):
     assert record["total_elapsed_seconds"] >= 0
     assert record["counts"]["raw_records_inspected"] == 1
     assert record["files"][0]["records_inspected"] == 1
+    assert record["stages_seconds"]["raw_line_read"] >= 0
+    assert record["stages_seconds"]["deadline_check"] >= 0
     assert "SERIAL-M4" not in caplog.text and "soc_percent" not in caplog.text
 
 
@@ -611,6 +621,31 @@ def test_soc_crash_profile_rejects_ambiguous_activation(tmp_path):
     response = get(api, "events/soc-crashes?physical_serial=SERIAL-M4&profile=yes"
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z")
     assert response.status == 400
+
+
+def test_soc_crash_profile_counts_large_lines_and_multiple_index_ranges(tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    base = datetime(2026, 9, 11, tzinfo=timezone.utc).timestamp()
+    rows = []
+    for hour in (10, 10, 20, 20, 10, 10):
+        rows.append({"schema_version": 1, "timestamp": base + hour * 3600,
+            "module": 4, "module_serial": "SERIAL-M4", "soc_percent": 70,
+            "current_a": -1, "voltages_mv": [3300] * 15, "padding": "x" * 10_000})
+    write_jsonl(path, rows)
+    build_index(path, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        response = get(api, "events/soc-crashes?physical_serial=SERIAL-M4&profile=true"
+            "&from=2026-09-11T09:00:00Z&to=2026-09-11T11:00:00Z")
+    assert response.status == 200
+    record = json.loads(next(item.message.removeprefix("RESEARCH_PROFILE ")
+        for item in caplog.records if item.message.startswith("RESEARCH_PROFILE ")))
+    file_profile = record["files"][0]
+    assert file_profile["index_valid"] is True
+    assert file_profile["range_count"] == 2
+    assert file_profile["records_inspected"] == 4
+    assert file_profile["maximum_raw_line_bytes"] > 10_000
+    assert file_profile["raw_bytes_read"] == record["counts"]["raw_bytes_read"]
 
 
 def test_evidence_package_event_id_survives_api_restart(tmp_path):
