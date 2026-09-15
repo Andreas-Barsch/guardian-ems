@@ -404,6 +404,11 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
     assert {request.url.path.removeprefix("/api/research/")
             for request in stub.requests} == expected
     assert {request.method for request in stub.requests} == {"GET"}
+    package_request = next(request for request in stub.requests
+                           if request.url.path.endswith("/evidence-package"))
+    package_query = parse_qs(package_request.url.query.decode())
+    assert package_query["before"] == ["P1D"]
+    assert package_query["after"] == ["PT30M"]
 
 
 def test_m4_m5_m6_evidence_chain_and_absent_coverage_use_only_mcp():

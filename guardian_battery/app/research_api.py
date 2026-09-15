@@ -5,6 +5,7 @@ import hashlib
 import base64
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -35,6 +36,7 @@ MAX_SERIALS = 6
 HARD_TIMEOUT_SECONDS = 15
 QUERY_TIMEOUT_SECONDS = 10
 SOC_CRASH_VERSION = "guardian_soc_crash_v1"
+EVIDENCE_PACKAGE_VERSION = "research_soc_crash_evidence_v2"
 LOG = logging.getLogger("guardian_battery.research")
 
 
@@ -418,6 +420,22 @@ class GuardianResearchApi:
             "largest_gap_seconds": max(gaps) if gaps else None,
             "quality": "complete" if timestamps else "absent"}
 
+    @classmethod
+    def _evidence_coverage(cls, start, end, timestamps, *, truncated=False):
+        row = cls._coverage_row(start, end, timestamps)
+        if timestamps:
+            row["quality"] = ("complete" if not truncated and timestamps[0] <= start
+                              and timestamps[-1] >= end else "partial")
+            if row["quality"] == "partial":
+                row["missing_intervals"] = []
+                if timestamps[0] > start:
+                    row["missing_intervals"].append({"from": start, "to": timestamps[0]})
+                if timestamps[-1] < end:
+                    row["missing_intervals"].append({"from": timestamps[-1], "to": end})
+        else:
+            row["quality"] = "unavailable"
+        return row
+
     def _maintenance(self, values):
         start, end = self._range(values)
         events = MaintenanceRepository(MaintenanceEventLog(self.paths.maintenance)).list(include_archived=True)
@@ -592,6 +610,67 @@ class GuardianResearchApi:
         return {"quality": "complete" if records else "absent", "records": records,
                 "truncated": False}
 
+    def _rs485_management(self, serial, start, end, deadline):
+        """Return bounded observed 0x92/0x44 evidence for a serial, without interpretation."""
+        requested = {"from": start, "to": end}
+        if not self.paths.rs485_history or not Path(self.paths.rs485_history).exists():
+            return {"evidence_class": "OBSERVED", "quality": "unavailable",
+                    "records": [], "coverage": {"requested_range": requested,
+                    "covered_intervals": [], "missing_intervals": [requested],
+                    "first_observation": None, "last_observation": None,
+                    "sample_count": 0, "expected_cadence_seconds": None,
+                    "largest_gap_seconds": None, "quality": "unavailable"}}
+        identities, records = {}, []
+        first, last = start[:10], end[:10]
+        for path in sorted(Path(self.paths.rs485_history).glob("*.jsonl")):
+            if not first <= path.stem <= last:
+                continue
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if time.monotonic() > deadline:
+                        raise ResearchQueryError("timeout", "research query timed out", 503)
+                    try: record = json.loads(line)
+                    except json.JSONDecodeError: continue
+                    identity = decode_identity_record(record)
+                    if identity:
+                        identities[int(record.get("adr", -1))] = identity["serial_string"]
+                        continue
+                    timestamp = record.get("timestamp")
+                    if isinstance(timestamp, (int, float)):
+                        timestamp = datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
+                    if not isinstance(timestamp, str) or not start <= timestamp <= end:
+                        continue
+                    adr = int(record.get("adr", -1))
+                    if identities.get(adr) != serial:
+                        continue
+                    command = record.get("paired_command")
+                    if command not in {0x92, 0x44}:
+                        continue
+                    if not (record.get("direction") == "response"
+                            and record.get("checksum_valid") is True
+                            and record.get("frame_complete") is True
+                            and record.get("request_matched") is True):
+                        continue
+                    decoded = record.get("decoded") if isinstance(record.get("decoded"), dict) else {}
+                    fields = ({key: decoded.get(key) for key in (
+                        "charge_current_limit_a", "discharge_current_limit_a",
+                        "charge_voltage_limit_v", "discharge_voltage_limit_v",
+                        "charge_enable", "discharge_enable")}
+                        if command == 0x92 else {"command": "0x44", "decoded": decoded or None})
+                    records.append({"timestamp": timestamp, "physical_serial": serial,
+                        "adr": adr, "paired_command": command, **fields})
+                    if len(records) >= 10_000:
+                        coverage = self._evidence_coverage(start, end,
+                            [item["timestamp"] for item in records])
+                        coverage["quality"] = "partial"
+                        return {"evidence_class": "OBSERVED", "quality": "partial",
+                                "records": records, "coverage": coverage, "truncated": True}
+        coverage = self._evidence_coverage(start, end,
+                                           [item["timestamp"] for item in records])
+        return {"evidence_class": "OBSERVED",
+                "quality": "complete" if records else "unavailable",
+                "records": records, "coverage": coverage, "truncated": False}
+
     def _config_context(self, timestamp):
         if not self.paths.config_history or not Path(self.paths.config_history).is_file():
             return {"quality": "absent", "record": None}
@@ -638,20 +717,29 @@ class GuardianResearchApi:
         if event is None: raise ResearchQueryError("coverage_absent", "event is unavailable", 404)
         def duration(value, default):
             raw = value or default
-            if raw.startswith("PT") and raw.endswith("H"): return float(raw[2:-1]) * 3600
-            if raw.startswith("PT") and raw.endswith("M"): return float(raw[2:-1]) * 60
-            if raw.startswith("P") and raw.endswith("D"): return float(raw[1:-1]) * 86400
-            raise ResearchQueryError("invalid_argument", "duration must use PTnH, PTnM, or PnD")
+            match = re.fullmatch(
+                r"P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?)?",
+                raw)
+            if not match or not any(match.groups()):
+                raise ResearchQueryError("invalid_argument", "duration must be a positive ISO-8601 duration")
+            seconds = (float(match.group(1) or 0) * 86400
+                       + float(match.group(2) or 0) * 3600
+                       + float(match.group(3) or 0) * 60)
+            if not 0 < seconds <= 90 * 86400:
+                raise ResearchQueryError("invalid_argument", "duration must be greater than zero and at most P90D")
+            return seconds
         serial = event["physical_serial"]
         start = (datetime.fromisoformat(event["start"]) -
-                 timedelta(seconds=duration(values.get("before"), "PT1H"))).isoformat()
+                 timedelta(seconds=duration(values.get("before"), "P1D"))).isoformat()
         end = (datetime.fromisoformat(event["end"]) +
-               timedelta(seconds=duration(values.get("after"), "PT1H"))).isoformat()
+               timedelta(seconds=duration(values.get("after"), "PT30M"))).isoformat()
         series = {}
         for metric in ("soc", "module_current", "module_voltage", "cell_voltage", "cell_temperature"):
-            series[metric] = self.series.query(metric=metric, physical_serial=serial,
+            result = self.series.query(metric=metric, physical_serial=serial,
                 timestamp_from=start, timestamp_to=end, resolution="auto", max_points=800,
                 deadline=deadline)
+            series[metric] = {**result, "evidence_class": (
+                "DERIVED" if metric == "module_voltage" else "OBSERVED")}
         trend_windows = [item for item in values.get("trend_windows", "PT6H,P1D,P7D").split(",")
                          if item]
         if len(trend_windows) > 3:
@@ -675,8 +763,107 @@ class GuardianResearchApi:
             "from": start, "to": end})["data"])
         daily = isolated("daily_diagnostics", lambda: self._daily({
             "date": event["start"][:10], "physical_serial": serial})["data"])
-        package = {"event": event, "identity_topology": self.identity.position_at(serial, event["start"]),
+        identity = self.identity.position_at(serial, event["start"])
+        stack = self.identity.topology_at(event["start"])
+        peer_serials = [row["physical_serial"] for row in stack["positions"]
+                        if row["physical_serial"] and row["physical_serial"] != serial]
+        cell_evidence = self.series.evidence_by_serial(
+            [serial, *peer_serials], start, end, deadline=deadline)
+        target_records_all = cell_evidence["records"].get(serial, [])
+        crash_start = datetime.fromisoformat(event["start"])
+        crash_end = datetime.fromisoformat(event["end"])
+        window_specs = (("minus_24h", crash_start - timedelta(hours=24), crash_start),
+            ("minus_6h", crash_start - timedelta(hours=6), crash_start),
+            ("minus_1h", crash_start - timedelta(hours=1), crash_start),
+            ("minus_10m", crash_start - timedelta(minutes=10), crash_start),
+            ("immediate_pre_crash", crash_start - timedelta(minutes=5), crash_start),
+            ("crash", crash_start, crash_end),
+            ("plus_10m", crash_end, crash_end + timedelta(minutes=10)),
+            ("plus_30m", crash_end, crash_end + timedelta(minutes=30)))
+        def bounded(rows, limit=600):
+            if len(rows) <= limit: return rows
+            step = (len(rows) - 1) / (limit - 1)
+            return [rows[round(index * step)] for index in range(limit)]
+        target_records = bounded(target_records_all)
+        comparison_windows = {}
+        for name, left, right in window_specs:
+            selected = [row for row in target_records_all
+                        if left <= datetime.fromisoformat(row["timestamp"]) <= right]
+            soc = [float(row["soc"]) for row in selected if row.get("soc") is not None]
+            current = [float(row["module_current_a"]) for row in selected
+                       if row.get("module_current_a") is not None]
+            comparison_windows[name] = {"from": left.isoformat(), "to": right.isoformat(),
+                "sample_count": len(selected), "first_timestamp": selected[0]["timestamp"] if selected else None,
+                "last_timestamp": selected[-1]["timestamp"] if selected else None,
+                "soc_min": min(soc) if soc else None, "soc_max": max(soc) if soc else None,
+                "current_min_a": min(current) if current else None,
+                "current_max_a": max(current) if current else None,
+                "records": selected if name in {"immediate_pre_crash", "crash"} else [],
+                "records_resolution": "full" if name in {"immediate_pre_crash", "crash"} else "summary",
+                "quality": "complete" if selected else "unavailable"}
+        immediate_left, immediate_right = crash_start - timedelta(minutes=5), crash_end + timedelta(minutes=5)
+        peers = []
+        for peer_serial in peer_serials:
+            rows = [row for row in cell_evidence["records"].get(peer_serial, [])
+                    if immediate_left <= datetime.fromisoformat(row["timestamp"]) <= immediate_right]
+            if rows:
+                peers.append({"physical_serial": peer_serial,
+                    "position_at_event": self.identity.position_at(peer_serial, event["start"])["position_at_time"],
+                    "evidence_class": "OBSERVED", "records": rows,
+                    "coverage": self._evidence_coverage(immediate_left.isoformat(),
+                                                   immediate_right.isoformat(),
+                                                   [row["timestamp"] for row in rows])})
+        management = isolated("rs485_management", lambda: self._rs485_management(
+            serial, start, end, deadline))
+        coverage = {key: value["coverage"] for key, value in series.items()}
+        coverage["cell_evidence"] = self._evidence_coverage(start, end,
+            [row["timestamp"] for row in target_records_all],
+            truncated=cell_evidence["truncated"])
+        coverage["rs485_management"] = management.get("coverage", {
+            "requested_range": {"from": start, "to": end}, "quality": "unknown"})
+        coverage["module_power"] = self._evidence_coverage(start, end,
+            [row["timestamp"] for row in target_records_all
+             if row.get("module_power_w") is not None], truncated=cell_evidence["truncated"])
+        for metric, field in (("ccl", "charge_current_limit_a"),
+                              ("dcl", "discharge_current_limit_a"),
+                              ("charge_enable", "charge_enable"),
+                              ("discharge_enable", "discharge_enable")):
+            coverage[metric] = self._evidence_coverage(start, end,
+                [row["timestamp"] for row in management.get("records", [])
+                 if row.get(field) is not None], truncated=management.get("truncated", False))
+        config = self._config_context(event["start"])
+        package = {"package_schema_version": 2,
+            "purpose": "reproducible_evidence_not_causal_interpretation",
+            "event": event,
+            "crash_core": {"event_id": event["event_id"], "physical_serial": serial,
+                "start": event["start"], "end": event["end"],
+                "duration_seconds": (crash_end - crash_start).total_seconds(),
+                "soc_before": event["soc_before"], "soc_after": event["soc_after"],
+                "soc_delta": event["soc_after"] - event["soc_before"],
+                "detector_version": event["detector_version"],
+                "detector_thresholds": crashes["data"]["thresholds"],
+                "coverage": event["coverage"]},
+            "identity_topology": {**identity,
+                "position_history_id": identity.get("position_history_id"),
+                "identity_epoch_id": identity.get("identity_epoch_id")},
             "timeseries": series,
+            "cell_evidence": {"evidence_class": "OBSERVED", "records": target_records,
+                "source_sample_count": len(target_records_all),
+                "truncated": len(target_records) < len(target_records_all),
+                "derived_fields_evidence_class": "DERIVED",
+                "temperature_semantics": "recorded_module_temperature_channels_only"},
+            "comparison_windows": comparison_windows,
+            "peer_evidence": {"historical_stack_at": event["start"], "modules": peers,
+                "quality": "complete" if peers else "unavailable"},
+            "bms_management": management,
+            "optional_evidence": {
+                "balancing": {"evidence_class": "OBSERVED",
+                    "quality": "complete" if any(row.get("balancing") is not None
+                                                  for row in target_records_all) else "unavailable",
+                    "records": [{"timestamp": row["timestamp"], "value": row["balancing"]}
+                                for row in target_records_all if row.get("balancing") is not None]},
+                "soc_recalibration": {"evidence_class": "OBSERVED", "quality": "unavailable",
+                                      "records": []}},
             "maintenance": self._maintenance({"physical_serial": serial, "from": start, "to": end})["data"],
             "phase": self._phases({"physical_serial": serial, "from": start, "to": end})["data"],
             "alarms": self._alarms({"physical_serial": serial, "from": start, "to": end})["data"],
@@ -684,12 +871,22 @@ class GuardianResearchApi:
                                                "to": end, "max_points": "200"}, deadline)["data"],
             "trend_windows": trends,
             "hycube": hycube, "policy": policy, "daily_diagnostics": daily,
-            "config": self._config_context(event["start"]),
-            "coverage": {key: value["coverage"] for key, value in series.items()}, "inferred": False}
+            "config": config,
+            "coverage": coverage, "evidence_classes": ["OBSERVED", "DERIVED"],
+            "inferred": False, "causality_determined": False}
         fingerprint = hashlib.sha256(json.dumps(package, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()
         package["input_fingerprint"] = fingerprint
         return research_envelope(source="guardian.evidence_package", evidence_class="DERIVED",
             authoritative=False, timestamp_from=start, timestamp_to=end, resolution="mixed",
-            data=package, semantics_version="research_evidence_package_v1",
-            provenance={"physical_serial": serial, "source_fingerprint": fingerprint})
+            data=package, semantics_version=EVIDENCE_PACKAGE_VERSION,
+            provenance={"event_id": event["event_id"], "physical_serial": serial,
+                "detector_version": SOC_CRASH_VERSION,
+                "config_revision": ((config.get("record") or {}).get("config_revision")
+                                    or (config.get("record") or {}).get("revision")),
+                "requested_range": {"from": start, "to": end},
+                "package_created_at": datetime.now(timezone.utc).isoformat(),
+                "sources": ["guardian.cell_history", "guardian.position_history",
+                    "guardian.maintenance", "guardian.canonical_phase", "guardian.events",
+                    "guardian.rs485", "guardian.hycube", "guardian.daily_diagnostics"],
+                "source_fingerprint": fingerprint})

@@ -174,8 +174,8 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
             "max_points": max_points, "cell_numbers": cell_numbers, "cursor": cursor})
 
     @server.tool(annotations=READ_ONLY)
-    async def build_evidence_package(event_id: str, before: str = "PT1H",
-                                     after: str = "PT1H",
+    async def build_evidence_package(event_id: str, before: str = "P1D",
+                                     after: str = "PT30M",
                                      trend_windows: list[str] | None = None) -> dict[str, Any]:
         """Return a reproducible evidence package; MCP adds no INFERRED or causal content."""
         return await invoke("build_evidence_package", "evidence-package", {

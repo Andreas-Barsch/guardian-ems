@@ -7,6 +7,7 @@ import hmac
 import json
 import statistics
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -114,6 +115,70 @@ class ResearchTimeseriesService:
         for rows in result.values(): rows.sort(key=lambda item: item["timestamp"])
         return result
 
+    def evidence_by_serial(self, physical_serials, timestamp_from, timestamp_to,
+                           deadline=None, max_records=10_000):
+        """Read at most ``max_records`` observations per identity in one scan."""
+        start, end = self.normalize_range(timestamp_from, timestamp_to)
+        start_epoch = datetime.fromisoformat(start).timestamp()
+        end_epoch = datetime.fromisoformat(end).timestamp()
+        wanted = set(physical_serials)
+        result = {serial: deque(maxlen=max_records) for serial in wanted}
+        truncated = False
+        for path in self._paths(start, end):
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if deadline is not None and time.monotonic() > deadline:
+                        raise ResearchQueryError("timeout", "research query timed out", 503)
+                    try:
+                        record = json.loads(line); epoch = float(record["timestamp"])
+                    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                        continue
+                    if not start_epoch <= epoch <= end_epoch:
+                        continue
+                    timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                    position = int(record.get("module", 0))
+                    observed = record.get("module_serial")
+                    if observed is None and 1 <= position <= 6:
+                        observed = self.identity.serial_at(position, timestamp).get("physical_serial")
+                    if observed not in wanted:
+                        continue
+                    if len(result[observed]) >= max_records:
+                        truncated = True
+                    identity = self.identity.position_at(observed, timestamp)
+                    voltages = tuple(float(value) for value in record.get("voltages_mv", ()))
+                    temperatures = tuple(float(value) for value in record.get("temperatures_c", ()))
+                    median = statistics.median(voltages) if voltages else None
+                    row = {"timestamp": timestamp, "physical_serial": observed,
+                        "position_at_time": identity.get("position_at_time"),
+                        "position_history_id": identity.get("position_history_id"),
+                        "identity_epoch_id": identity.get("identity_epoch_id"),
+                        "identity_resolved": identity.get("resolved", False),
+                        "soc": record.get("soc_percent"), "module_current_a": record.get("current_a"),
+                        "module_voltage_v": record.get("module_voltage_v"),
+                        "module_power_w": record.get("power_w"),
+                        "cell_voltages_mv": list(voltages), "cell_temperatures_c": list(temperatures),
+                        "balancing": record.get("balancing")}
+                    if row["module_voltage_v"] is None and voltages:
+                        row["module_voltage_v"] = sum(voltages) / 1000
+                    if row["module_power_w"] is None and row["module_voltage_v"] is not None \
+                            and row["module_current_a"] is not None:
+                        row["module_power_w"] = (float(row["module_voltage_v"])
+                                                  * float(row["module_current_a"]))
+                    row["derived"] = {"minimum_cell_voltage_mv": min(voltages) if voltages else None,
+                        "maximum_cell_voltage_mv": max(voltages) if voltages else None,
+                        "cell_spread_mv": max(voltages) - min(voltages) if voltages else None,
+                        "lowest_cell": voltages.index(min(voltages)) + 1 if voltages else None,
+                        "highest_cell": voltages.index(max(voltages)) + 1 if voltages else None,
+                        "cell_deviation_from_module_median_mv": [value - median for value in voltages]
+                        if voltages else []}
+                    result[observed].append(row)
+        records = {serial: sorted(rows, key=lambda item: item["timestamp"])
+                   for serial, rows in result.items()}
+        return {"records": records, "truncated": truncated,
+                "source_fingerprint": hashlib.sha256(json.dumps([
+                    (path.name, path.stat().st_size, path.stat().st_mtime_ns)
+                    for path in self._paths(start, end)], separators=(",", ":")).encode()).hexdigest()}
+
     @staticmethod
     def _values(record, metric, cells):
         if metric == "soc": return ((None, record.get("soc_percent")),)
@@ -185,8 +250,10 @@ class ResearchTimeseriesService:
                              resolved.get("physical_serial") != physical_serial)):
                         continue
                     identity = self.identity.position_at(physical_serial, timestamp)
-                    observation_times.append(epoch)
-                    for cell, value in self._values(record, metric, cells):
+                    observed_values = self._values(record, metric, cells)
+                    if any(value is not None for _, value in observed_values):
+                        observation_times.append(epoch)
+                    for cell, value in observed_values:
                         if value is None: continue
                         point = {"timestamp": timestamp, "value": float(value),
                             "physical_serial": physical_serial,

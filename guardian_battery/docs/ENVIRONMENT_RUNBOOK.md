@@ -36,6 +36,17 @@ Stand: 2026-09-14
 
 ## Guardian Battery 0.8.0 – Research API Integration
 
+### SOC Crash Evidence Builder
+
+The SOC Crash Evidence Builder provides reproducible evidence around a detected SOC crash. It does not determine causality.
+
+`GET /api/research/evidence-package?event_id=...` reuses the deterministic SOC
+crash event ID and returns the bounded `research_soc_crash_evidence_v2` contract.
+The default range is `P1D` before and `PT30M` after the event. Identity and stack
+peers are resolved at event time. Missing optional stores remain explicitly
+partial or unavailable; no request-path rebuild or write is performed. See
+`docs/SOC_CRASH_EVIDENCE_BUILDER.md` for the schema and provenance rules.
+
 ### Konfiguration und spätere getrennte Abnahme
 
 - Guardian Battery und Guardian Research MCP verwenden für den internen Maschinenkanal denselben geheimen Wert, aber unterschiedliche Optionsnamen: Guardian `guardian_research_api_token`, MCP `guardian_api_token`. Ein leerer Guardian-Wert deaktiviert diesen Zugang.

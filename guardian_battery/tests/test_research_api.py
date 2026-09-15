@@ -249,8 +249,179 @@ def test_evidence_package_uses_event_and_default_window(tmp_path):
     event = crashes.body["data"]["events"][0]
     package = get(api, "evidence-package?event_id=" + event["event_id"])
     assert package.status == 200
-    assert package.body["timestamp_range"]["from"] == "2026-09-11T09:02:00+00:00"
-    assert package.body["timestamp_range"]["to"] == "2026-09-11T11:06:00+00:00"
+    assert package.body["timestamp_range"]["from"] == "2026-09-10T10:02:00+00:00"
+    assert package.body["timestamp_range"]["to"] == "2026-09-11T10:36:00+00:00"
+
+
+def package_for_crash(api):
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    return event, get(api, "evidence-package?event_id=" + event["event_id"])
+
+
+def test_soc_crash_package_v2_has_core_identity_and_provenance(tmp_path):
+    api, first, _ = environment(tmp_path)
+    event, response = package_for_crash(api)
+    assert response.status == 200
+    data = response.body["data"]
+    assert response.body["semantics_version"] == "research_soc_crash_evidence_v2"
+    assert data["crash_core"]["soc_delta"] == -4
+    assert data["crash_core"]["detector_version"] == "guardian_soc_crash_v1"
+    assert data["identity_topology"]["position_at_time"] == 4
+    assert data["identity_topology"]["position_history_id"] == first.position_history_id
+    assert response.body["provenance"]["event_id"] == event["event_id"]
+
+
+def test_soc_crash_package_has_all_structured_windows(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = package_for_crash(api)
+    assert list(response.body["data"]["comparison_windows"]) == [
+        "minus_24h", "minus_6h", "minus_1h", "minus_10m",
+        "immediate_pre_crash", "crash", "plus_10m", "plus_30m"]
+    assert response.body["data"]["comparison_windows"]["crash"]["records_resolution"] == "full"
+    assert response.body["data"]["comparison_windows"]["minus_24h"]["records"] == []
+
+
+def test_soc_crash_package_preserves_all_15_cells_and_derivations(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = package_for_crash(api)
+    record = response.body["data"]["cell_evidence"]["records"][0]
+    assert len(record["cell_voltages_mv"]) == 15
+    assert len(record["cell_temperatures_c"]) == 15
+    assert record["derived"]["lowest_cell"] == 1
+    assert record["derived"]["highest_cell"] == 15
+    assert len(record["derived"]["cell_deviation_from_module_median_mv"]) == 15
+    assert response.body["data"]["cell_evidence"]["derived_fields_evidence_class"] == "DERIVED"
+
+
+def test_soc_crash_package_does_not_invent_cell_temperature(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows: row.pop("temperatures_c", None)
+    write_jsonl(path, rows)
+    _, response = package_for_crash(api)
+    assert response.body["data"]["cell_evidence"]["records"][0]["cell_temperatures_c"] == []
+    assert response.body["data"]["coverage"]["cell_temperature"]["quality"] == "absent"
+
+
+def test_soc_crash_package_peer_modules_use_historical_stack(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = package_for_crash(api)
+    peers = response.body["data"]["peer_evidence"]["modules"]
+    assert {(row["physical_serial"], row["position_at_event"]) for row in peers} == {
+        ("SERIAL-M5", 5), ("SERIAL-M6", 6)}
+    assert all(row["records"] for row in peers)
+
+
+def test_soc_crash_package_historical_identity_not_current_position(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = package_for_crash(api)
+    assert response.body["data"]["identity_topology"]["position_at_time"] == 4
+    assert api.identity.position_at("SERIAL-M4", "2026-09-12T10:00:00Z")["position_at_time"] == 2
+
+
+def test_soc_crash_package_missing_context_is_unavailable_not_zero(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = package_for_crash(api)
+    management = response.body["data"]["bms_management"]
+    assert management["quality"] == "unavailable" and management["records"] == []
+    assert response.body["data"]["coverage"]["rs485_management"]["quality"] == "unavailable"
+    assert response.body["data"]["coverage"]["dcl"]["quality"] == "unavailable"
+    assert response.body["data"]["optional_evidence"]["soc_recalibration"]["records"] == []
+    assert response.body["data"]["alarms"]["alarms"] == []
+
+
+def test_soc_crash_package_has_only_observed_and_derived_classes(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = package_for_crash(api)
+    encoded = json.dumps(response.body)
+    assert response.body["data"]["evidence_classes"] == ["OBSERVED", "DERIVED"]
+    assert "INFERRED" not in encoded and response.body["data"]["causality_determined"] is False
+
+
+def test_soc_crash_package_unknown_event_is_rejected(tmp_path):
+    api, _, _ = environment(tmp_path)
+    response = get(api, "evidence-package?event_id=SCE-invalid")
+    assert response.status == 400 and response.body["error"]["code"] == "invalid_argument"
+
+
+def test_soc_crash_package_valid_but_unavailable_event_is_rejected(tmp_path):
+    api, _, _ = environment(tmp_path)
+    event_id = api._event_id("SERIAL-M4", "2026-09-11T11:00:00+00:00",
+                             "2026-09-11T11:01:00+00:00")
+    response = get(api, "evidence-package?event_id=" + event_id)
+    assert response.status == 404 and response.body["error"]["code"] == "coverage_absent"
+
+
+def test_soc_crash_package_supports_explicit_iso_windows(tmp_path):
+    api, _, _ = environment(tmp_path)
+    event, _ = package_for_crash(api)
+    response = get(api, f"evidence-package?event_id={event['event_id']}&before=PT10M&after=PT10M")
+    assert response.status == 200
+    assert response.body["timestamp_range"]["from"] == "2026-09-11T09:52:00+00:00"
+    assert response.body["timestamp_range"]["to"] == "2026-09-11T10:16:00+00:00"
+
+
+def test_soc_crash_package_reports_partial_cell_evidence_when_bounded(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    original = api.series.evidence_by_serial
+    def bounded(*args, **kwargs):
+        result = original(*args, **kwargs); result["truncated"] = True; return result
+    monkeypatch.setattr(api.series, "evidence_by_serial", bounded)
+    _, response = package_for_crash(api)
+    assert response.status == 200
+    assert response.body["data"]["cell_evidence"]["source_sample_count"] >= 1
+    assert response.body["data"]["coverage"]["cell_evidence"]["quality"] == "partial"
+
+
+def test_soc_crash_package_is_utc_and_fingerprint_deterministic(tmp_path):
+    api, _, _ = environment(tmp_path)
+    event, first = package_for_crash(api)
+    second = get(api, "evidence-package?event_id=" + event["event_id"])
+    assert first.body["data"]["input_fingerprint"] == second.body["data"]["input_fingerprint"]
+    assert first.body["data"]["event"]["start"].endswith("+00:00")
+
+
+def test_rs485_management_evidence_uses_observed_serial_mapping(tmp_path):
+    api, _, _ = environment(tmp_path)
+    serial = "M4SERIAL12345678"
+    rs485 = tmp_path / "rs485"
+    records = [{"record_type": "frame", "timestamp": "2026-09-11T09:59:00+00:00",
+        "direction": "response", "paired_command": 0x93, "checksum_valid": True,
+        "frame_complete": True, "request_matched": True, "adr": 4,
+        "info_raw": "04" + serial.encode().hex(), "decoder_supported": False,
+        "decoded": None},
+        {"record_type": "frame", "timestamp": "2026-09-11T10:00:00+00:00",
+        "direction": "response", "paired_command": 0x92, "checksum_valid": True,
+        "frame_complete": True, "request_matched": True, "adr": 4,
+        "decoded": {"charge_current_limit_a": 10, "discharge_current_limit_a": -25,
+            "charge_voltage_limit_v": 53.25, "discharge_voltage_limit_v": 45,
+            "charge_enable": True, "discharge_enable": True}}]
+    write_jsonl(rs485 / "2026-09-11.jsonl", records)
+    api = GuardianResearchApi(replace(api.paths, rs485_history=rs485), cursor_secret=b"test")
+    result = api._rs485_management(serial, "2026-09-11T09:00:00+00:00",
+                                   "2026-09-11T11:00:00+00:00", float("inf"))
+    assert result["records"][0]["charge_current_limit_a"] == 10
+    assert result["records"][0]["discharge_enable"] is True
+    assert result["evidence_class"] == "OBSERVED"
+
+
+def test_soc_crash_package_remains_bounded_for_large_24h_input(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-10.jsonl"
+    start = datetime(2026, 9, 10, 10, 2, tzinfo=timezone.utc).timestamp()
+    rows = [{"schema_version": 1, "timestamp": start + index * 30, "module": 4,
+        "module_serial": "SERIAL-M4", "soc_percent": 70, "current_a": -1,
+        "voltages_mv": [3300 + cell for cell in range(15)]}
+        for index in range(2880)]
+    write_jsonl(path, rows)
+    _, response = package_for_crash(api)
+    assert response.status == 200
+    evidence = response.body["data"]["cell_evidence"]
+    assert evidence["source_sample_count"] > 600
+    assert len(evidence["records"]) == 600 and evidence["truncated"] is True
+    assert len(json.dumps(response.body).encode()) < 2 * 1024 * 1024
 
 
 def test_evidence_package_event_id_survives_api_restart(tmp_path):
@@ -270,6 +441,7 @@ def test_reads_leave_authoritative_files_byte_identical(tmp_path):
     get(api, "topology?timestamp=2026-09-11T10:00:00Z")
     get(api, "timeseries?metric=soc&physical_serial=SERIAL-M4"
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z")
+    package_for_crash(api)
     assert [path.read_bytes() for path in paths] == before
 
 
