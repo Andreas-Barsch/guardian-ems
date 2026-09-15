@@ -27,7 +27,7 @@ RANGE_READ_CHUNK_BYTES = 256 * 1024
 
 def iter_binary_range_lines(handle, range_start, range_end, *,
                             chunk_size=RANGE_READ_CHUNK_BYTES, profile=None,
-                            file_profile=None, deadline=None):
+                            file_profile=None, deadline=None, io_profile=None):
     """Yield legacy-equivalent binary lines from one bounded byte range."""
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -39,6 +39,10 @@ def iter_binary_range_lines(handle, range_start, range_end, *,
     while remaining:
         started = time.perf_counter()
         chunk = handle.read(min(chunk_size, remaining))
+        if io_profile is not None:
+            io_profile["timings_seconds"]["raw_chunk_read"] += (
+                time.perf_counter() - started)
+            io_profile["raw_chunk_reads"] += 1
         if profile is not None:
             profile["stages_seconds"]["raw_chunk_read"] += time.perf_counter() - started
             profile["counts"]["raw_chunk_reads"] += 1
@@ -48,6 +52,9 @@ def iter_binary_range_lines(handle, range_start, range_end, *,
             break
         started = time.perf_counter()
         deadline_exceeded = deadline is not None and time.monotonic() > deadline
+        if io_profile is not None:
+            io_profile["timings_seconds"]["deadline_check"] += (
+                time.perf_counter() - started)
         if profile is not None:
             profile["stages_seconds"]["deadline_check"] += time.perf_counter() - started
         if deadline_exceeded:
@@ -65,6 +72,10 @@ def iter_binary_range_lines(handle, range_start, range_end, *,
         # The index contract is line-aligned. Preserve legacy readline behavior
         # fail-closed even for an externally supplied partial range boundary.
         started = time.perf_counter(); tail = handle.readline()
+        if io_profile is not None:
+            io_profile["timings_seconds"]["raw_chunk_read"] += (
+                time.perf_counter() - started)
+            io_profile["raw_chunk_reads"] += 1
         if profile is not None:
             profile["stages_seconds"]["range_tail_read"] += time.perf_counter() - started
             profile["counts"]["range_tail_reads"] += 1
@@ -316,7 +327,8 @@ class ResearchTimeseriesService:
         return result
 
     def evidence_by_serial(self, physical_serials, timestamp_from, timestamp_to,
-                           deadline=None, max_records=10_000, io_profile=None):
+                           deadline=None, max_records=10_000, io_profile=None,
+                           profile_target_serial=None):
         """Read at most ``max_records`` observations per identity in one scan."""
         start, end = self.normalize_range(timestamp_from, timestamp_to)
         start_epoch = datetime.fromisoformat(start).timestamp()
@@ -327,36 +339,84 @@ class ResearchTimeseriesService:
         selected_paths = list(self._paths(start, end))
         if io_profile is not None:
             io_profile.update({"files_discovered": len(selected_paths), "files_opened": 0,
-                "bytes_read": 0, "records_inspected": 0, "samples_returned": 0,
+                "bytes_read": 0, "raw_bytes_read": 0,
+                "records_inspected": 0, "raw_records_inspected": 0,
+                "samples_returned": 0,
                 "index_present": False, "index_valid": True,
-                "read_mode": "indexed_chunk"})
+                "read_mode": "indexed_chunk", "selected_bytes": 0,
+                "selected_progress_bytes": 0, "selected_progress_percent": 0.0,
+                "range_count": 0, "raw_chunk_reads": 0,
+                "records_skipped_serial_prefilter": 0,
+                "records_accepted_wanted_serial": 0,
+                "target_records_accepted": 0, "peer_records_accepted": 0,
+                "full_json_decode_count": 0, "identity_assignment_count": 0,
+                "cell_array_conversion_count": 0,
+                "derived_cell_context_count": 0,
+                "record_materialization_count": 0,
+                "timings_seconds": {name: 0.0 for name in (
+                    "raw_chunk_read", "serial_prefilter", "full_json_decode",
+                    "timestamp_range_check", "identity_assignment",
+                    "cell_array_conversion", "derived_cell_context",
+                    "record_materialization", "deadline_check",
+                    "balancing_extraction", "temperature_extraction",
+                    "module_metric_extraction")}})
         for path in selected_paths:
             ranges, present, valid, mode = self._bounded_ranges(path, start_epoch, end_epoch)
             if io_profile is not None:
                 io_profile["index_present"] = io_profile["index_present"] or present
                 io_profile["index_valid"] = io_profile["index_valid"] and valid
                 if mode != "indexed_chunk": io_profile["read_mode"] = mode
+                io_profile["selected_bytes"] += sum(end - begin for begin, end in ranges)
+                io_profile["range_count"] += len(ranges)
             with path.open("rb") as handle:
                 if io_profile is not None: io_profile["files_opened"] += 1
                 for range_start, range_end in ranges:
                     for line in iter_binary_range_lines(handle, range_start, range_end,
-                                                        deadline=deadline):
+                                                        deadline=deadline,
+                                                        io_profile=io_profile):
                         if io_profile is not None:
                             io_profile["bytes_read"] += len(line)
+                            io_profile["raw_bytes_read"] += len(line)
                             io_profile["records_inspected"] += 1
-                        if deadline is not None and time.monotonic() > deadline:
+                            io_profile["raw_records_inspected"] += 1
+                        operation_started = time.perf_counter() if io_profile is not None else None
+                        deadline_exceeded = deadline is not None and time.monotonic() > deadline
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["deadline_check"] += (
+                                time.perf_counter() - operation_started)
+                        if deadline_exceeded:
                             raise ResearchQueryError("timeout", "research query timed out", 503)
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         serial_token = _SERIAL_TOKEN_BYTES.search(line)
                         if serial_token is not None:
                             try: explicit_serial = json.loads(serial_token.group(1))
                             except (UnicodeDecodeError, json.JSONDecodeError): explicit_serial = None
                             if isinstance(explicit_serial, str) and explicit_serial not in wanted:
+                                if io_profile is not None:
+                                    io_profile["records_skipped_serial_prefilter"] += 1
+                                    io_profile["timings_seconds"]["serial_prefilter"] += (
+                                        time.perf_counter() - operation_started)
                                 continue
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["serial_prefilter"] += (
+                                time.perf_counter() - operation_started)
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         try:
                             record = json.loads(line); epoch = float(record["timestamp"])
                         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                            if io_profile is not None:
+                                io_profile["timings_seconds"]["full_json_decode"] += (
+                                    time.perf_counter() - operation_started)
                             continue
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["full_json_decode"] += (
+                                time.perf_counter() - operation_started)
+                            io_profile["full_json_decode_count"] += 1
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         if not start_epoch <= epoch <= end_epoch:
+                            if io_profile is not None:
+                                io_profile["timings_seconds"]["timestamp_range_check"] += (
+                                    time.perf_counter() - operation_started)
                             continue
                         timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
                         position = int(record.get("module", 0))
@@ -364,14 +424,66 @@ class ResearchTimeseriesService:
                         if observed is None and 1 <= position <= 6:
                             observed = self.identity.serial_at(position, timestamp).get("physical_serial")
                         if observed not in wanted:
+                            if io_profile is not None:
+                                io_profile["timings_seconds"]["timestamp_range_check"] += (
+                                    time.perf_counter() - operation_started)
                             continue
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["timestamp_range_check"] += (
+                                time.perf_counter() - operation_started)
+                            io_profile["records_accepted_wanted_serial"] += 1
+                            if observed == profile_target_serial:
+                                io_profile["target_records_accepted"] += 1
+                            else:
+                                io_profile["peer_records_accepted"] += 1
                         if len(result[observed]) >= max_records:
                             truncated = True
                             truncated_serials.add(observed)
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         identity = self.identity.position_at(observed, timestamp)
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["identity_assignment"] += (
+                                time.perf_counter() - operation_started)
+                            io_profile["identity_assignment_count"] += 1
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         voltages = tuple(float(value) for value in record.get("voltages_mv", ()))
+                        voltage_conversion_elapsed = (time.perf_counter() - operation_started
+                                                      if io_profile is not None else 0.0)
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         temperatures = tuple(float(value) for value in record.get("temperatures_c", ()))
+                        if io_profile is not None:
+                            temperature_elapsed = time.perf_counter() - operation_started
+                            conversion_elapsed = voltage_conversion_elapsed + temperature_elapsed
+                            io_profile["timings_seconds"]["cell_array_conversion"] += conversion_elapsed
+                            io_profile["timings_seconds"]["temperature_extraction"] += temperature_elapsed
+                            io_profile["cell_array_conversion_count"] += 1
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         median = statistics.median(voltages) if voltages else None
+                        derived = {"minimum_cell_voltage_mv": min(voltages) if voltages else None,
+                            "maximum_cell_voltage_mv": max(voltages) if voltages else None,
+                            "cell_spread_mv": max(voltages) - min(voltages) if voltages else None,
+                            "lowest_cell": voltages.index(min(voltages)) + 1 if voltages else None,
+                            "highest_cell": voltages.index(max(voltages)) + 1 if voltages else None,
+                            "cell_deviation_from_module_median_mv": [value - median for value in voltages]
+                            if voltages else []}
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["derived_cell_context"] += (
+                                time.perf_counter() - operation_started)
+                            io_profile["derived_cell_context_count"] += 1
+                        operation_started = time.perf_counter() if io_profile is not None else None
+                        balancing = record.get("balancing")
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["balancing_extraction"] += (
+                                time.perf_counter() - operation_started)
+                        operation_started = time.perf_counter() if io_profile is not None else None
+                        soc = record.get("soc_percent")
+                        module_current = record.get("current_a")
+                        module_voltage = record.get("module_voltage_v")
+                        module_power = record.get("power_w")
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["module_metric_extraction"] += (
+                                time.perf_counter() - operation_started)
+                        operation_started = time.perf_counter() if io_profile is not None else None
                         row = {"timestamp": timestamp, "physical_serial": observed,
                             "position_at_time": identity.get("position_at_time"),
                             "position_history_id": identity.get("position_history_id"),
@@ -379,29 +491,32 @@ class ResearchTimeseriesService:
                             "identity_resolved": identity.get("resolved", False),
                             "identity_source": ("record_module_serial"
                                 if record.get("module_serial") is not None else "position_history"),
-                            "soc": record.get("soc_percent"), "module_current_a": record.get("current_a"),
-                            "module_voltage_v": record.get("module_voltage_v"),
-                            "module_power_w": record.get("power_w"),
+                            "soc": soc, "module_current_a": module_current,
+                            "module_voltage_v": module_voltage,
+                            "module_power_w": module_power,
                             "cell_voltages_mv": list(voltages), "cell_temperatures_c": list(temperatures),
-                            "balancing": record.get("balancing")}
+                            "balancing": balancing}
                         if row["module_voltage_v"] is None and voltages:
                             row["module_voltage_v"] = sum(voltages) / 1000
                         if row["module_power_w"] is None and row["module_voltage_v"] is not None \
                                 and row["module_current_a"] is not None:
                             row["module_power_w"] = (float(row["module_voltage_v"])
                                                       * float(row["module_current_a"]))
-                        row["derived"] = {"minimum_cell_voltage_mv": min(voltages) if voltages else None,
-                            "maximum_cell_voltage_mv": max(voltages) if voltages else None,
-                            "cell_spread_mv": max(voltages) - min(voltages) if voltages else None,
-                            "lowest_cell": voltages.index(min(voltages)) + 1 if voltages else None,
-                            "highest_cell": voltages.index(max(voltages)) + 1 if voltages else None,
-                            "cell_deviation_from_module_median_mv": [value - median for value in voltages]
-                            if voltages else []}
+                        row["derived"] = derived
                         result[observed].append(row)
+                        if io_profile is not None:
+                            io_profile["timings_seconds"]["record_materialization"] += (
+                                time.perf_counter() - operation_started)
+                            io_profile["record_materialization_count"] += 1
         records = {serial: sorted(rows, key=lambda item: item["timestamp"])
                    for serial, rows in result.items()}
         if io_profile is not None:
             io_profile["samples_returned"] = sum(len(rows) for rows in records.values())
+            io_profile["selected_progress_bytes"] = min(
+                io_profile["bytes_read"], io_profile["selected_bytes"])
+            io_profile["selected_progress_percent"] = (
+                io_profile["selected_progress_bytes"] / io_profile["selected_bytes"] * 100
+                if io_profile["selected_bytes"] else 100.0)
         source_signature = [(path.name, path.stat().st_size, path.stat().st_mtime_ns)
                             for path in selected_paths]
         return {"records": records, "truncated": truncated,

@@ -392,6 +392,24 @@ def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
     assert profile["stages"]["module_soc"]["files_opened"] >= 1
     assert profile["stages"]["module_soc"]["bytes_read"] > 0
     assert profile["stages"]["main_multi_metric_read"]["samples_returned"] > 0
+    reader = profile["stages"]["main_multi_metric_read"]["reader"]
+    assert reader["raw_bytes_read"] == reader["bytes_read"] > 0
+    assert reader["raw_records_inspected"] == reader["records_inspected"] > 0
+    assert reader["selected_bytes"] >= reader["selected_progress_bytes"] > 0
+    assert 0 < reader["selected_progress_percent"] <= 100
+    assert reader["range_count"] > 0 and reader["raw_chunk_reads"] > 0
+    assert (reader["target_records_accepted"] + reader["peer_records_accepted"]
+            == reader["records_accepted_wanted_serial"])
+    assert reader["full_json_decode_count"] >= reader["records_accepted_wanted_serial"]
+    assert reader["identity_assignment_count"] == reader["records_accepted_wanted_serial"]
+    assert reader["cell_array_conversion_count"] == reader["records_accepted_wanted_serial"]
+    assert reader["derived_cell_context_count"] == reader["records_accepted_wanted_serial"]
+    assert reader["record_materialization_count"] == reader["records_accepted_wanted_serial"]
+    assert set(reader["timings_seconds"]) == {
+        "raw_chunk_read", "serial_prefilter", "full_json_decode",
+        "timestamp_range_check", "identity_assignment", "cell_array_conversion",
+        "derived_cell_context", "record_materialization", "deadline_check",
+        "balancing_extraction", "temperature_extraction", "module_metric_extraction"}
     assert profile["coverage_status"]["module_soc"] in {"complete", "partial"}
     assert profile["stages"]["soc_recalibration"]["status"] == "unavailable"
 
@@ -402,21 +420,26 @@ def test_evidence_package_profile_adds_no_history_scans(tmp_path, monkeypatch, c
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
     suffix = "evidence-package?event_id=" + event["event_id"]
     counts = {"query": 0, "evidence": 0}
+    evidence_profiles = []
     query, evidence = api.series.query, api.series.evidence_by_serial
     def tracked_query(*args, **kwargs):
         counts["query"] += 1
         return query(*args, **kwargs)
     def tracked_evidence(*args, **kwargs):
         counts["evidence"] += 1
+        evidence_profiles.append(kwargs.get("io_profile"))
         return evidence(*args, **kwargs)
     monkeypatch.setattr(api.series, "query", tracked_query)
     monkeypatch.setattr(api.series, "evidence_by_serial", tracked_evidence)
     get(api, suffix)
     normal = dict(counts)
+    assert evidence_profiles == [None]
     counts.update(query=0, evidence=0)
+    evidence_profiles.clear()
     with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
         get(api, suffix + "&profile=true")
     assert counts == normal == {"query": 1, "evidence": 1}
+    assert len(evidence_profiles) == 1 and evidence_profiles[0] is not None
 
 
 def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monkeypatch, caplog):
@@ -424,6 +447,25 @@ def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monke
     event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
     def timeout_on_main_scan(*args, **kwargs):
+        io = kwargs["io_profile"]
+        io.update({"files_discovered": 2, "files_opened": 1,
+            "bytes_read": 1024, "raw_bytes_read": 1024,
+            "records_inspected": 4, "raw_records_inspected": 4,
+            "samples_returned": 0, "index_present": True, "index_valid": True,
+            "read_mode": "indexed_chunk", "selected_bytes": 4096,
+            "selected_progress_bytes": 0, "selected_progress_percent": 0.0,
+            "range_count": 2, "raw_chunk_reads": 1,
+            "records_skipped_serial_prefilter": 2,
+            "records_accepted_wanted_serial": 2,
+            "target_records_accepted": 1, "peer_records_accepted": 1,
+            "full_json_decode_count": 2, "identity_assignment_count": 2,
+            "cell_array_conversion_count": 2, "derived_cell_context_count": 2,
+            "record_materialization_count": 1,
+            "timings_seconds": {name: 0.001 for name in (
+                "raw_chunk_read", "serial_prefilter", "full_json_decode",
+                "timestamp_range_check", "identity_assignment", "cell_array_conversion",
+                "derived_cell_context", "record_materialization", "deadline_check",
+                "balancing_extraction", "temperature_extraction", "module_metric_extraction")}})
         raise research_timeseries.ResearchQueryError(
             "timeout", "research query timed out", 503)
     monkeypatch.setattr(api.series, "evidence_by_serial", timeout_on_main_scan)
@@ -436,6 +478,11 @@ def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monke
     assert profile["stages"]["module_soc"]["status"] == "not_run"
     assert profile["stages"]["module_current"]["status"] == "not_run"
     assert profile["stages"]["module_voltage"]["status"] == "not_run"
+    reader = profile["stages"]["main_multi_metric_read"]["reader"]
+    assert reader["selected_progress_bytes"] == 1024
+    assert reader["selected_progress_percent"] == 25
+    assert reader["target_records_accepted"] + reader["peer_records_accepted"] == 2
+    assert reader["timings_seconds"]["raw_chunk_read"] == pytest.approx(0.001)
     encoded = json.dumps(profile)
     assert event["event_id"] not in encoded
     assert "SERIAL-M4" not in encoded

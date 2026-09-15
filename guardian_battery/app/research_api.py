@@ -831,12 +831,18 @@ class GuardianResearchApi:
             stage["deadline_remaining_seconds_at_exit"] = max(
                 0.0, deadline - time.monotonic())
             if io_profile:
+                selected = io_profile.get("selected_bytes", 0)
+                progress = min(io_profile.get("bytes_read", 0), selected)
+                io_profile["selected_progress_bytes"] = progress
+                io_profile["selected_progress_percent"] = (
+                    progress / selected * 100 if selected else 100.0)
                 for key in ("files_discovered", "files_opened", "bytes_read",
                             "records_inspected", "samples_returned"):
                     stage[key] += io_profile.get(key, 0)
                 stage["index_present"] = io_profile.get("index_present")
                 stage["index_valid"] = io_profile.get("index_valid")
                 stage["read_mode"] = io_profile.get("read_mode", "not_observed")
+                stage["reader"] = dict(io_profile)
 
     def _package(self, values, deadline):
         profiling = values.get("profile")
@@ -924,7 +930,7 @@ class GuardianResearchApi:
         cell_evidence = self._run_package_stage(profile, "main_multi_metric_read", deadline,
             lambda: self.series.evidence_by_serial(
                 [serial, *peer_serials], start, end, deadline=deadline,
-                io_profile=main_io), io_profile=main_io)
+                io_profile=main_io, profile_target_serial=serial), io_profile=main_io)
         self._run_package_stage(profile, "peer_module_evidence", deadline,
             lambda: sum(len(cell_evidence["records"].get(peer, ())) for peer in peer_serials))
         if profile is not None:
