@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from maintenance import normalize_utc_timestamp
-from history_block_index import selected_ranges
+from history_block_index import index_path, selected_ranges
 
 MAX_RECORDS = 10_000
 MAX_POINTS = 6_000
@@ -81,24 +81,60 @@ class ResearchTimeseriesService:
             day += timedelta(days=1)
 
     def soc_current_by_serial(self, physical_serials, timestamp_from, timestamp_to,
-                              deadline=None):
+                              deadline=None, profile=None):
         """Read SOC/current for several identities in one authoritative scan."""
         start, end = self.normalize_range(timestamp_from, timestamp_to)
         start_epoch = datetime.fromisoformat(start).timestamp()
         end_epoch = datetime.fromisoformat(end).timestamp()
         wanted = set(physical_serials)
         result = {serial: [] for serial in wanted}
-        for path in self._paths(start, end):
+        started = time.perf_counter()
+        paths = list(self._paths(start, end)) if profile is not None else self._paths(start, end)
+        if profile is not None:
+            profile["stages_seconds"]["file_discovery"] = time.perf_counter() - started
+            profile["counts"]["files_discovered"] = len(paths)
+        if profile is not None:
+            started = time.perf_counter()
+            self.identity.epochs(timestamp_from=start, timestamp_to=end)
+            profile["stages_seconds"]["identity_epoch_preparation"] = (
+                time.perf_counter() - started)
+        scan_started = time.perf_counter()
+        try:
+          for path in paths:
+            file_profile = None
+            if profile is not None:
+                size = path.stat().st_size
+                discovery_started = time.perf_counter()
+                index_present = index_path(path).is_file()
+                profile["stages_seconds"]["block_index_discovery"] += (
+                    time.perf_counter() - discovery_started)
+                file_profile = {"file": path.name, "size_bytes": size,
+                    "index_present": index_present, "index_valid": False,
+                    "selection_mode": "full_scan_fallback", "selected_bytes": size,
+                    "range_count": 1, "records_inspected": 0}
+            selection_started = time.perf_counter()
             try:
-                ranges, _ = selected_ranges(path, start_epoch, end_epoch,
+                ranges, selection = selected_ranges(path, start_epoch, end_epoch,
                     timestamp_field="timestamp", iso_timestamp=False)
+                if file_profile is not None:
+                    file_profile.update({"index_valid": True,
+                        "selection_mode": selection["mode"],
+                        "selected_bytes": sum(stop - begin for begin, stop in ranges),
+                        "range_count": len(ranges)})
             except Exception:
                 ranges = ((0, path.stat().st_size),)
+            if profile is not None:
+                profile["stages_seconds"]["indexed_range_selection"] += (
+                    time.perf_counter() - selection_started)
+                profile["files"].append(file_profile)
             with path.open("rb") as handle:
               for range_start, range_end in ranges:
                 handle.seek(range_start)
                 while handle.tell() < range_end:
                     line = handle.readline()
+                    if profile is not None:
+                        profile["counts"]["raw_records_inspected"] += 1
+                        file_profile["records_inspected"] += 1
                     if deadline is not None and time.monotonic() > deadline:
                         raise ResearchQueryError("timeout", "research query timed out", 503)
                     serial_token = _SERIAL_TOKEN_BYTES.search(line)
@@ -108,19 +144,30 @@ class ResearchTimeseriesService:
                         except (UnicodeDecodeError, json.JSONDecodeError):
                             explicit_serial = None
                         if isinstance(explicit_serial, str) and explicit_serial not in wanted:
+                            if profile is not None:
+                                profile["counts"]["records_skipped_serial_prefilter"] += 1
                             continue
                     try:
                         record = json.loads(line); epoch = float(record["timestamp"])
                     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
                         continue
-                    if not start_epoch <= epoch <= end_epoch: continue
+                    if profile is not None:
+                        profile["counts"]["records_fully_decoded"] += 1
+                    if not start_epoch <= epoch <= end_epoch:
+                        if profile is not None:
+                            profile["counts"]["records_skipped_timestamp"] += 1
+                        continue
                     timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
                     position = int(record.get("module", 0))
                     observed = record.get("module_serial")
                     if observed is None and 1 <= position <= 6:
                         observed = self.identity.serial_at(position, timestamp).get("physical_serial")
                     if observed not in wanted: continue
+                    identity_started = time.perf_counter()
                     identity = self.identity.position_at(observed, timestamp)
+                    if profile is not None:
+                        profile["stages_seconds"]["identity_assignment"] += (
+                            time.perf_counter() - identity_started)
                     try:
                         soc, current = float(record["soc_percent"]), float(record["current_a"])
                     except (ValueError, TypeError, KeyError):
@@ -131,6 +178,11 @@ class ResearchTimeseriesService:
                         "position_at_time": identity.get("position_at_time"),
                         "lowest_cell": voltages.index(min(voltages)) + 1 if voltages else None,
                         "cell_spread_mv": max(voltages) - min(voltages) if voltages else None})
+                    if profile is not None:
+                        profile["counts"]["relevant_soc_current_samples"] += 1
+        finally:
+            if profile is not None:
+                profile["stages_seconds"]["jsonl_scan"] = time.perf_counter() - scan_started
         for rows in result.values(): rows.sort(key=lambda item: item["timestamp"])
         return result
 

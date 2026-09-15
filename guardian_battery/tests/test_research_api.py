@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import uuid
 from dataclasses import replace
@@ -210,7 +211,7 @@ def test_soc_crash_event_is_identical_to_legacy_authoritative_scan(tmp_path):
     optimized = api._soc_crashes({"physical_serial": "SERIAL-M4",
                                   "from": start, "to": end}, float("inf"))
     original = api.series.soc_current_by_serial
-    def legacy(serials, timestamp_from, timestamp_to, deadline=None):
+    def legacy(serials, timestamp_from, timestamp_to, deadline=None, profile=None):
         normalized_start, normalized_end = api.series.normalize_range(
             timestamp_from, timestamp_to)
         lower = datetime.fromisoformat(normalized_start).timestamp()
@@ -557,6 +558,59 @@ def test_soc_crash_scan_preserves_inclusive_utc_epoch_boundaries(tmp_path):
     assert event["start"] == "2026-09-11T10:00:00+00:00"
     assert event["end"] == "2026-09-11T10:02:00+00:00"
     assert event["soc_before"] == 70 and event["soc_after"] == 66
+
+
+def test_soc_crash_profiling_is_opt_in_and_response_neutral(tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    suffix = ("events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z")
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        normal = get(api, suffix)
+    assert "RESEARCH_PROFILE" not in caplog.text
+    caplog.clear()
+    source = (api.paths.cell_history / "2026-09-11.jsonl").read_bytes()
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        profiled = get(api, suffix + "&profile=true")
+    assert profiled.body == normal.body
+    assert (api.paths.cell_history / "2026-09-11.jsonl").read_bytes() == source
+    record = json.loads(next(item.message.removeprefix("RESEARCH_PROFILE ")
+        for item in caplog.records if item.message.startswith("RESEARCH_PROFILE ")))
+    assert record["status"] == "ok"
+    assert set(record["stages_seconds"]) == {
+        "request_range_validation", "identity_epoch_preparation", "file_discovery",
+        "block_index_discovery", "indexed_range_selection", "jsonl_scan",
+        "identity_assignment",
+        "candidate_detection", "grouping", "historical_position_resolution"}
+    assert record["counts"]["raw_records_inspected"] == 7
+    assert record["counts"]["records_skipped_serial_prefilter"] == 2
+    assert record["counts"]["relevant_soc_current_samples"] == 5
+    assert record["files"][0]["file"] == "2026-09-11.jsonl"
+    assert record["files"][0]["size_bytes"] == len(source)
+    assert "SERIAL-M4" not in caplog.text and "soc_percent" not in caplog.text
+
+
+def test_soc_crash_timeout_still_logs_bounded_profile(tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    values = {"physical_serial": "SERIAL-M4", "profile": "true",
+        "from": "2026-09-11T09:00:00Z", "to": "2026-09-11T12:00:00Z"}
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        with pytest.raises(research_timeseries.ResearchQueryError) as error:
+            api._soc_crashes(values, deadline=-1)
+    assert error.value.code == "timeout"
+    record = json.loads(next(item.message.removeprefix("RESEARCH_PROFILE ")
+        for item in caplog.records if item.message.startswith("RESEARCH_PROFILE ")))
+    assert record["status"] == "timeout"
+    assert record["total_elapsed_seconds"] >= 0
+    assert record["counts"]["raw_records_inspected"] == 1
+    assert record["files"][0]["records_inspected"] == 1
+    assert "SERIAL-M4" not in caplog.text and "soc_percent" not in caplog.text
+
+
+def test_soc_crash_profile_rejects_ambiguous_activation(tmp_path):
+    api, _, _ = environment(tmp_path)
+    response = get(api, "events/soc-crashes?physical_serial=SERIAL-M4&profile=yes"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z")
+    assert response.status == 400
 
 
 def test_evidence_package_event_id_survives_api_restart(tmp_path):

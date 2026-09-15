@@ -512,14 +512,58 @@ class GuardianResearchApi:
             authoritative=False, timestamp_from=start, timestamp_to=end, resolution="daily",
             data=data, quality="complete")
 
+    @staticmethod
+    def _soc_profile():
+        return {"profile_schema_version": 1, "endpoint": "events/soc-crashes",
+            "status": "running", "stages_seconds": {
+                "request_range_validation": 0.0, "identity_epoch_preparation": 0.0,
+                "file_discovery": 0.0, "block_index_discovery": 0.0,
+                "indexed_range_selection": 0.0,
+                "jsonl_scan": 0.0, "identity_assignment": 0.0,
+                "candidate_detection": 0.0, "grouping": 0.0,
+                "historical_position_resolution": 0.0},
+            "counts": {"requested_serials": 0, "files_discovered": 0,
+                "raw_records_inspected": 0, "records_skipped_serial_prefilter": 0,
+                "records_skipped_timestamp": 0, "records_fully_decoded": 0,
+                "relevant_soc_current_samples": 0, "candidates": 0,
+                "groups": 0, "events": 0}, "files": []}
+
     def _soc_crashes(self, values, deadline):
-        start, end = self._range(values)
+        profiling = values.get("profile")
+        if profiling not in (None, "false", "true"):
+            raise ResearchQueryError("invalid_argument", "profile must be true or false")
+        profile = self._soc_profile() if profiling == "true" else None
+        started = time.perf_counter()
+        try:
+            result = self._soc_crashes_impl(values, deadline, profile)
+            if profile is not None: profile["status"] = "ok"
+            return result
+        except ResearchQueryError as exc:
+            if profile is not None: profile["status"] = exc.code
+            raise
+        except Exception:
+            if profile is not None: profile["status"] = "source_unavailable"
+            raise
+        finally:
+            if profile is not None:
+                profile["total_elapsed_seconds"] = time.perf_counter() - started
+                LOG.info("RESEARCH_PROFILE %s", json.dumps(
+                    profile, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+
+    def _soc_crashes_impl(self, values, deadline, profile=None):
+        started = time.perf_counter(); start, end = self._range(values)
+        if profile is not None:
+            profile["stages_seconds"]["request_range_validation"] = (
+                time.perf_counter() - started)
         serials = ([values["physical_serial"]] if values.get("physical_serial") else
                    sorted({item["physical_serial"] for item in self.identity.epochs()}))[:MAX_SERIALS]
+        if profile is not None: profile["counts"]["requested_serials"] = len(serials)
         events = []
-        observations = self.series.soc_current_by_serial(serials, start, end, deadline)
+        observations = self.series.soc_current_by_serial(
+            serials, start, end, deadline, profile=profile)
         for serial in serials:
             rows = observations.get(serial, ()); candidates = []
+            started = time.perf_counter()
             for before, after in zip(rows, rows[1:]):
                 gap = datetime.fromisoformat(after["timestamp"]).timestamp() - datetime.fromisoformat(before["timestamp"]).timestamp()
                 loss, value = before["soc"] - after["soc"], after["current"]
@@ -529,7 +573,12 @@ class GuardianResearchApi:
                         "current": value, "identity_epoch_id": after["identity_epoch_id"],
                         "lowest_cell": after.get("lowest_cell"),
                         "cell_spread_mv": after.get("cell_spread_mv")})
+            if profile is not None:
+                profile["stages_seconds"]["candidate_detection"] += (
+                    time.perf_counter() - started)
+                profile["counts"]["candidates"] += len(candidates)
             groups = []
+            started = time.perf_counter()
             for item in candidates:
                 gap = ((datetime.fromisoformat(item["start"]) -
                         datetime.fromisoformat(groups[-1][-1]["end"])).total_seconds()
@@ -537,8 +586,15 @@ class GuardianResearchApi:
                 if groups and gap <= 600 and item["identity_epoch_id"] == groups[-1][-1]["identity_epoch_id"]:
                     groups[-1].append(item)
                 else: groups.append([item])
+            if profile is not None:
+                profile["stages_seconds"]["grouping"] += time.perf_counter() - started
+                profile["counts"]["groups"] += len(groups)
             for group in groups:
+                started = time.perf_counter()
                 position = self.identity.position_at(serial, group[0]["start"])
+                if profile is not None:
+                    profile["stages_seconds"]["historical_position_resolution"] += (
+                        time.perf_counter() - started)
                 events.append({"event_id": self._event_id(
                         serial, group[0]["start"], group[-1]["end"]),
                     "detector_version": SOC_CRASH_VERSION, "physical_serial": serial,
@@ -551,6 +607,7 @@ class GuardianResearchApi:
                     "lowest_cell": group[-1].get("lowest_cell"),
                     "cell_spread_mv": group[-1].get("cell_spread_mv"),
                     "coverage": "complete", "source_references": ["guardian.cell_history"]})
+        if profile is not None: profile["counts"]["events"] = len(events)
         return research_envelope(source="guardian.cell_history", evidence_class="DERIVED",
             authoritative=False, timestamp_from=start, timestamp_to=end, resolution="events",
             data={"events": events, "detector_version": SOC_CRASH_VERSION,
