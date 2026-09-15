@@ -175,6 +175,195 @@ class ResearchTimeseriesService:
         except Exception:
             return ((0, path.stat().st_size),), present, False, "full_scan_fallback"
 
+    def _soc_candidates(self, physical_serial, start, end, *, deadline=None,
+                        io_profile=None, end_exclusive_epoch=None):
+        """Read validated SOC observations without eagerly projecting identity."""
+        start_epoch = datetime.fromisoformat(start).timestamp()
+        end_epoch = datetime.fromisoformat(end).timestamp()
+        selected_paths = list(self._paths(start, end))
+        if io_profile is not None:
+            io_profile.update({"files_discovered": len(selected_paths), "files_opened": 0,
+                "bytes_read": 0, "records_inspected": 0, "samples_returned": 0,
+                "index_present": False, "index_valid": True, "read_mode": "indexed_chunk",
+                "selected_bytes": 0, "full_json_decode_count": 0,
+                "records_skipped_serial_prefilter": 0, "serial_at_calls": 0,
+                "position_at_calls": 0, "materialized_output_points": 0,
+                "additional_source_records": 0, "reused_evidence_records": 0})
+        signatures = []
+        candidates = []
+        for path in selected_paths:
+            stat = path.stat(); signatures.append((path.name, stat.st_size, stat.st_mtime_ns))
+            ranges, present, valid, mode = self._bounded_ranges(path, start_epoch, end_epoch)
+            if io_profile is not None:
+                io_profile["index_present"] = io_profile["index_present"] or present
+                io_profile["index_valid"] = io_profile["index_valid"] and valid
+                io_profile["selected_bytes"] += sum(stop - begin for begin, stop in ranges)
+                if mode != "indexed_chunk": io_profile["read_mode"] = mode
+            with path.open("rb") as handle:
+                if io_profile is not None: io_profile["files_opened"] += 1
+                for range_start, range_end in ranges:
+                    for line in iter_binary_range_lines(handle, range_start, range_end,
+                                                        deadline=deadline):
+                        if io_profile is not None:
+                            io_profile["bytes_read"] += len(line)
+                            io_profile["records_inspected"] += 1
+                        if deadline is not None and time.monotonic() > deadline:
+                            raise ResearchQueryError("timeout", "research query timed out", 503)
+                        serial_token = _SERIAL_TOKEN_BYTES.search(line)
+                        if serial_token is not None:
+                            try: explicit_serial = json.loads(serial_token.group(1))
+                            except (UnicodeDecodeError, json.JSONDecodeError): explicit_serial = None
+                            if isinstance(explicit_serial, str) and explicit_serial != physical_serial:
+                                if io_profile is not None:
+                                    io_profile["records_skipped_serial_prefilter"] += 1
+                                continue
+                        try:
+                            record = json.loads(line); epoch = float(record["timestamp"])
+                        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                            continue
+                        if io_profile is not None: io_profile["full_json_decode_count"] += 1
+                        if not start_epoch <= epoch <= end_epoch:
+                            continue
+                        if end_exclusive_epoch is not None and epoch >= end_exclusive_epoch:
+                            continue
+                        observed_serial = record.get("module_serial")
+                        direct_serial = observed_serial is not None
+                        if not direct_serial:
+                            position = int(record.get("module", 0))
+                            if not 1 <= position <= 6:
+                                continue
+                            timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                            observed_serial = self.identity.serial_at(position, timestamp).get(
+                                "physical_serial")
+                            if io_profile is not None: io_profile["serial_at_calls"] += 1
+                        if observed_serial != physical_serial:
+                            continue
+                        value = record.get("soc_percent")
+                        if value is None: continue
+                        try: value = float(value)
+                        except (ValueError, TypeError): continue
+                        candidates.append((epoch, value, direct_serial))
+                        if io_profile is not None:
+                            io_profile["additional_source_records"] += 1
+        return candidates, signatures
+
+    @staticmethod
+    def _merge_source_signatures(*groups):
+        by_name = {}
+        for group in groups:
+            for signature in group:
+                by_name[signature[0]] = tuple(signature)
+        return [by_name[name] for name in sorted(by_name)]
+
+    def _project_soc_candidates(self, candidates, *, physical_serial, start, end,
+                                selected_resolution, max_points, offset=0,
+                                source_signature=(), evidence_identities=None,
+                                io_profile=None):
+        candidates.sort(key=lambda item: item[0])
+        source_points = len(candidates)
+        observation_times = sorted(set(item[0] for item in candidates))
+        selected = candidates
+        if selected_resolution == "display" and len(selected) > max_points:
+            if max_points == 1: selected = selected[:1]
+            else:
+                step = (len(selected) - 1) / (max_points - 1)
+                selected = [selected[round(index * step)] for index in range(max_points)]
+        page_limit = min(max_points, MAX_RECORDS)
+        selected_page = selected[offset:offset + page_limit]
+        truncated = offset + len(selected_page) < len(selected)
+        points = []
+        for epoch, value, direct_serial in selected_page:
+            timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+            cached = evidence_identities.get((epoch, value, direct_serial)) \
+                if evidence_identities else None
+            identity = cached or self.identity.position_at(physical_serial, timestamp)
+            if io_profile is not None and cached is None: io_profile["position_at_calls"] += 1
+            points.append({"timestamp": timestamp, "value": value,
+                "physical_serial": physical_serial,
+                "position_at_time": identity.get("position_at_time"),
+                "position_history_id": identity.get("position_history_id"),
+                "identity_epoch_id": identity.get("identity_epoch_id"),
+                "identity_resolved": identity.get("identity_resolved", identity.get("resolved", False)),
+                "identity_source": ("record_module_serial" if direct_serial else "position_history")})
+        gaps = [right - left for left, right in zip(observation_times, observation_times[1:])
+                if right >= left]
+        first = (datetime.fromtimestamp(min(observation_times), timezone.utc).isoformat()
+                 if observation_times else None)
+        last = (datetime.fromtimestamp(max(observation_times), timezone.utc).isoformat()
+                if observation_times else None)
+        cadence = statistics.median(gaps) if gaps else None
+        gap_limit = cadence * 3 if cadence else None
+        missing = [{"from": datetime.fromtimestamp(left, timezone.utc).isoformat(),
+                    "to": datetime.fromtimestamp(right, timezone.utc).isoformat()}
+                   for left, right in zip(observation_times, observation_times[1:])
+                   if gap_limit is not None and right - left > gap_limit]
+        covered = []
+        if observation_times:
+            interval_start = observation_times[0]
+            for left, right in zip(observation_times, observation_times[1:]):
+                if gap_limit is not None and right - left > gap_limit:
+                    covered.append({"from": datetime.fromtimestamp(
+                        interval_start, timezone.utc).isoformat(),
+                        "to": datetime.fromtimestamp(left, timezone.utc).isoformat()})
+                    interval_start = right
+            covered.append({"from": datetime.fromtimestamp(
+                interval_start, timezone.utc).isoformat(),
+                "to": datetime.fromtimestamp(observation_times[-1], timezone.utc).isoformat()})
+        coverage = {"requested_range": {"from": start, "to": end},
+            "covered_intervals": covered,
+            "missing_intervals": missing if observation_times else [{"from": start, "to": end}],
+            "first_observation": first, "last_observation": last,
+            "sample_count": len(observation_times), "expected_cadence_seconds": cadence,
+            "largest_gap_seconds": max(gaps) if gaps else None,
+            "quality": "complete" if observation_times and not missing and not truncated else
+                       "partial" if observation_times else "absent"}
+        if io_profile is not None:
+            io_profile["samples_returned"] = len(points)
+            io_profile["materialized_output_points"] = len(points)
+        signature = [tuple(item) for item in source_signature]
+        return {"metric": "soc", "physical_serial": physical_serial, "points": points,
+            "point_count": len(points), "source_point_count": source_points,
+            "resolution": selected_resolution, "coverage": coverage, "truncated": truncated,
+            "next_cursor": None,
+            "source_fingerprint": hashlib.sha256(json.dumps(signature).encode()).hexdigest()}
+
+    def soc_query_with_evidence(self, *, physical_serial, timestamp_from, timestamp_to,
+                                reusable_evidence, reusable_from, resolution="auto",
+                                max_points=MAX_POINTS, deadline=None, io_profile=None):
+        """Build one SOC query from an older scan plus reusable recent evidence."""
+        start, end = self.normalize_range(timestamp_from, timestamp_to)
+        reuse_start = normalize_utc_timestamp(reusable_from, "reusable_from")
+        reuse_epoch = datetime.fromisoformat(reuse_start).timestamp()
+        candidates, older_signatures = self._soc_candidates(
+            physical_serial, start, reuse_start, deadline=deadline,
+            io_profile=io_profile, end_exclusive_epoch=reuse_epoch)
+        identities = {}
+        reused = 0
+        start_epoch = datetime.fromisoformat(start).timestamp()
+        end_epoch = datetime.fromisoformat(end).timestamp()
+        for row in reusable_evidence["records"].get(physical_serial, ()):
+            epoch = datetime.fromisoformat(row["timestamp"]).timestamp()
+            if not reuse_epoch <= epoch <= end_epoch or epoch < start_epoch:
+                continue
+            value = row.get("soc")
+            if value is None: continue
+            direct = row.get("identity_source") == "record_module_serial"
+            candidate = (epoch, float(value), direct)
+            candidates.append(candidate); reused += 1
+            identities[candidate] = row
+        if io_profile is not None: io_profile["reused_evidence_records"] = reused
+        signatures = self._merge_source_signatures(
+            older_signatures,
+            (item for item in reusable_evidence.get("source_signature", ())
+             if start[:10] <= item[0][:10] <= end[:10]))
+        span = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+        selected_resolution = ("full" if span <= FULL_DEFAULT_SECONDS else "display") \
+            if resolution == "auto" else resolution
+        return self._project_soc_candidates(candidates, physical_serial=physical_serial,
+            start=start, end=end, selected_resolution=selected_resolution,
+            max_points=max_points, source_signature=signatures,
+            evidence_identities=identities, io_profile=io_profile)
+
     def soc_current_by_serial(self, physical_serials, timestamp_from, timestamp_to,
                               deadline=None, profile=None):
         """Read SOC/current for several identities in one authoritative scan."""
@@ -718,6 +907,16 @@ class ResearchTimeseriesService:
             separators=(",", ":")).encode()).hexdigest()
         offset = self.cursor.decode(cursor, query_hash) if cursor else 0
         start_epoch, end_epoch = datetime.fromisoformat(start).timestamp(), datetime.fromisoformat(end).timestamp()
+        if metric == "soc":
+            candidates, signatures = self._soc_candidates(
+                physical_serial, start, end, deadline=deadline, io_profile=io_profile)
+            result = self._project_soc_candidates(candidates,
+                physical_serial=physical_serial, start=start, end=end,
+                selected_resolution=selected_resolution, max_points=max_points,
+                offset=offset, source_signature=signatures, io_profile=io_profile)
+            result["next_cursor"] = (self.cursor.encode(query_hash, offset + result["point_count"])
+                                     if result["truncated"] else None)
+            return result
         points, observation_times, signatures = [], [], []
         for path in selected_paths:
             stat = path.stat(); signatures.append((path.name, stat.st_size, stat.st_mtime_ns))

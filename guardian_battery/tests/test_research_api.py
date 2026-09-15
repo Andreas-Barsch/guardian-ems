@@ -14,7 +14,7 @@ from research_api import (GuardianResearchApi, PACKAGE_PROFILE_STAGES,
                           READER_ACCOUNTED_TIMINGS, ResearchPaths, research_envelope)
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
-from history_block_index import build_index
+from history_block_index import build_index, index_path
 import research_timeseries
 from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
                      RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT)
@@ -157,6 +157,125 @@ def test_auto_resolution_and_range_limits(tmp_path):
     too_long = get(api, "timeseries?metric=soc&physical_serial=SERIAL-M4&resolution=full"
         "&from=2026-08-01T00:00:00Z&to=2026-09-11T12:00:00Z")
     assert too_long.status == 400 and too_long.body["error"]["code"] == "range_too_large"
+
+
+@pytest.mark.parametrize("max_points", [1, 2, 200])
+def test_soc_lazy_projection_preserves_sampling_contract(tmp_path, max_points):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    base = datetime(2026, 9, 11, 10, tzinfo=timezone.utc).timestamp()
+    rows = [{"schema_version": 1, "timestamp": base + index * 60, "module": 4,
+        "module_serial": "SERIAL-M4", "soc_percent": 70 - index / 10,
+        "current_a": -1, "voltages_mv": [3300 + cell for cell in range(15)],
+        "temperatures_c": [20 + cell / 10 for cell in range(15)]}
+        for index in range(401)]
+    write_jsonl(path, rows)
+    profile = {}
+    result = api.series.query(metric="soc", physical_serial="SERIAL-M4",
+        timestamp_from="2026-09-11T10:00:00Z", timestamp_to="2026-09-11T16:40:00Z",
+        resolution="display", max_points=max_points, io_profile=profile)
+    expected_indexes = ([0] if max_points == 1 else
+        [round(index * ((len(rows) - 1) / (max_points - 1))) for index in range(max_points)])
+    assert [(point["timestamp"], point["value"]) for point in result["points"]] == [
+        (datetime.fromtimestamp(rows[index]["timestamp"], timezone.utc).isoformat(),
+         float(rows[index]["soc_percent"])) for index in expected_indexes]
+    assert result["source_point_count"] == result["coverage"]["sample_count"] == len(rows)
+    assert profile["full_json_decode_count"] == len(rows)
+    assert profile["serial_at_calls"] == 0
+    assert profile["position_at_calls"] == max_points
+    assert profile["materialized_output_points"] == max_points
+
+
+def test_soc_lazy_projection_keeps_position_history_fallback_and_unresolved(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-09.jsonl"
+    epoch = datetime(2026, 9, 9, 23, 59, tzinfo=timezone.utc).timestamp()
+    write_jsonl(path, [{"timestamp": epoch, "module": 4, "soc_percent": 71}])
+    unresolved = api.series.query(metric="soc", physical_serial="SERIAL-M4",
+        timestamp_from="2026-09-09T23:58:00Z", timestamp_to="2026-09-09T23:59:59Z")
+    assert unresolved["points"] == []
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    observed_epoch = datetime(2026, 9, 11, 0, 0, 30, tzinfo=timezone.utc).timestamp()
+    write_jsonl(path, [{"timestamp": observed_epoch, "module": 4, "soc_percent": 70}])
+    profile = {}
+    resolved = api.series.query(metric="soc", physical_serial="SERIAL-M4",
+        timestamp_from="2026-09-11T00:00:00Z", timestamp_to="2026-09-11T00:01:00Z",
+        io_profile=profile)
+    assert resolved["points"][0]["identity_source"] == "position_history"
+    assert resolved["points"][0]["position_at_time"] == 4
+    assert profile["serial_at_calls"] == profile["position_at_calls"] == 1
+
+
+@pytest.mark.parametrize("index_mode", ["valid", "missing", "invalid"])
+def test_pt7d_soc_reuse_matches_complete_query_across_eight_days(
+        tmp_path, index_mode):
+    api, _, _ = environment(tmp_path)
+    api.paths.cell_history.mkdir(parents=True, exist_ok=True)
+    start = datetime(2026, 9, 4, 12, tzinfo=timezone.utc)
+    end = start + timedelta(days=7)
+    reuse_start = end - timedelta(days=1)
+    sources = {}
+    for day_offset in range(8):
+        day = (start + timedelta(days=day_offset)).date()
+        path = api.paths.cell_history / f"{day.isoformat()}.jsonl"
+        records = []
+        for hour in (0, 6, 12, 18):
+            stamp = datetime.combine(day, datetime.min.time(), timezone.utc) + timedelta(hours=hour)
+            for module in range(1, 7):
+                records.append({"timestamp": stamp.timestamp(), "module": module,
+                    "module_serial": f"SERIAL-M{module}", "soc_percent": 80 - day_offset - hour / 24,
+                    "voltages_mv": [3300] * 15, "temperatures_c": [20] * 15})
+        write_jsonl(path, records)
+        if index_mode == "valid":
+            build_index(path, timestamp_field="timestamp", iso_timestamp=False, block_records=6)
+        elif index_mode == "invalid":
+            index_path(path).write_text("{}", encoding="utf-8")
+        sources[path] = path.read_bytes()
+    recent = api.series.evidence_by_serial(["SERIAL-M4"], reuse_start.isoformat(),
+                                           (end + timedelta(minutes=30)).isoformat())
+    complete = api.series.query(metric="soc", physical_serial="SERIAL-M4",
+        timestamp_from=start.isoformat(), timestamp_to=end.isoformat(),
+        resolution="display", max_points=200)
+    merged = api.series.soc_query_with_evidence(physical_serial="SERIAL-M4",
+        timestamp_from=start.isoformat(), timestamp_to=end.isoformat(),
+        reusable_evidence=recent, reusable_from=reuse_start.isoformat(),
+        resolution="display", max_points=200)
+    assert merged == complete
+    assert all(path.read_bytes() == content for path, content in sources.items())
+
+
+def test_pt7d_soc_reuse_preserves_duplicate_timestamps_and_boundary_once(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    boundary = datetime(2026, 9, 11, 10, tzinfo=timezone.utc).timestamp()
+    rows = [{"timestamp": boundary - 60, "module": 4, "module_serial": "SERIAL-M4",
+             "soc_percent": 72},
+            {"timestamp": boundary, "module": 4, "module_serial": "SERIAL-M4",
+             "soc_percent": 71},
+            {"timestamp": boundary, "module": 4, "module_serial": "SERIAL-M4",
+             "soc_percent": 70}]
+    write_jsonl(path, rows)
+    recent = api.series.evidence_by_serial(["SERIAL-M4"],
+        datetime.fromtimestamp(boundary, timezone.utc).isoformat(),
+        datetime.fromtimestamp(boundary + 60, timezone.utc).isoformat())
+    merged = api.series.soc_query_with_evidence(physical_serial="SERIAL-M4",
+        timestamp_from=datetime.fromtimestamp(boundary - 60, timezone.utc).isoformat(),
+        timestamp_to=datetime.fromtimestamp(boundary + 60, timezone.utc).isoformat(),
+        reusable_evidence=recent,
+        reusable_from=datetime.fromtimestamp(boundary, timezone.utc).isoformat(),
+        resolution="full", max_points=200)
+    assert [point["value"] for point in merged["points"]] == [72.0, 71.0, 70.0]
+    assert merged["source_point_count"] == 3
+
+
+def test_soc_lazy_projection_deadline_remains_fail_closed(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    monkeypatch.setattr(research_timeseries.time, "monotonic", lambda: 20)
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        api.series.query(metric="soc", physical_serial="SERIAL-M4",
+            timestamp_from="2026-09-11T09:00:00Z", timestamp_to="2026-09-11T12:00:00Z",
+            deadline=10)
+    assert error.value.code == "timeout"
 
 
 def test_pagination_cursor_is_query_bound_and_tamper_protected(tmp_path):
@@ -389,8 +508,10 @@ def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
     assert profile["status"] == "ok"
     assert set(profile["stages"]) == set(PACKAGE_PROFILE_STAGES)
     assert profile["stages"]["module_soc"]["calls"] == 4
-    assert profile["stages"]["module_soc"]["files_opened"] >= 1
-    assert profile["stages"]["module_soc"]["bytes_read"] > 0
+    soc_reader = profile["stages"]["module_soc"]["reader"]
+    assert soc_reader["reused_evidence_records"] > 0
+    assert soc_reader["position_at_calls"] <= profile["stages"]["module_soc"]["samples_returned"]
+    assert soc_reader["materialized_output_points"] > 0
     assert profile["stages"]["target_multi_metric_read"]["samples_returned"] > 0
     reader = profile["stages"]["target_multi_metric_read"]["reader"]
     peer_reader = profile["stages"]["peer_immediate_read"]["reader"]
@@ -436,9 +557,10 @@ def test_evidence_package_profile_adds_no_history_scans(tmp_path, monkeypatch, c
     event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
     suffix = "evidence-package?event_id=" + event["event_id"]
-    counts = {"query": 0, "evidence": 0}
+    counts = {"query": 0, "soc_reuse": 0, "evidence": 0}
     evidence_profiles = []
-    query, evidence = api.series.query, api.series.evidence_by_serial
+    query, soc_reuse = api.series.query, api.series.soc_query_with_evidence
+    evidence = api.series.evidence_by_serial
     def tracked_query(*args, **kwargs):
         counts["query"] += 1
         return query(*args, **kwargs)
@@ -446,16 +568,20 @@ def test_evidence_package_profile_adds_no_history_scans(tmp_path, monkeypatch, c
         counts["evidence"] += 1
         evidence_profiles.append(kwargs.get("io_profile"))
         return evidence(*args, **kwargs)
+    def tracked_soc_reuse(*args, **kwargs):
+        counts["soc_reuse"] += 1
+        return soc_reuse(*args, **kwargs)
     monkeypatch.setattr(api.series, "query", tracked_query)
+    monkeypatch.setattr(api.series, "soc_query_with_evidence", tracked_soc_reuse)
     monkeypatch.setattr(api.series, "evidence_by_serial", tracked_evidence)
     get(api, suffix)
     normal = dict(counts)
     assert evidence_profiles == [None, None]
-    counts.update(query=0, evidence=0)
+    counts.update(query=0, soc_reuse=0, evidence=0)
     evidence_profiles.clear()
     with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
         get(api, suffix + "&profile=true")
-    assert counts == normal == {"query": 1, "evidence": 2}
+    assert counts == normal == {"query": 0, "soc_reuse": 1, "evidence": 2}
     assert len(evidence_profiles) == 2 and all(item is not None for item in evidence_profiles)
 
 

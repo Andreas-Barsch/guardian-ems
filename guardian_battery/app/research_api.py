@@ -1005,10 +1005,17 @@ class GuardianResearchApi:
                     profile["counts"]["cell_history_queries"] += 1
                     profile["counts"]["cell_history_scans"] += 1
                 trends[window] = self._run_package_stage(profile, "module_soc", deadline,
-                    lambda window_start=window_start, io_profile=io_profile: self.series.query(
-                        metric="soc", physical_serial=serial, timestamp_from=window_start,
-                        timestamp_to=event["end"], resolution="auto", max_points=200,
-                        deadline=deadline, io_profile=io_profile), io_profile=io_profile)
+                    lambda window_start=window_start, io_profile=io_profile: (
+                        self.series.query(metric="soc", physical_serial=serial,
+                            timestamp_from=window_start, timestamp_to=event["end"],
+                            resolution="auto", max_points=200, deadline=deadline,
+                            io_profile=io_profile)
+                        if serial in cell_evidence.get("truncated_serials", ()) else
+                        self.series.soc_query_with_evidence(
+                            physical_serial=serial, timestamp_from=window_start,
+                            timestamp_to=event["end"], reusable_evidence=cell_evidence,
+                            reusable_from=start, resolution="auto", max_points=200,
+                            deadline=deadline, io_profile=io_profile)), io_profile=io_profile)
         def isolated(name, callback):
             try: return callback()
             except Exception as exc:
