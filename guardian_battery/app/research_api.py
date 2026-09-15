@@ -777,8 +777,19 @@ class GuardianResearchApi:
     def _package(self, values, deadline):
         self._required(values, "event_id")
         reference = self._event_reference(values["event_id"])
-        detector_values = {"physical_serial": reference["s"], "from": reference["f"],
-                           "to": reference["t"]}
+        # Event timestamps originate as floating-point epochs but are represented
+        # in the stable identifier as microsecond-resolution ISO strings.  Widen
+        # only the reconstruction boundaries enough to include either side of
+        # that lossless-for-datetime, but potentially rounded, conversion.
+        try:
+            lookup_start = (datetime.fromisoformat(reference["f"])
+                            - timedelta(microseconds=1)).isoformat()
+            lookup_end = (datetime.fromisoformat(reference["t"])
+                          + timedelta(microseconds=1)).isoformat()
+        except (TypeError, ValueError) as exc:
+            raise ResearchQueryError("invalid_argument", "event_id is invalid") from exc
+        detector_values = {"physical_serial": reference["s"], "from": lookup_start,
+                           "to": lookup_end}
         crashes = self._soc_crashes(detector_values, deadline)
         event = next((item for item in crashes["data"]["events"]
                       if item["event_id"] == values["event_id"]), None)

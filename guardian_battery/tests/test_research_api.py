@@ -310,6 +310,57 @@ def test_evidence_package_uses_event_and_default_window(tmp_path):
     assert package.body["timestamp_range"]["to"] == "2026-09-11T10:36:00+00:00"
 
 
+def test_returned_event_with_submicrosecond_source_timestamps_resolves_to_package(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    base = datetime(2026, 9, 11, 15, tzinfo=timezone.utc).timestamp()
+    # Binary float epochs can round outward when converted to the microsecond ISO
+    # timestamps embedded in an event id.  Both event edge records must remain
+    # available to the bounded reconstruction query.
+    rows = [
+        {"schema_version": 1, "timestamp": base + 0.1234567, "module": 4,
+         "module_serial": "SERIAL-M4", "soc_percent": 70, "current_a": -1,
+         "voltages_mv": [3300] * 15},
+        {"schema_version": 1, "timestamp": base + 60.7654323, "module": 4,
+         "module_serial": "SERIAL-M4", "soc_percent": 68, "current_a": -1,
+         "voltages_mv": [3300] * 15},
+    ]
+    write_jsonl(path, rows)
+    source = path.read_bytes()
+    found = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T15:00:00Z&to=2026-09-11T15:02:00Z")
+    event = found.body["data"]["events"][0]
+
+    package = get(api, f"evidence-package?event_id={event['event_id']}"
+                       "&before=P1D&after=PT30M")
+
+    assert package.status == 200
+    assert package.body["data"]["event"]["event_id"] == event["event_id"]
+    assert package.body["data"]["event"] == event
+    assert package.body["data"]["identity_topology"]["position_at_time"] == 4
+    assert path.read_bytes() == source
+
+
+def test_evidence_package_event_lookup_is_microsecond_bounded(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    calls = []
+    original = api._soc_crashes
+
+    def tracked(values, deadline):
+        calls.append(dict(values))
+        return original(values, deadline)
+
+    monkeypatch.setattr(api, "_soc_crashes", tracked)
+    response = get(api, "evidence-package?event_id=" + event["event_id"])
+
+    assert response.status == 200
+    assert calls == [{"physical_serial": "SERIAL-M4",
+        "from": "2026-09-11T10:01:59.999999+00:00",
+        "to": "2026-09-11T10:06:00.000001+00:00"}]
+
+
 def package_for_crash(api):
     event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
