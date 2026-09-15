@@ -306,7 +306,7 @@ class ResearchTimeseriesService:
         return result
 
     def evidence_by_serial(self, physical_serials, timestamp_from, timestamp_to,
-                           deadline=None, max_records=10_000):
+                           deadline=None, max_records=10_000, io_profile=None):
         """Read at most ``max_records`` observations per identity in one scan."""
         start, end = self.normalize_range(timestamp_from, timestamp_to)
         start_epoch = datetime.fromisoformat(start).timestamp()
@@ -314,9 +314,19 @@ class ResearchTimeseriesService:
         wanted = set(physical_serials)
         result = {serial: deque(maxlen=max_records) for serial in wanted}
         truncated = False
-        for path in self._paths(start, end):
+        selected_paths = list(self._paths(start, end))
+        if io_profile is not None:
+            io_profile.update({"files_discovered": len(selected_paths), "files_opened": 0,
+                "bytes_read": 0, "records_inspected": 0, "samples_returned": 0,
+                "index_present": any(index_path(path).is_file() for path in selected_paths),
+                "index_valid": None, "read_mode": "full_scan"})
+        for path in selected_paths:
             with path.open(encoding="utf-8") as handle:
+                if io_profile is not None: io_profile["files_opened"] += 1
                 for line in handle:
+                    if io_profile is not None:
+                        io_profile["bytes_read"] += len(line.encode("utf-8"))
+                        io_profile["records_inspected"] += 1
                     if deadline is not None and time.monotonic() > deadline:
                         raise ResearchQueryError("timeout", "research query timed out", 503)
                     try:
@@ -364,6 +374,8 @@ class ResearchTimeseriesService:
                     result[observed].append(row)
         records = {serial: sorted(rows, key=lambda item: item["timestamp"])
                    for serial, rows in result.items()}
+        if io_profile is not None:
+            io_profile["samples_returned"] = sum(len(rows) for rows in records.values())
         return {"records": records, "truncated": truncated,
                 "source_fingerprint": hashlib.sha256(json.dumps([
                     (path.name, path.stat().st_size, path.stat().st_mtime_ns)
@@ -393,7 +405,7 @@ class ResearchTimeseriesService:
 
     def query(self, *, metric, physical_serial, timestamp_from, timestamp_to,
               resolution="auto", max_points=MAX_POINTS, cells=(), cursor=None,
-              deadline=None):
+              deadline=None, io_profile=None):
         if metric not in self.METRICS:
             raise ResearchQueryError("invalid_argument", "metric is unsupported")
         if not physical_serial:
@@ -412,6 +424,11 @@ class ResearchTimeseriesService:
         if len(cells) > MAX_CELLS or any(not 1 <= cell <= 15 for cell in cells):
             raise ResearchQueryError("invalid_argument", "cell numbers must be 1..15")
         selected_paths = list(self._paths(start, end))
+        if io_profile is not None:
+            io_profile.update({"files_discovered": len(selected_paths), "files_opened": 0,
+                "bytes_read": 0, "records_inspected": 0, "samples_returned": 0,
+                "index_present": any(index_path(path).is_file() for path in selected_paths),
+                "index_valid": None, "read_mode": "full_scan"})
         source_signature = [(path.name, path.stat().st_size, path.stat().st_mtime_ns)
                             for path in selected_paths]
         query_hash = hashlib.sha256(json.dumps((metric, physical_serial, start, end,
@@ -423,7 +440,11 @@ class ResearchTimeseriesService:
         for path in selected_paths:
             stat = path.stat(); signatures.append((path.name, stat.st_size, stat.st_mtime_ns))
             with path.open(encoding="utf-8") as handle:
+                if io_profile is not None: io_profile["files_opened"] += 1
                 for line in handle:
+                    if io_profile is not None:
+                        io_profile["bytes_read"] += len(line.encode("utf-8"))
+                        io_profile["records_inspected"] += 1
                     if deadline is not None and time.monotonic() > deadline:
                         raise ResearchQueryError("timeout", "research query timed out", 503)
                     try:
@@ -497,6 +518,7 @@ class ResearchTimeseriesService:
             "largest_gap_seconds": max(gaps) if gaps else None,
             "quality": "complete" if observation_times and not missing and not truncated else
                        "partial" if observation_times else "absent"}
+        if io_profile is not None: io_profile["samples_returned"] = len(page)
         return {"metric": metric, "physical_serial": physical_serial, "points": page,
             "point_count": len(page), "source_point_count": source_points,
             "resolution": selected_resolution, "coverage": coverage, "truncated": truncated,

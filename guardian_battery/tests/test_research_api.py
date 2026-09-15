@@ -10,7 +10,8 @@ from urllib.parse import quote
 import pytest
 
 from position_history import PositionSnapshot
-from research_api import GuardianResearchApi, ResearchPaths, research_envelope
+from research_api import (GuardianResearchApi, PACKAGE_PROFILE_STAGES, ResearchPaths,
+                          research_envelope)
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
 from history_block_index import build_index
@@ -359,6 +360,89 @@ def test_evidence_package_event_lookup_is_microsecond_bounded(tmp_path, monkeypa
     assert calls == [{"physical_serial": "SERIAL-M4",
         "from": "2026-09-11T10:01:59.999999+00:00",
         "to": "2026-09-11T10:06:00.000001+00:00"}]
+
+
+def package_profile(caplog):
+    return json.loads(next(item.message.removeprefix("RESEARCH_PACKAGE_PROFILE ")
+        for item in caplog.records
+        if item.message.startswith("RESEARCH_PACKAGE_PROFILE ")))
+
+
+def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
+        tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    suffix = "evidence-package?event_id=" + event["event_id"]
+    source = (api.paths.cell_history / "2026-09-11.jsonl").read_bytes()
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        normal = get(api, suffix)
+        disabled = get(api, suffix + "&profile=false")
+    assert "RESEARCH_PACKAGE_PROFILE" not in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        profiled = get(api, suffix + "&profile=true")
+    assert normal.status == disabled.status == profiled.status == 200
+    assert normal.body["data"] == disabled.body["data"] == profiled.body["data"]
+    assert (api.paths.cell_history / "2026-09-11.jsonl").read_bytes() == source
+    profile = package_profile(caplog)
+    assert profile["status"] == "ok"
+    assert set(profile["stages"]) == set(PACKAGE_PROFILE_STAGES)
+    assert profile["stages"]["module_soc"]["calls"] == 4
+    assert profile["stages"]["module_soc"]["files_opened"] >= 1
+    assert profile["stages"]["module_soc"]["bytes_read"] > 0
+    assert profile["stages"]["peer_module_evidence"]["samples_returned"] > 0
+    assert profile["coverage_status"]["module_soc"] in {"complete", "partial"}
+    assert profile["stages"]["soc_recalibration"]["status"] == "unavailable"
+
+
+def test_evidence_package_profile_adds_no_history_scans(tmp_path, monkeypatch, caplog):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    suffix = "evidence-package?event_id=" + event["event_id"]
+    counts = {"query": 0, "evidence": 0}
+    query, evidence = api.series.query, api.series.evidence_by_serial
+    def tracked_query(*args, **kwargs):
+        counts["query"] += 1
+        return query(*args, **kwargs)
+    def tracked_evidence(*args, **kwargs):
+        counts["evidence"] += 1
+        return evidence(*args, **kwargs)
+    monkeypatch.setattr(api.series, "query", tracked_query)
+    monkeypatch.setattr(api.series, "evidence_by_serial", tracked_evidence)
+    get(api, suffix)
+    normal = dict(counts)
+    counts.update(query=0, evidence=0)
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        get(api, suffix + "&profile=true")
+    assert counts == normal == {"query": 9, "evidence": 1}
+
+
+def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monkeypatch, caplog):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    original = api.series.query
+    def timeout_on_current(*args, **kwargs):
+        if kwargs.get("metric") == "module_current":
+            raise research_timeseries.ResearchQueryError(
+                "timeout", "research query timed out", 503)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(api.series, "query", timeout_on_current)
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        response = get(api, "evidence-package?event_id=" + event["event_id"] + "&profile=true")
+    assert response.status == 503 and response.body["error"]["code"] == "timeout"
+    profile = package_profile(caplog)
+    assert profile["status"] == "timeout"
+    assert profile["stages"]["module_soc"]["status"] == "complete"
+    assert profile["stages"]["module_current"]["status"] == "timeout"
+    assert profile["stages"]["module_voltage"]["status"] == "not_run"
+    encoded = json.dumps(profile)
+    assert event["event_id"] not in encoded
+    assert "SERIAL-M4" not in encoded
+    assert "soc_percent" not in encoded
+    assert "token" not in encoded.lower() and "secret" not in encoded.lower()
 
 
 def package_for_crash(api):
