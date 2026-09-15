@@ -1,4 +1,5 @@
 import json
+import io
 import logging
 import time
 import uuid
@@ -566,6 +567,8 @@ def test_soc_crash_profiling_is_opt_in_and_response_neutral(tmp_path, caplog):
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z")
     with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
         normal = get(api, suffix)
+        explicitly_disabled = get(api, suffix + "&profile=false")
+    assert explicitly_disabled.body == normal.body
     assert "RESEARCH_PROFILE" not in caplog.text
     caplog.clear()
     source = (api.paths.cell_history / "2026-09-11.jsonl").read_bytes()
@@ -579,7 +582,8 @@ def test_soc_crash_profiling_is_opt_in_and_response_neutral(tmp_path, caplog):
     assert set(record["stages_seconds"]) == {
         "request_range_validation", "identity_epoch_preparation", "file_discovery",
         "block_index_discovery", "indexed_range_selection", "jsonl_scan",
-        "range_seek", "range_position_check", "raw_line_read", "serial_prefilter",
+        "range_seek", "range_position_check", "raw_line_read", "raw_chunk_read",
+        "range_tail_read", "serial_prefilter",
         "serial_token_decode", "full_json_decode", "timestamp_parse_range_check",
         "timestamp_format", "identity_assignment", "soc_current_extract",
         "cell_context_extract", "deadline_check",
@@ -590,6 +594,7 @@ def test_soc_crash_profiling_is_opt_in_and_response_neutral(tmp_path, caplog):
     assert record["counts"]["raw_bytes_read"] == len(source)
     assert record["counts"]["average_raw_line_bytes"] > 0
     assert record["counts"]["maximum_raw_line_bytes"] > 0
+    assert record["counts"]["raw_chunk_reads"] >= 1
     assert record["files"][0]["file"] == "2026-09-11.jsonl"
     assert record["files"][0]["size_bytes"] == len(source)
     assert record["files"][0]["raw_bytes_read"] == len(source)
@@ -609,9 +614,12 @@ def test_soc_crash_timeout_still_logs_bounded_profile(tmp_path, caplog):
         for item in caplog.records if item.message.startswith("RESEARCH_PROFILE ")))
     assert record["status"] == "timeout"
     assert record["total_elapsed_seconds"] >= 0
-    assert record["counts"]["raw_records_inspected"] == 1
-    assert record["files"][0]["records_inspected"] == 1
+    assert record["counts"]["raw_records_inspected"] == 0
+    assert record["counts"]["raw_chunk_reads"] == 1
+    assert record["counts"]["raw_bytes_read"] > 0
+    assert record["files"][0]["records_inspected"] == 0
     assert record["stages_seconds"]["raw_line_read"] >= 0
+    assert record["stages_seconds"]["raw_chunk_read"] >= 0
     assert record["stages_seconds"]["deadline_check"] >= 0
     assert "SERIAL-M4" not in caplog.text and "soc_percent" not in caplog.text
 
@@ -646,6 +654,65 @@ def test_soc_crash_profile_counts_large_lines_and_multiple_index_ranges(tmp_path
     assert file_profile["records_inspected"] == 4
     assert file_profile["maximum_raw_line_bytes"] > 10_000
     assert file_profile["raw_bytes_read"] == record["counts"]["raw_bytes_read"]
+    assert record["counts"]["raw_chunk_reads"] == 2
+
+
+def _legacy_range_lines(blob, ranges):
+    handle = io.BytesIO(blob); result = []
+    for start, end in ranges:
+        handle.seek(start)
+        while handle.tell() < end:
+            result.append(handle.readline())
+    return result
+
+
+@pytest.mark.parametrize("blob,ranges", [
+    (b'{"a":1}\n{"b":2}\n', ((0, 8), (8, 16))),
+    (b'{"a":1}\n{"b":2}', ((0, 15),)),
+    ('{"text":"Gr\u00fc\u00dfe"}\n{"broken":'.encode(), ((0, 28),)),
+    (b'first-line\nsecond-line\n', ((2, 15),)),
+])
+def test_chunk_reader_is_byte_identical_to_legacy_readline(blob, ranges):
+    expected = _legacy_range_lines(blob, ranges)
+    actual = []
+    handle = io.BytesIO(blob)
+    for start, end in ranges:
+        actual.extend(research_timeseries.iter_binary_range_lines(
+            handle, start, end, chunk_size=3))
+    assert actual == expected
+
+
+def test_chunk_reader_reassembles_record_spanning_many_chunks_and_large_line():
+    blob = (b'{"padding":"' + b'x' * 100_000 + b'"}\n'
+            b'{"tail":true}')
+    expected = _legacy_range_lines(blob, ((0, len(blob)),))
+    actual = list(research_timeseries.iter_binary_range_lines(
+        io.BytesIO(blob), 0, len(blob), chunk_size=257))
+    assert actual == expected
+    assert len(actual) == 2 and len(actual[0]) > 100_000
+
+
+def test_soc_crash_chunk_reader_preserves_two_day_utc_boundary_and_bad_line(tmp_path):
+    api, _, _ = environment(tmp_path)
+    first_epoch = datetime(2026, 9, 11, 23, 59, tzinfo=timezone.utc).timestamp()
+    before = {"schema_version": 1, "timestamp": first_epoch, "module": 4,
+        "module_serial": "SERIAL-M4", "soc_percent": 70, "current_a": -1,
+        "voltages_mv": [3300] * 15}
+    after = {**before, "timestamp": first_epoch + 60, "soc_percent": 68}
+    late = {**after, "timestamp": first_epoch + 120, "soc_percent": 20}
+    write_jsonl(api.paths.cell_history / "2026-09-11.jsonl", [before])
+    second = api.paths.cell_history / "2026-09-12.jsonl"
+    second.write_bytes((json.dumps(after) + "\n{broken json\n" + json.dumps(late) + "\n").encode())
+    source = [path.read_bytes() for path in (
+        api.paths.cell_history / "2026-09-11.jsonl", second)]
+    response = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T23:59:00Z&to=2026-09-12T00:00:00Z")
+    event = response.body["data"]["events"][0]
+    assert event["start"] == "2026-09-11T23:59:00+00:00"
+    assert event["end"] == "2026-09-12T00:00:00+00:00"
+    assert event["soc_loss"] == 2
+    assert [path.read_bytes() for path in (
+        api.paths.cell_history / "2026-09-11.jsonl", second)] == source
 
 
 def test_evidence_package_event_id_survives_api_restart(tmp_path):

@@ -22,6 +22,56 @@ FULL_DEFAULT_SECONDS = 86400
 FULL_MAX_SECONDS = 7 * 86400
 DISPLAY_MAX_SECONDS = 90 * 86400
 _SERIAL_TOKEN_BYTES = re.compile(rb'"module_serial"\s*:\s*("(?:[^"\\]|\\.)*")')
+RANGE_READ_CHUNK_BYTES = 256 * 1024
+
+
+def iter_binary_range_lines(handle, range_start, range_end, *,
+                            chunk_size=RANGE_READ_CHUNK_BYTES, profile=None,
+                            file_profile=None, deadline=None):
+    """Yield legacy-equivalent binary lines from one bounded byte range."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    started = time.perf_counter(); handle.seek(range_start)
+    if profile is not None:
+        profile["stages_seconds"]["range_seek"] += time.perf_counter() - started
+    remaining = max(0, range_end - range_start)
+    carry = bytearray()
+    while remaining:
+        started = time.perf_counter()
+        chunk = handle.read(min(chunk_size, remaining))
+        if profile is not None:
+            profile["stages_seconds"]["raw_chunk_read"] += time.perf_counter() - started
+            profile["counts"]["raw_chunk_reads"] += 1
+            profile["counts"]["raw_bytes_read"] += len(chunk)
+            file_profile["raw_bytes_read"] += len(chunk)
+        if not chunk:
+            break
+        started = time.perf_counter()
+        deadline_exceeded = deadline is not None and time.monotonic() > deadline
+        if profile is not None:
+            profile["stages_seconds"]["deadline_check"] += time.perf_counter() - started
+        if deadline_exceeded:
+            raise ResearchQueryError("timeout", "research query timed out", 503)
+        remaining -= len(chunk)
+        parts = chunk.split(b"\n")
+        if len(parts) == 1:
+            carry.extend(chunk)
+            continue
+        carry.extend(parts[0]); yield bytes(carry) + b"\n"; carry.clear()
+        for part in parts[1:-1]:
+            yield part + b"\n"
+        carry.extend(parts[-1])
+    if carry:
+        # The index contract is line-aligned. Preserve legacy readline behavior
+        # fail-closed even for an externally supplied partial range boundary.
+        started = time.perf_counter(); tail = handle.readline()
+        if profile is not None:
+            profile["stages_seconds"]["range_tail_read"] += time.perf_counter() - started
+            profile["counts"]["range_tail_reads"] += 1
+            profile["counts"]["raw_bytes_read"] += len(tail)
+            file_profile["raw_bytes_read"] += len(tail)
+        carry.extend(tail)
+        yield bytes(carry)
 
 
 class ResearchQueryError(ValueError):
@@ -112,6 +162,7 @@ class ResearchTimeseriesService:
                     "index_present": index_present, "index_valid": False,
                     "selection_mode": "full_scan_fallback", "selected_bytes": size,
                     "range_count": 1, "records_inspected": 0, "raw_bytes_read": 0,
+                    "record_bytes_inspected": 0,
                     "average_raw_line_bytes": 0.0, "maximum_raw_line_bytes": 0,
                     "selected_progress_bytes": 0, "selected_progress_percent": 0.0}
             selection_started = time.perf_counter()
@@ -131,31 +182,17 @@ class ResearchTimeseriesService:
                 profile["files"].append(file_profile)
             with path.open("rb") as handle:
               for range_start, range_end in ranges:
-                operation_started = time.perf_counter()
-                handle.seek(range_start)
-                if profile is not None:
-                    profile["stages_seconds"]["range_seek"] += (
-                        time.perf_counter() - operation_started)
-                while True:
-                    operation_started = time.perf_counter()
-                    position = handle.tell()
+                for line in iter_binary_range_lines(
+                        handle, range_start, range_end, profile=profile,
+                        file_profile=file_profile, deadline=deadline):
                     if profile is not None:
-                        profile["stages_seconds"]["range_position_check"] += (
-                            time.perf_counter() - operation_started)
-                    if position >= range_end:
-                        break
-                    operation_started = time.perf_counter()
-                    line = handle.readline()
-                    if profile is not None:
-                        profile["stages_seconds"]["raw_line_read"] += (
-                            time.perf_counter() - operation_started)
                         profile["counts"]["raw_records_inspected"] += 1
                         line_size = len(line)
-                        profile["counts"]["raw_bytes_read"] += line_size
+                        profile["counts"]["record_bytes_inspected"] += line_size
                         profile["counts"]["maximum_raw_line_bytes"] = max(
                             profile["counts"]["maximum_raw_line_bytes"], line_size)
                         file_profile["records_inspected"] += 1
-                        file_profile["raw_bytes_read"] += line_size
+                        file_profile["record_bytes_inspected"] += line_size
                         file_profile["maximum_raw_line_bytes"] = max(
                             file_profile["maximum_raw_line_bytes"], line_size)
                     operation_started = time.perf_counter()
@@ -255,11 +292,11 @@ class ResearchTimeseriesService:
                 profile["stages_seconds"]["jsonl_scan"] = time.perf_counter() - scan_started
                 count = profile["counts"]["raw_records_inspected"]
                 profile["counts"]["average_raw_line_bytes"] = (
-                    profile["counts"]["raw_bytes_read"] / count if count else 0.0)
+                    profile["counts"]["record_bytes_inspected"] / count if count else 0.0)
                 for item in profile["files"]:
                     records = item["records_inspected"]
                     item["average_raw_line_bytes"] = (
-                        item["raw_bytes_read"] / records if records else 0.0)
+                        item["record_bytes_inspected"] / records if records else 0.0)
                     item["selected_progress_bytes"] = min(
                         item["raw_bytes_read"], item["selected_bytes"])
                     item["selected_progress_percent"] = (

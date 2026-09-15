@@ -521,6 +521,7 @@ class GuardianResearchApi:
                 "indexed_range_selection": 0.0,
                 "jsonl_scan": 0.0, "range_seek": 0.0,
                 "range_position_check": 0.0, "raw_line_read": 0.0,
+                "raw_chunk_read": 0.0, "range_tail_read": 0.0,
                 "serial_prefilter": 0.0, "serial_token_decode": 0.0,
                 "full_json_decode": 0.0, "timestamp_parse_range_check": 0.0,
                 "timestamp_format": 0.0, "identity_assignment": 0.0,
@@ -533,7 +534,9 @@ class GuardianResearchApi:
                 "records_skipped_timestamp": 0, "records_fully_decoded": 0,
                 "relevant_soc_current_samples": 0, "candidates": 0,
                 "groups": 0, "events": 0, "raw_bytes_read": 0,
-                "average_raw_line_bytes": 0.0, "maximum_raw_line_bytes": 0},
+                "record_bytes_inspected": 0,
+                "average_raw_line_bytes": 0.0, "maximum_raw_line_bytes": 0,
+                "raw_chunk_reads": 0, "range_tail_reads": 0},
             "files": []}
 
     def _soc_crashes(self, values, deadline):
