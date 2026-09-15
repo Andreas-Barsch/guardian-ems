@@ -819,9 +819,25 @@ class GuardianResearchApi:
             "coverage_status": {}}
 
     @staticmethod
+    def _ensure_package_deadline(deadline):
+        if time.monotonic() >= deadline:
+            raise ResearchQueryError(
+                "timeout", "research query exceeded hard deadline", 503)
+
+    @staticmethod
     def _run_package_stage(profile, name, deadline, callback, *, io_profile=None):
+        if time.monotonic() >= deadline:
+            if profile is not None:
+                stage = profile["stages"][name]
+                stage["status"] = "timeout"
+                stage["deadline_remaining_seconds_at_entry"] = 0.0
+                stage["deadline_remaining_seconds_at_exit"] = 0.0
+            raise ResearchQueryError(
+                "timeout", "research query exceeded hard deadline", 503)
         if profile is None:
-            return callback()
+            result = callback()
+            GuardianResearchApi._ensure_package_deadline(deadline)
+            return result
         stage = profile["stages"][name]
         stage["calls"] += 1
         stage["status"] = "running"
@@ -830,6 +846,7 @@ class GuardianResearchApi:
         started = time.perf_counter()
         try:
             result = callback()
+            GuardianResearchApi._ensure_package_deadline(deadline)
             stage["status"] = "complete"
             return result
         except ResearchQueryError as exc:
@@ -972,10 +989,12 @@ class GuardianResearchApi:
         metric_stages = {"soc": "module_soc", "module_current": "module_current",
             "module_voltage": "module_voltage", "cell_voltage": "cell_voltages",
             "cell_temperature": "temperature_channels"}
+        self._ensure_package_deadline(deadline)
         projected = self.series.queries_from_evidence(cell_evidence,
             physical_serial=serial, timestamp_from=start, timestamp_to=end,
             metrics=tuple(metric_stages), resolution="auto", max_points=800)
         for metric, stage_name in metric_stages.items():
+            self._ensure_package_deadline(deadline)
             result = self._run_package_stage(profile, stage_name, deadline,
                 lambda metric=metric: projected[metric])
             if profile is not None:
@@ -995,6 +1014,7 @@ class GuardianResearchApi:
         trends = {}
         event_end = datetime.fromisoformat(event["end"])
         for window in trend_windows:
+            self._ensure_package_deadline(deadline)
             window_start = (event_end - timedelta(seconds=duration(window, window))).isoformat()
             if window_start >= start:
                 trends[window] = self._run_package_stage(profile, "module_soc", deadline,
@@ -1021,6 +1041,12 @@ class GuardianResearchApi:
                             deadline=deadline, io_profile=io_profile)), io_profile=io_profile)
         def isolated(name, callback):
             try: return callback()
+            except ResearchQueryError as exc:
+                if exc.code == "timeout":
+                    raise
+                LOG.warning("Research package source unavailable source=%s error=%s",
+                            name, type(exc).__name__)
+                return {"quality": "unknown", "error": "source_unavailable"}
             except Exception as exc:
                 LOG.warning("Research package source unavailable source=%s error=%s",
                             name, type(exc).__name__)
@@ -1044,6 +1070,7 @@ class GuardianResearchApi:
                 "daily_diagnostics": ("unavailable" if daily.get("quality") == "unknown"
                                       else "complete")})
         target_records_all = cell_evidence["records"].get(serial, [])
+        self._ensure_package_deadline(deadline)
         window_specs = (("minus_24h", crash_start - timedelta(hours=24), crash_start),
             ("minus_6h", crash_start - timedelta(hours=6), crash_start),
             ("minus_1h", crash_start - timedelta(hours=1), crash_start),
@@ -1060,6 +1087,7 @@ class GuardianResearchApi:
         comparison_windows = {}
         comparison_started = time.perf_counter()
         for name, left, right in window_specs:
+            self._ensure_package_deadline(deadline)
             selected = [row for row in target_records_all
                         if left <= datetime.fromisoformat(row["timestamp"]) <= right]
             soc = [float(row["soc"]) for row in selected if row.get("soc") is not None]
@@ -1084,6 +1112,7 @@ class GuardianResearchApi:
             profile["counts"]["comparison_windows"] = len(comparison_windows)
         peers = []
         for peer_serial in peer_serials:
+            self._ensure_package_deadline(deadline)
             rows = [row for row in peer_evidence["records"].get(peer_serial, [])
                     if immediate_left <= datetime.fromisoformat(row["timestamp"]) <= immediate_right]
             if rows:
@@ -1096,6 +1125,7 @@ class GuardianResearchApi:
         management = self._run_package_stage(profile, "bms_management", deadline,
             lambda: isolated("rs485_management", lambda: self._rs485_management(
                 serial, start, end, deadline)))
+        self._ensure_package_deadline(deadline)
         if profile is not None:
             profile["stages"]["bms_management"]["records_inspected"] = len(
                 management.get("records", ()))
@@ -1130,13 +1160,17 @@ class GuardianResearchApi:
         alarms = self._run_package_stage(profile, "alarms", deadline,
             lambda: self._alarms({"physical_serial": serial, "from": start,
                                   "to": end})["data"])
-        low_voltage_result = self.series.queries_from_evidence(cell_evidence,
-            physical_serial=serial, timestamp_from=start, timestamp_to=end,
-            metrics=("cell_voltage",), resolution="auto", max_points=200)["cell_voltage"]
-        low_voltage = self._run_package_stage(profile, "low_voltage", deadline,
-            lambda: self._low_voltage({"physical_serial": serial, "from": start,
+        def low_voltage_evidence():
+            low_voltage_result = self.series.queries_from_evidence(cell_evidence,
+                physical_serial=serial, timestamp_from=start, timestamp_to=end,
+                metrics=("cell_voltage",), resolution="auto", max_points=200)["cell_voltage"]
+            self._ensure_package_deadline(deadline)
+            return self._low_voltage({"physical_serial": serial, "from": start,
                 "to": end, "max_points": "200"}, deadline,
-                series_result=low_voltage_result)["data"])
+                series_result=low_voltage_result)["data"]
+        low_voltage = self._run_package_stage(profile, "low_voltage", deadline,
+            low_voltage_evidence)
+        self._ensure_package_deadline(deadline)
         coverage_started = time.perf_counter()
         coverage = {key: value["coverage"] for key, value in series.items()}
         coverage["cell_evidence"] = self._evidence_coverage(start, end,
@@ -1151,11 +1185,13 @@ class GuardianResearchApi:
                               ("dcl", "discharge_current_limit_a"),
                               ("charge_enable", "charge_enable"),
                               ("discharge_enable", "discharge_enable")):
+            self._ensure_package_deadline(deadline)
             coverage[metric] = self._evidence_coverage(start, end,
                 [row["timestamp"] for row in management.get("records", [])
                  if row.get(field) is not None], truncated=management.get("truncated", False))
         config = self._run_package_stage(profile, "config_context", deadline,
             lambda: self._config_context(event["start"]))
+        self._ensure_package_deadline(deadline)
         if profile is not None:
             coverage_stage = profile["stages"]["coverage_calculation"]
             coverage_stage.update({"elapsed_seconds": time.perf_counter() - coverage_started,
@@ -1178,6 +1214,7 @@ class GuardianResearchApi:
                         0.0, deadline - time.monotonic()),
                     "deadline_remaining_seconds_at_exit": max(
                         0.0, deadline - time.monotonic())})
+        self._ensure_package_deadline(deadline)
         package = {"package_schema_version": 2,
             "purpose": "reproducible_evidence_not_causal_interpretation",
             "event": event,

@@ -87,6 +87,126 @@ def test_query_gate_endpoint_deadlines_remain_hard_and_fail_closed(
     assert error.value.code == "timeout" and error.value.status == 503
 
 
+def test_package_stage_does_not_call_callback_when_deadline_already_expired(
+        monkeypatch):
+    monkeypatch.setattr("research_api.time.monotonic", lambda: 100.0)
+    profile = GuardianResearchApi._package_profile()
+    called = []
+
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        GuardianResearchApi._run_package_stage(
+            profile, "event_id_decode_checksum", 100.0,
+            lambda: called.append(True))
+
+    assert error.value.code == "timeout"
+    assert called == []
+    stage = profile["stages"]["event_id_decode_checksum"]
+    assert stage["calls"] == 0
+    assert stage["status"] == "timeout"
+    assert stage["elapsed_seconds"] == 0
+    assert stage["deadline_remaining_seconds_at_entry"] == 0
+    assert stage["deadline_remaining_seconds_at_exit"] == 0
+
+
+def test_package_stage_deadline_between_stages_prevents_blocking_successor(
+        monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("research_api.time.monotonic", lambda: clock[0])
+    profile = GuardianResearchApi._package_profile()
+    called = []
+
+    def consume_budget():
+        called.append("first")
+        clock[0] = 114.999
+        return "complete"
+
+    assert GuardianResearchApi._run_package_stage(
+        profile, "event_id_decode_checksum", 115.0, consume_budget) == "complete"
+    clock[0] = 115.0
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        GuardianResearchApi._run_package_stage(
+            profile, "low_voltage", 115.0,
+            lambda: called.append("ten-second-block"))
+
+    assert error.value.code == "timeout"
+    assert called == ["first"]
+    assert profile["stages"]["event_id_decode_checksum"]["status"] == "complete"
+    assert profile["stages"]["low_voltage"]["status"] == "timeout"
+    assert profile["stages"]["config_context"]["status"] == "not_run"
+
+
+def test_package_stage_callback_timeout_propagates_without_following_stage(
+        monkeypatch):
+    monkeypatch.setattr("research_api.time.monotonic", lambda: 100.0)
+    profile = GuardianResearchApi._package_profile()
+    called = []
+
+    def timeout():
+        called.append("first")
+        raise research_timeseries.ResearchQueryError(
+            "timeout", "research query timed out", 503)
+
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        GuardianResearchApi._run_package_stage(
+            profile, "target_multi_metric_read", 115.0, timeout)
+
+    assert error.value.code == "timeout"
+    assert called == ["first"]
+    assert profile["stages"]["target_multi_metric_read"]["status"] == "timeout"
+    assert profile["stages"]["peer_immediate_read"]["status"] == "not_run"
+
+
+def test_package_stage_that_returns_after_deadline_fails_immediately(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("research_api.time.monotonic", lambda: clock[0])
+    profile = GuardianResearchApi._package_profile()
+
+    def crosses_deadline():
+        clock[0] = 115.001
+        return "late-result"
+
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        GuardianResearchApi._run_package_stage(
+            profile, "target_multi_metric_read", 115.0, crosses_deadline)
+
+    assert error.value.code == "timeout"
+    assert profile["stages"]["target_multi_metric_read"]["status"] == "timeout"
+    assert profile["stages"]["peer_immediate_read"]["status"] == "not_run"
+
+
+def test_unprofiled_package_stage_enforces_same_post_callback_deadline(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("research_api.time.monotonic", lambda: clock[0])
+
+    def crosses_deadline():
+        clock[0] = 115.001
+        return "late-result"
+
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        GuardianResearchApi._run_package_stage(
+            None, "target_multi_metric_read", 115.0, crosses_deadline)
+
+    assert error.value.code == "timeout"
+
+
+def test_expired_package_logs_timeout_and_leaves_following_stages_not_run(
+        tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        with pytest.raises(research_timeseries.ResearchQueryError) as error:
+            api._package({"event_id": "not-decoded", "profile": "true"}, deadline=-1)
+
+    assert error.value.code == "timeout"
+    profile = package_profile(caplog)
+    assert profile["status"] == "timeout"
+    assert profile["stages"]["event_id_decode_checksum"]["status"] == "timeout"
+    assert profile["stages"]["event_id_decode_checksum"]["calls"] == 0
+    assert profile["stages"]["bounded_event_reconstruction"]["status"] == "not_run"
+    assert profile["stages"]["low_voltage"]["status"] == "not_run"
+    assert profile["total_elapsed_seconds"] < 0.1
+
+
 def test_envelope_contract_contains_only_observed_or_derived():
     value = research_envelope(source="x", evidence_class="OBSERVED", authoritative=True,
         timestamp_from=None, timestamp_to=None, resolution="event", data={})
