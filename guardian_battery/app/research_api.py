@@ -42,7 +42,8 @@ LOG = logging.getLogger("guardian_battery.research")
 PACKAGE_PROFILE_STAGES = (
     "event_id_decode_checksum", "bounded_event_reconstruction", "event_match",
     "identity_epoch_resolution", "historical_position_resolution",
-    "evidence_window_calculation", "main_multi_metric_read", "module_soc", "module_current",
+    "evidence_window_calculation", "target_multi_metric_read", "peer_immediate_read",
+    "module_soc", "module_current",
     "module_voltage", "power_derived", "cell_voltages", "temperature_channels",
     "cell_context_derived", "cell_minimum", "cell_maximum", "cell_spread",
     "lowest_cell", "highest_cell", "median_deviations", "canonical_phase",
@@ -921,24 +922,35 @@ class GuardianResearchApi:
             lambda: self.identity.topology_at(event["start"]))
         peer_serials = [row["physical_serial"] for row in stack["positions"]
                         if row["physical_serial"] and row["physical_serial"] != serial]
+        crash_start = datetime.fromisoformat(event["start"])
+        crash_end = datetime.fromisoformat(event["end"])
+        immediate_left = crash_start - timedelta(minutes=5)
+        immediate_right = crash_end + timedelta(minutes=5)
         if profile is not None:
             profile["counts"]["peer_modules"] = len(peer_serials)
-            profile["counts"]["peer_history_queries"] = 0
-            profile["counts"]["cell_history_queries"] += 1
-            profile["counts"]["cell_history_scans"] += 1
-        main_io = {} if profile is not None else None
-        cell_evidence = self._run_package_stage(profile, "main_multi_metric_read", deadline,
+            profile["counts"]["peer_history_queries"] = 1 if peer_serials else 0
+            profile["counts"]["cell_history_queries"] += 1 + bool(peer_serials)
+            profile["counts"]["cell_history_scans"] += 1 + bool(peer_serials)
+        target_io = {} if profile is not None else None
+        cell_evidence = self._run_package_stage(profile, "target_multi_metric_read", deadline,
             lambda: self.series.evidence_by_serial(
-                [serial, *peer_serials], start, end, deadline=deadline,
-                io_profile=main_io, profile_target_serial=serial), io_profile=main_io)
+                [serial], start, end, deadline=deadline,
+                io_profile=target_io, profile_target_serial=serial), io_profile=target_io)
+        peer_io = {} if profile is not None and peer_serials else None
+        peer_evidence = self._run_package_stage(profile, "peer_immediate_read", deadline,
+            lambda: self.series.evidence_by_serial(
+                peer_serials, immediate_left.isoformat(), immediate_right.isoformat(),
+                deadline=deadline, io_profile=peer_io), io_profile=peer_io) if peer_serials else {
+                    "records": {}, "truncated": False, "truncated_serials": [],
+                    "source_signature": [], "source_fingerprint": None}
         self._run_package_stage(profile, "peer_module_evidence", deadline,
-            lambda: sum(len(cell_evidence["records"].get(peer, ())) for peer in peer_serials))
+            lambda: sum(len(peer_evidence["records"].get(peer, ())) for peer in peer_serials))
         if profile is not None:
             profile["stages"]["peer_module_evidence"]["samples_returned"] = sum(
-                len(cell_evidence["records"].get(peer, ())) for peer in peer_serials)
+                len(peer_evidence["records"].get(peer, ())) for peer in peer_serials)
             profile["coverage_status"]["peer_module_evidence"] = (
-                "partial" if cell_evidence.get("truncated") else
-                "complete" if any(cell_evidence["records"].values()) else "unavailable")
+                "partial" if peer_evidence.get("truncated") else
+                "complete" if any(peer_evidence["records"].values()) else "unavailable")
         series = {}
         metric_stages = {"soc": "module_soc", "module_current": "module_current",
             "module_voltage": "module_voltage", "cell_voltage": "cell_voltages",
@@ -952,9 +964,9 @@ class GuardianResearchApi:
             if profile is not None:
                 stage = profile["stages"][stage_name]
                 stage["samples_returned"] = result["point_count"]
-                stage["read_mode"] = main_io.get("read_mode", "not_observed")
-                stage["index_present"] = main_io.get("index_present")
-                stage["index_valid"] = main_io.get("index_valid")
+                stage["read_mode"] = target_io.get("read_mode", "not_observed")
+                stage["index_present"] = target_io.get("index_present")
+                stage["index_valid"] = target_io.get("index_valid")
             series[metric] = {**result, "evidence_class": (
                 "DERIVED" if metric == "module_voltage" else "OBSERVED")}
             if profile is not None:
@@ -1008,8 +1020,6 @@ class GuardianResearchApi:
                 "daily_diagnostics": ("unavailable" if daily.get("quality") == "unknown"
                                       else "complete")})
         target_records_all = cell_evidence["records"].get(serial, [])
-        crash_start = datetime.fromisoformat(event["start"])
-        crash_end = datetime.fromisoformat(event["end"])
         window_specs = (("minus_24h", crash_start - timedelta(hours=24), crash_start),
             ("minus_6h", crash_start - timedelta(hours=6), crash_start),
             ("minus_1h", crash_start - timedelta(hours=1), crash_start),
@@ -1048,10 +1058,9 @@ class GuardianResearchApi:
                 "deadline_remaining_seconds_at_entry": None,
                 "deadline_remaining_seconds_at_exit": max(0.0, deadline - time.monotonic())})
             profile["counts"]["comparison_windows"] = len(comparison_windows)
-        immediate_left, immediate_right = crash_start - timedelta(minutes=5), crash_end + timedelta(minutes=5)
         peers = []
         for peer_serial in peer_serials:
-            rows = [row for row in cell_evidence["records"].get(peer_serial, [])
+            rows = [row for row in peer_evidence["records"].get(peer_serial, [])
                     if immediate_left <= datetime.fromisoformat(row["timestamp"]) <= immediate_right]
             if rows:
                 peers.append({"physical_serial": peer_serial,

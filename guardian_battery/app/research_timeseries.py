@@ -344,6 +344,8 @@ class ResearchTimeseriesService:
                 "samples_returned": 0,
                 "index_present": False, "index_valid": True,
                 "read_mode": "indexed_chunk", "selected_bytes": 0,
+                "requested_serials": len(wanted),
+                "requested_window_seconds": end_epoch - start_epoch,
                 "selected_progress_bytes": 0, "selected_progress_percent": 0.0,
                 "range_count": 0, "raw_chunk_reads": 0,
                 "records_skipped_serial_prefilter": 0,

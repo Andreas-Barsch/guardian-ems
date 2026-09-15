@@ -391,8 +391,13 @@ def test_evidence_package_profiling_is_opt_in_response_neutral_and_read_only(
     assert profile["stages"]["module_soc"]["calls"] == 4
     assert profile["stages"]["module_soc"]["files_opened"] >= 1
     assert profile["stages"]["module_soc"]["bytes_read"] > 0
-    assert profile["stages"]["main_multi_metric_read"]["samples_returned"] > 0
-    reader = profile["stages"]["main_multi_metric_read"]["reader"]
+    assert profile["stages"]["target_multi_metric_read"]["samples_returned"] > 0
+    reader = profile["stages"]["target_multi_metric_read"]["reader"]
+    peer_reader = profile["stages"]["peer_immediate_read"]["reader"]
+    assert reader["requested_serials"] == 1
+    assert peer_reader["requested_serials"] == 2
+    assert reader["requested_window_seconds"] == pytest.approx(24.5 * 3600 + 240)
+    assert peer_reader["requested_window_seconds"] == pytest.approx(14 * 60)
     assert reader["raw_bytes_read"] == reader["bytes_read"] > 0
     assert reader["raw_records_inspected"] == reader["records_inspected"] > 0
     assert reader["selected_bytes"] >= reader["selected_progress_bytes"] > 0
@@ -433,13 +438,13 @@ def test_evidence_package_profile_adds_no_history_scans(tmp_path, monkeypatch, c
     monkeypatch.setattr(api.series, "evidence_by_serial", tracked_evidence)
     get(api, suffix)
     normal = dict(counts)
-    assert evidence_profiles == [None]
+    assert evidence_profiles == [None, None]
     counts.update(query=0, evidence=0)
     evidence_profiles.clear()
     with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
         get(api, suffix + "&profile=true")
-    assert counts == normal == {"query": 1, "evidence": 1}
-    assert len(evidence_profiles) == 1 and evidence_profiles[0] is not None
+    assert counts == normal == {"query": 1, "evidence": 2}
+    assert len(evidence_profiles) == 2 and all(item is not None for item in evidence_profiles)
 
 
 def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monkeypatch, caplog):
@@ -474,11 +479,12 @@ def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monke
     assert response.status == 503 and response.body["error"]["code"] == "timeout"
     profile = package_profile(caplog)
     assert profile["status"] == "timeout"
-    assert profile["stages"]["main_multi_metric_read"]["status"] == "timeout"
+    assert profile["stages"]["target_multi_metric_read"]["status"] == "timeout"
+    assert profile["stages"]["peer_immediate_read"]["status"] == "not_run"
     assert profile["stages"]["module_soc"]["status"] == "not_run"
     assert profile["stages"]["module_current"]["status"] == "not_run"
     assert profile["stages"]["module_voltage"]["status"] == "not_run"
-    reader = profile["stages"]["main_multi_metric_read"]["reader"]
+    reader = profile["stages"]["target_multi_metric_read"]["reader"]
     assert reader["selected_progress_bytes"] == 1024
     assert reader["selected_progress_percent"] == 25
     assert reader["target_records_accepted"] + reader["peer_records_accepted"] == 2
@@ -488,6 +494,32 @@ def test_evidence_package_timeout_logs_complete_redacted_profile(tmp_path, monke
     assert "SERIAL-M4" not in encoded
     assert "soc_percent" not in encoded
     assert "token" not in encoded.lower() and "secret" not in encoded.lower()
+
+
+def test_evidence_package_peer_read_timeout_remains_fail_closed(tmp_path, monkeypatch, caplog):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    original = api.series.evidence_by_serial
+    calls = 0
+
+    def timeout_on_peer_scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise research_timeseries.ResearchQueryError(
+                "timeout", "research query timed out", 503)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(api.series, "evidence_by_serial", timeout_on_peer_scan)
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        response = get(api, "evidence-package?event_id=" + event["event_id"] + "&profile=true")
+
+    assert response.status == 503 and response.body["error"]["code"] == "timeout"
+    profile = package_profile(caplog)
+    assert profile["stages"]["target_multi_metric_read"]["status"] == "complete"
+    assert profile["stages"]["peer_immediate_read"]["status"] == "timeout"
+    assert profile["stages"]["module_soc"]["status"] == "not_run"
 
 
 def test_package_single_scan_projections_match_existing_query_contracts(tmp_path):
@@ -542,9 +574,11 @@ def test_package_uses_indexed_chunks_across_two_utc_days_without_source_changes(
     assert package.body["data"]["event"]["event_id"] == event["event_id"]
     assert package.body["data"]["identity_topology"]["position_at_time"] == 4
     profile = package_profile(caplog)
-    assert profile["counts"]["cell_history_scans"] == 2
-    assert profile["stages"]["main_multi_metric_read"]["files_opened"] == 2
-    assert profile["stages"]["main_multi_metric_read"]["read_mode"] == "indexed_chunk"
+    assert profile["counts"]["cell_history_scans"] == 3
+    assert profile["stages"]["target_multi_metric_read"]["files_opened"] == 2
+    assert profile["stages"]["target_multi_metric_read"]["read_mode"] == "indexed_chunk"
+    assert profile["stages"]["peer_immediate_read"]["files_opened"] == 2
+    assert profile["stages"]["peer_immediate_read"]["read_mode"] == "indexed_chunk"
     for stage in ("module_soc", "module_current", "module_voltage",
                   "cell_voltages", "temperature_channels"):
         assert profile["stages"][stage]["read_mode"] == "indexed_chunk"
@@ -610,6 +644,77 @@ def test_soc_crash_package_peer_modules_use_historical_stack(tmp_path):
     assert {(row["physical_serial"], row["position_at_event"]) for row in peers} == {
         ("SERIAL-M5", 5), ("SERIAL-M6", 6)}
     assert all(row["records"] for row in peers)
+
+
+def test_package_splits_target_and_peer_windows_without_changing_evidence(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    target_start = "2026-09-10T10:02:00+00:00"
+    target_end = "2026-09-11T10:36:00+00:00"
+    peer_start = "2026-09-11T09:57:00+00:00"
+    peer_end = "2026-09-11T10:11:00+00:00"
+    legacy = api.series.evidence_by_serial(
+        ["SERIAL-M4", "SERIAL-M5", "SERIAL-M6"], target_start, target_end)
+    expected_target = legacy["records"]["SERIAL-M4"]
+    expected_peers = {serial: [row for row in legacy["records"][serial]
+        if peer_start <= row["timestamp"] <= peer_end]
+        for serial in ("SERIAL-M5", "SERIAL-M6")}
+    calls = []
+    original = api.series.evidence_by_serial
+
+    def tracked(serials, timestamp_from, timestamp_to, **kwargs):
+        calls.append((tuple(serials), timestamp_from, timestamp_to))
+        return original(serials, timestamp_from, timestamp_to, **kwargs)
+
+    monkeypatch.setattr(api.series, "evidence_by_serial", tracked)
+    response = get(api, "evidence-package?event_id=" + event["event_id"])
+
+    assert response.status == 200
+    assert calls == [(("SERIAL-M4",), target_start, target_end),
+                     (("SERIAL-M5", "SERIAL-M6"), peer_start, peer_end)]
+    assert response.body["data"]["cell_evidence"]["records"] == expected_target
+    peers = {row["physical_serial"]: row for row in
+             response.body["data"]["peer_evidence"]["modules"]}
+    assert {serial: row["records"] for serial, row in peers.items()} == expected_peers
+    for row in peers.values():
+        sample = row["records"][0]
+        assert {"physical_serial", "position_at_time", "soc", "module_current_a",
+                "module_voltage_v", "cell_temperatures_c", "derived"} <= set(sample)
+        assert {"minimum_cell_voltage_mv", "cell_spread_mv", "lowest_cell"} <= set(
+            sample["derived"])
+
+
+def test_package_peer_read_excludes_records_outside_immediate_window(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    outside = {**next(row for row in rows if row["module_serial"] == "SERIAL-M5"),
+        "timestamp": datetime(2026, 9, 11, 9, 30, tzinfo=timezone.utc).timestamp()}
+    write_jsonl(path, [outside, *rows])
+
+    _, response = package_for_crash(api)
+
+    peer = next(row for row in response.body["data"]["peer_evidence"]["modules"]
+                if row["physical_serial"] == "SERIAL-M5")
+    assert all(row["timestamp"] >= "2026-09-11T09:57:00+00:00"
+               for row in peer["records"])
+    assert len(peer["records"]) == 1
+
+
+def test_package_uses_event_time_peers_not_later_topology(tmp_path):
+    api, _, _ = environment(tmp_path)
+    positions = api.paths.position_history
+    first = snapshot("2026-09-10T00:00:00+00:00", {4: "SERIAL-M4", 5: "SERIAL-M5"})
+    after = snapshot("2026-09-12T00:00:00+00:00", {2: "SERIAL-M4", 6: "SERIAL-M6"})
+    write_jsonl(positions, [first.to_dict(), after.to_dict()])
+
+    _, response = package_for_crash(api)
+
+    peers = response.body["data"]["peer_evidence"]["modules"]
+    assert {(row["physical_serial"], row["position_at_event"]) for row in peers} == {
+        ("SERIAL-M5", 5)}
 
 
 def test_soc_crash_package_historical_identity_not_current_position(tmp_path):
