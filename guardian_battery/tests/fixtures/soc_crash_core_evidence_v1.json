@@ -1,0 +1,10 @@
+{
+  "semantics_version": "research_soc_crash_core_evidence_v1",
+  "complete": {"event_id": "SCE-eyJmIjoiMjAyNi0wOS0xMVQxMDowMjowMCswMDowMCIsInMiOiJTRVJJQUwtTTQiLCJ0IjoiMjAyNi0wOS0xMVQxMDowNjowMCswMDowMCIsInYiOiJndWFyZGlhbl9zb2NfY3Jhc2hfdjEifQ.8f9c1b80c1deaf65", "target_cell_count": 15, "peer_count": 2, "alarm_count": 1, "bms_count": 1},
+  "partial": {"missing_temperature_quality": "unavailable"},
+  "historical_topology": {"position": 4},
+  "missing_optional_sources": {"bms": "unavailable", "alarms": "unavailable", "soc_recalibration": "unavailable"},
+  "no_peers": {"quality": "unavailable", "modules": []},
+  "unknown_event": {"error_code": "invalid_argument"},
+  "resource_contract": {"deadline_seconds": 10, "response_limit_bytes": 2097152, "target_before": "PT10M", "target_after": "PT30M", "peer_before": "PT5M", "peer_after": "PT5M"}
+}

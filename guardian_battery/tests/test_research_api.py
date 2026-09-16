@@ -2,15 +2,19 @@ import json
 import io
 import logging
 import time
+import tracemalloc
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 import pytest
 
 from position_history import PositionSnapshot
-from research_api import (EVIDENCE_PACKAGE_TIMEOUT_SECONDS, GuardianResearchApi,
+from maintenance import new_maintenance_event
+from research_api import (CORE_EVIDENCE_VERSION, CORE_PROFILE_STAGES,
+                          EVIDENCE_PACKAGE_TIMEOUT_SECONDS, GuardianResearchApi,
                           PACKAGE_PROFILE_STAGES, QUERY_TIMEOUT_SECONDS,
                           QueryGate, READER_ACCOUNTED_TIMINGS, ResearchPaths,
                           research_envelope)
@@ -18,6 +22,7 @@ from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
 from history_block_index import build_index, index_path
 import research_timeseries
+import research_api
 from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
                      RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT)
 
@@ -63,7 +68,8 @@ def get(api, suffix):
 
 
 @pytest.mark.parametrize("endpoint,seconds", [
-    ("timeseries", 10), ("events/soc-crashes", 10), ("evidence-package", 15)])
+    ("timeseries", 10), ("events/soc-crashes", 10), ("evidence-core", 10),
+    ("evidence-package", 15)])
 def test_query_gate_uses_fixed_endpoint_specific_absolute_deadline(
         monkeypatch, endpoint, seconds):
     clock = iter((100.0, 100.25, 100.5))
@@ -77,7 +83,8 @@ def test_query_gate_uses_fixed_endpoint_specific_absolute_deadline(
 
 
 @pytest.mark.parametrize("endpoint,elapsed", [
-    ("timeseries", 10.001), ("evidence-package", 15.001)])
+    ("timeseries", 10.001), ("evidence-core", 10.001),
+    ("evidence-package", 15.001)])
 def test_query_gate_endpoint_deadlines_remain_hard_and_fail_closed(
         monkeypatch, endpoint, elapsed):
     clock = iter((100.0, 100.0 + elapsed, 100.0 + elapsed))
@@ -914,6 +921,435 @@ def package_for_crash(api):
     event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
         "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
     return event, get(api, "evidence-package?event_id=" + event["event_id"])
+
+
+def core_for_crash(api, suffix=""):
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    return event, get(api, "evidence-core?event_id=" + event["event_id"] + suffix)
+
+
+def test_soc_crash_core_contract_windows_identity_and_evidence_classes(tmp_path):
+    api, first, _ = environment(tmp_path)
+    event, response = core_for_crash(api)
+
+    assert response.status == 200
+    assert response.body["semantics_version"] == CORE_EVIDENCE_VERSION
+    data = response.body["data"]
+    assert data["event_core"] == {
+        "event_id": event["event_id"], "detector_version": "guardian_soc_crash_v1",
+        "detector_thresholds": {"soc_loss_pp": 2, "sample_gap_seconds": 300,
+            "discharge_current_below_a": -0.2, "merge_gap_seconds": 600},
+        "event_start": event["start"], "event_end": event["end"],
+        "duration_seconds": 240.0, "soc_before": 69.0, "soc_after": 65.0,
+        "delta_soc": -4.0, "physical_serial": "SERIAL-M4",
+        "historical_position": 4, "identity_epoch_id": event["identity_epoch_id"],
+        "position_history_id": first.position_history_id, "identity_resolved": True,
+        "event_quality": "complete", "source_references": ["guardian.cell_history"]}
+    assert data["requested_intervals"] == {
+        "target": {"from": "2026-09-11T09:52:00+00:00",
+                   "to": "2026-09-11T10:36:00+00:00"},
+        "peers": {"from": "2026-09-11T09:57:00+00:00",
+                  "to": "2026-09-11T10:11:00+00:00"}}
+    assert data["evidence_classes"] == ["OBSERVED", "DERIVED"]
+    assert data["inferred"] is False and data["causality_determined"] is False
+    assert "INFERRED" not in json.dumps(response.body)
+
+
+def test_soc_crash_core_target_and_peer_records_are_strictly_bounded(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    target_template = next(row for row in rows if row["module_serial"] == "SERIAL-M4")
+    peer_template = next(row for row in rows if row["module_serial"] == "SERIAL-M5")
+    rows.extend([
+        {**target_template, "timestamp": datetime(
+            2026, 9, 11, 9, 51, tzinfo=timezone.utc).timestamp()},
+        {**target_template, "timestamp": datetime(
+            2026, 9, 11, 10, 37, tzinfo=timezone.utc).timestamp()},
+        {**peer_template, "timestamp": datetime(
+            2026, 9, 11, 9, 56, tzinfo=timezone.utc).timestamp()},
+        {**peer_template, "timestamp": datetime(
+            2026, 9, 11, 10, 12, tzinfo=timezone.utc).timestamp()},
+    ])
+    write_jsonl(path, rows)
+
+    _, response = core_for_crash(api)
+
+    target = response.body["data"]["target_evidence"]["records"]
+    assert target and all("2026-09-11T09:52:00" <= row["timestamp"]
+                          <= "2026-09-11T10:36:00+00:00" for row in target)
+    peers = response.body["data"]["peer_evidence"]["modules"]
+    assert {row["physical_serial"] for row in peers} == {"SERIAL-M5", "SERIAL-M6"}
+    assert all("2026-09-11T09:57:00" <= sample["timestamp"]
+               <= "2026-09-11T10:11:00+00:00"
+               for peer in peers for sample in peer["records"])
+
+
+def test_soc_crash_core_preserves_cells_temperatures_and_derived_context(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = core_for_crash(api)
+    target = response.body["data"]["target_evidence"]
+    record = target["records"][0]
+
+    assert len(record["cell_voltages_mv"]) == 15
+    assert len(record["cell_temperatures_c"]) == 15
+    assert target["temperature_semantics"] == "recorded_module_temperature_channels_only"
+    assert record["derived"]["minimum_cell_voltage_mv"] == 3300
+    assert record["derived"]["maximum_cell_voltage_mv"] == 3314
+    assert record["derived"]["median_cell_voltage_mv"] == 3307
+    assert record["derived"]["cell_spread_mv"] == 14
+    assert record["derived"]["lowest_cell"] == 1
+    assert record["derived"]["highest_cell"] == 15
+    assert record["derived"]["cell_deviation_from_module_median_mv"] == list(range(-7, 8))
+    assert record["module_power_w"] == pytest.approx(
+        record["module_voltage_v"] * record["module_current_a"])
+
+
+def test_soc_crash_core_missing_optional_sources_are_unavailable_not_zero(tmp_path):
+    api, _, _ = environment(tmp_path)
+    _, response = core_for_crash(api)
+    context = response.body["data"]["event_context"]
+
+    assert context["bms_management"]["quality"] == "unavailable"
+    assert context["bms_management"]["records"] == []
+    assert context["low_voltage"]["quality"] == "unavailable"
+    assert context["alarms"]["quality"] == "unknown"
+    assert context["soc_recalibration"] == {
+        "evidence_class": "OBSERVED", "quality": "unavailable", "records": []}
+    assert response.body["data"]["coverage"]["alarms"]["quality"] == "unavailable"
+    assert response.body["data"]["coverage"]["maintenance"]["quality"] == "unavailable"
+
+
+def test_soc_crash_core_missing_temperatures_have_metric_unavailable_coverage(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        if row.get("module_serial") == "SERIAL-M4":
+            row.pop("temperatures_c", None)
+    write_jsonl(path, rows)
+
+    _, response = core_for_crash(api)
+
+    assert response.status == 200
+    assert all(not row["cell_temperatures_c"]
+               for row in response.body["data"]["target_evidence"]["records"])
+    assert response.body["data"]["coverage"]["target_metrics"][
+        "cell_temperature"]["quality"] == "unavailable"
+    assert response.body["data"]["event_context"]["canonical_phase"][
+        "evidence_class"] == "DERIVED"
+
+
+def test_soc_crash_core_is_deterministic_read_only_and_v2_remains_unchanged(tmp_path):
+    api, _, _ = environment(tmp_path)
+    source = (api.paths.cell_history / "2026-09-11.jsonl").read_bytes()
+    event, first = core_for_crash(api)
+    _, second = core_for_crash(api)
+    v2 = get(api, "evidence-package?event_id=" + event["event_id"])
+
+    assert first.status == second.status == v2.status == 200
+    assert first.body["data"] == second.body["data"]
+    assert first.body["data"]["input_fingerprint"] == second.body["data"]["input_fingerprint"]
+    assert first.body["provenance"]["package_created_at"] != ""
+    assert v2.body["semantics_version"] == "research_soc_crash_evidence_v2"
+    assert (api.paths.cell_history / "2026-09-11.jsonl").read_bytes() == source
+
+
+def test_soc_crash_core_exposes_config_revision_but_not_config_values(tmp_path):
+    api, _, _ = environment(tmp_path)
+    config = tmp_path / "config.jsonl"
+    write_jsonl(config, [{"effective_at": "2026-09-10T00:00:00+00:00",
+        "config_revision": "cfg-7", "guardian_research_api_token": "must-not-leak"}])
+    api = GuardianResearchApi(replace(api.paths, config_history=config),
+                              cursor_secret=b"test")
+
+    _, response = core_for_crash(api)
+    encoded = json.dumps(response.body)
+
+    assert response.body["provenance"]["config_revision"] == "cfg-7"
+    assert "config" not in response.body["data"]
+    assert "must-not-leak" not in encoded
+    assert "guardian_research_api_token" not in encoded
+
+
+def test_soc_crash_core_rejects_resource_expansion_and_unknown_event(tmp_path):
+    api, _, _ = environment(tmp_path)
+    event, _ = core_for_crash(api)
+    expanded = get(api, "evidence-core?event_id=" + event["event_id"] + "&before=P1D")
+    unknown = get(api, "evidence-core?event_id=SCE-invalid")
+
+    assert expanded.status == 400
+    assert expanded.body["error"]["code"] == "invalid_argument"
+    assert unknown.status == 400
+    assert unknown.body["error"]["code"] == "invalid_argument"
+
+
+def test_soc_crash_core_profile_has_two_scans_and_bounded_counts(tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    build_index(path, timestamp_field="timestamp", iso_timestamp=False,
+                block_records=2)
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        _, response = core_for_crash(api, "&profile=true")
+    profile = json.loads(next(record.message.removeprefix("RESEARCH_CORE_PROFILE ")
+        for record in caplog.records
+        if record.message.startswith("RESEARCH_CORE_PROFILE ")))
+
+    assert response.status == 200 and profile["status"] == "ok"
+    assert set(profile["stages"]) == set(CORE_PROFILE_STAGES)
+    assert profile["counts"]["cell_history_scans"] == 2
+    assert profile["counts"]["rs485_scans"] == 1
+    assert profile["counts"]["target_records"] == 5
+    assert profile["counts"]["peer_records"] == 2
+    assert profile["stages"]["target_core_read"]["read_mode"] == "indexed_chunk"
+    assert profile["stages"]["peer_core_read"]["read_mode"] == "indexed_chunk"
+    assert profile["total_elapsed_seconds"] < QUERY_TIMEOUT_SECONDS
+
+
+def test_soc_crash_core_golden_contract_cases(tmp_path):
+    fixture = Path(__file__).parent / "fixtures" / "soc_crash_core_evidence_v1.json"
+    golden = json.loads(fixture.read_text(encoding="utf-8"))
+    api, _, _ = environment(tmp_path)
+    event, response = core_for_crash(api)
+    data = response.body["data"]
+
+    assert golden["semantics_version"] == response.body["semantics_version"]
+    assert golden["complete"]["event_id"] == event["event_id"]
+    assert golden["complete"]["target_cell_count"] == len(
+        data["target_evidence"]["records"][0]["cell_voltages_mv"])
+    assert golden["complete"]["peer_count"] == len(data["peer_evidence"]["modules"])
+    assert golden["historical_topology"]["position"] == data[
+        "event_core"]["historical_position"]
+    assert golden["missing_optional_sources"] == {
+        "bms": data["event_context"]["bms_management"]["quality"],
+        "alarms": data["coverage"]["alarms"]["quality"],
+        "soc_recalibration": data["event_context"]["soc_recalibration"]["quality"],
+    }
+    assert golden["resource_contract"]["deadline_seconds"] == QUERY_TIMEOUT_SECONDS
+    assert golden["resource_contract"]["response_limit_bytes"] == 2 * 1024 * 1024
+
+
+def test_soc_crash_core_deadline_is_fail_closed_and_stops_following_stages(
+        tmp_path, monkeypatch, caplog):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    called = []
+
+    def timeout(*args, **kwargs):
+        raise research_timeseries.ResearchQueryError(
+            "timeout", "research query timed out", 503)
+
+    monkeypatch.setattr(api.series, "evidence_by_serial", timeout)
+    monkeypatch.setattr(api, "_rs485_core_context",
+                        lambda *args: called.append("rs485"))
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        response = get(api, "evidence-core?event_id=" + event["event_id"] + "&profile=true")
+    profile = json.loads(next(record.message.removeprefix("RESEARCH_CORE_PROFILE ")
+        for record in caplog.records
+        if record.message.startswith("RESEARCH_CORE_PROFILE ")))
+
+    assert response.status == 503 and response.body["error"]["code"] == "timeout"
+    assert called == []
+    assert profile["status"] == "timeout"
+    assert profile["stages"]["target_core_read"]["status"] == "timeout"
+    assert profile["stages"]["peer_core_read"]["status"] == "not_run"
+    assert profile["stages"]["rs485_core_context"]["status"] == "not_run"
+
+
+def test_soc_crash_core_no_peers_and_partial_coverage(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    lone = snapshot("2026-09-10T00:00:00+00:00", {4: "SERIAL-M4"})
+    write_jsonl(api.paths.position_history, [lone.to_dict()])
+    api = GuardianResearchApi(api.paths, cursor_secret=b"test")
+    original = api.series.evidence_by_serial
+
+    def partial(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["truncated"] = True
+        result["truncated_serials"] = list(args[0])
+        return result
+
+    monkeypatch.setattr(api.series, "evidence_by_serial", partial)
+    _, response = core_for_crash(api)
+
+    assert response.status == 200
+    assert response.body["data"]["peer_evidence"] == {
+        "historical_stack_at": response.body["data"]["event_core"]["event_start"],
+        "modules": [], "quality": "unavailable"}
+    assert response.body["data"]["coverage"]["target"]["quality"] == "partial"
+
+
+def test_soc_crash_core_uses_event_time_peers_not_later_topology(tmp_path):
+    api, _, _ = environment(tmp_path)
+    first = snapshot("2026-09-10T00:00:00+00:00", {
+        4: "SERIAL-M4", 5: "SERIAL-M5"})
+    after = snapshot("2026-09-12T00:00:00+00:00", {
+        2: "SERIAL-M4", 6: "SERIAL-M6"})
+    write_jsonl(api.paths.position_history, [first.to_dict(), after.to_dict()])
+    api = GuardianResearchApi(api.paths, cursor_secret=b"test")
+
+    _, response = core_for_crash(api)
+
+    assert response.body["data"]["event_core"]["historical_position"] == 4
+    assert {(row["physical_serial"], row["position_at_event"])
+            for row in response.body["data"]["peer_evidence"]["modules"]} == {
+                ("SERIAL-M5", 5)}
+
+
+def test_soc_crash_core_context_sources_are_bounded_to_target_window(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    technical = tmp_path / "technical.jsonl"
+    base = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    write_jsonl(technical, [
+        {"type": "alarm_started", "timestamp": (base + timedelta(
+            hours=10, minutes=3)).timestamp(), "status": "active",
+         "alarm": {"code": "4:test", "message": "inside", "module": 4,
+                   "level": "warning"}},
+        {"type": "alarm_started", "timestamp": (base + timedelta(
+            hours=9, minutes=30)).timestamp(), "status": "active",
+         "alarm": {"code": "4:outside", "message": "outside", "module": 4,
+                   "level": "warning"}},
+    ])
+    inside = new_maintenance_event(
+        occurred_at="2026-09-11T10:04:00+00:00", category="inspection",
+        title="inside", affected_system="battery", module_number=4,
+        module_serial="SERIAL-M4", now=base)
+    outside = new_maintenance_event(
+        occurred_at="2026-09-11T09:30:00+00:00", category="inspection",
+        title="outside", affected_system="battery", module_number=4,
+        module_serial="SERIAL-M4", now=base)
+    write_jsonl(api.paths.maintenance, [inside.to_dict(), outside.to_dict()])
+    rs485 = tmp_path / "rs485"
+    write_jsonl(rs485 / "2026-09-11.jsonl", [
+        {"record_type": "frame", "timestamp": "2026-09-11T09:50:00+00:00",
+         "direction": "response", "paired_command": 0x93, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True},
+        {"record_type": "frame", "timestamp": "2026-09-11T10:03:00+00:00",
+         "direction": "response", "paired_command": 0x92, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True,
+         "decoded": {"charge_current_limit_a": 10,
+                     "discharge_current_limit_a": -25,
+                     "charge_enable": True, "discharge_enable": True}},
+        {"record_type": "frame", "timestamp": "2026-09-11T09:30:00+00:00",
+         "direction": "response", "paired_command": 0x92, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True,
+         "decoded": {"charge_current_limit_a": 0}},
+    ])
+    monkeypatch.setattr(research_api, "decode_identity_record",
+        lambda record: ({"serial_string": "SERIAL-M4"}
+                        if record.get("paired_command") == 0x93 else None))
+    api = GuardianResearchApi(replace(api.paths, technical_events=technical,
+        rs485_history=rs485), cursor_secret=b"test")
+
+    _, response = core_for_crash(api)
+    context = response.body["data"]["event_context"]
+    golden = json.loads((Path(__file__).parent / "fixtures" /
+                         "soc_crash_core_evidence_v1.json").read_text(encoding="utf-8"))
+
+    assert len(context["alarms"]["records"]) == golden["complete"]["alarm_count"]
+    assert [row["summary"] for row in context["alarms"]["records"]] == ["inside"]
+    assert [row["title"] for row in context["maintenance"]["records"]] == ["inside"]
+    assert len(context["bms_management"]["records"]) == golden["complete"]["bms_count"]
+    assert context["bms_management"]["records"][0]["charge_current_limit_a"] == 10
+    assert all("2026-09-11T09:52:00" <= row["timestamp"]
+               <= "2026-09-11T10:36:00+00:00"
+               for row in context["bms_management"]["records"])
+
+
+def test_soc_crash_core_passes_one_absolute_deadline_to_detector_and_readers(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:00:00Z&to=2026-09-11T12:00:00Z").body["data"]["events"][0]
+    deadlines = []
+    original_detector = api.series.soc_current_by_serial
+    original_evidence = api.series.evidence_by_serial
+
+    def detector(*args, **kwargs):
+        deadlines.append(kwargs.get("deadline", args[3]))
+        return original_detector(*args, **kwargs)
+
+    def evidence(*args, **kwargs):
+        deadlines.append(kwargs["deadline"])
+        return original_evidence(*args, **kwargs)
+
+    monkeypatch.setattr(api.series, "soc_current_by_serial", detector)
+    monkeypatch.setattr(api.series, "evidence_by_serial", evidence)
+    response = get(api, "evidence-core?event_id=" + event["event_id"])
+
+    assert response.status == 200
+    assert len(deadlines) == 3 and len(set(deadlines)) == 1
+
+
+def test_soc_crash_core_response_size_gate_remains_fail_closed():
+    oversized = "x" * (2 * 1024 * 1024)
+    with pytest.raises(research_timeseries.ResearchQueryError) as error:
+        QueryGate().run("evidence-core", False,
+            lambda deadline: {"data": {"records": [oversized]}})
+    assert error.value.code == "response_too_large" and error.value.status == 413
+
+
+def test_soc_crash_core_realistic_six_module_resource_benchmark(tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    stack = snapshot("2026-09-10T00:00:00+00:00", {
+        number: f"SERIAL-M{number}" for number in range(1, 7)})
+    write_jsonl(api.paths.position_history, [stack.to_dict()])
+    api = GuardianResearchApi(api.paths, cursor_secret=b"test")
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    start = datetime(2026, 9, 11, 9, 40, tzinfo=timezone.utc).timestamp()
+    rows = []
+    for minute in range(61):
+        for module in range(1, 7):
+            soc = (70 if minute <= 22 else 68 if minute == 23 else 66
+                   if module == 4 else 60 + module)
+            rows.append({"schema_version": 1, "timestamp": start + minute * 60,
+                "module": module, "module_serial": f"SERIAL-M{module}",
+                "soc_percent": soc, "current_a": -2.0 if module == 4 else -1.0,
+                "voltages_mv": [3290 + module + cell for cell in range(15)],
+                "temperatures_c": [20 + module / 10 + cell / 100
+                                   for cell in range(15)]})
+    write_jsonl(path, rows)
+    build_index(path, timestamp_field="timestamp", iso_timestamp=False,
+                block_records=12)
+    event = get(api, "events/soc-crashes?physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:40:00Z&to=2026-09-11T10:40:00Z").body["data"]["events"][0]
+
+    tracemalloc.start()
+    started = time.perf_counter()
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        response = get(api, "evidence-core?event_id=" + event["event_id"] + "&profile=true")
+    elapsed = time.perf_counter() - started
+    _, peak_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    response_bytes = len(json.dumps(response.body, ensure_ascii=False,
+                                    separators=(",", ":")).encode())
+    profile = json.loads(next(record.message.removeprefix("RESEARCH_CORE_PROFILE ")
+        for record in caplog.records
+        if record.message.startswith("RESEARCH_CORE_PROFILE ")))
+
+    assert response.status == 200
+    assert elapsed < 5
+    assert response_bytes < 500 * 1024
+    assert profile["counts"]["cell_history_scans"] == 2
+    assert profile["counts"]["rs485_scans"] == 1
+    assert profile["counts"]["target_records"] == 43
+    assert profile["counts"]["peer_records"] == 65
+    assert profile["stages"]["target_core_read"]["reader"][
+        "full_json_decode_count"] == 44
+    assert profile["stages"]["peer_core_read"]["reader"][
+        "full_json_decode_count"] == 70
+    print(json.dumps({"core_benchmark_wall_seconds": elapsed,
+        "target_records": profile["counts"]["target_records"],
+        "peer_records": profile["counts"]["peer_records"],
+        "cell_history_scans": profile["counts"]["cell_history_scans"],
+        "rs485_scans": profile["counts"]["rs485_scans"],
+        "raw_bytes": (profile["stages"]["target_core_read"]["bytes_read"]
+                      + profile["stages"]["peer_core_read"]["bytes_read"]),
+        "fully_decoded_records": 114, "peak_memory_bytes": peak_bytes,
+        "response_bytes": response_bytes}, sort_keys=True))
 
 
 def test_soc_crash_package_v2_has_core_identity_and_provenance(tmp_path):

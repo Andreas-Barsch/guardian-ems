@@ -29,6 +29,11 @@ credentials.
 The MCP layer never reads Guardian evidence files, writes MQTT/RS485/Hycube,
 calls Home Assistant services, rebuilds projections, or stores conversations.
 
+The additive `build_soc_crash_core_evidence(event_id)` tool is the sixteenth
+read-only tool. It forwards only the event ID to Guardian's fixed-window Core
+contract; it has no caller-controlled time-window expansion. Existing tools,
+including `build_evidence_package`, retain their contracts.
+
 For the local Home Assistant application network, the safe default Host
 allowlist is `guardian_research_mcp,3195b09a-guardian-research-mcp,localhost,127.0.0.1`.
 The repository-qualified DNS name is the Host used by Guardian MCP Tunnel's

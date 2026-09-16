@@ -102,10 +102,10 @@ class MaintenanceRepository:
         return current, immutable_histories
 
     def _load(
-        self,
+        self, check=None,
     ) -> tuple[dict[str, MaintenanceEvent], dict[str, tuple[MaintenanceEvent, ...]]]:
         try:
-            return self._project(self.log.read_all())
+            return self._project(self.log.read_all(check=check))
         except MaintenanceStorageError as exc:
             raise MaintenanceHistoryError(str(exc)) from exc
 
@@ -128,8 +128,9 @@ class MaintenanceRepository:
         *,
         include_archived: bool = False,
         newest_first: bool = True,
+        check=None,
     ) -> list[MaintenanceEvent]:
-        current, _ = self._load()
+        current, _ = self._load(check=check)
         items = [
             event
             for event in current.values()

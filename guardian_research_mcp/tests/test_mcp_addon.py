@@ -21,7 +21,8 @@ sys.path.insert(0, str(APP))
 
 from errors import GatewayError
 from gateway import MAX_FULL_RESOLUTION, MAX_PARALLEL, MAX_QUEUE, QueryGate
-from guardian_client import (EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS,
+from guardian_client import (CORE_EVIDENCE_TRANSPORT_TIMEOUT_SECONDS,
+                             EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS,
                              GuardianResearchClient, MAX_RESPONSE_BYTES)
 from server import build_app
 from settings import Settings, load_settings
@@ -35,6 +36,7 @@ TOOL_NAMES = {
     "query_cell_history", "query_phase_history", "query_daily_diagnostics",
     "query_diagnostic_evidence", "find_soc_crashes", "find_low_voltage_events",
     "query_alarm_history", "query_timeseries", "build_evidence_package",
+    "build_soc_crash_core_evidence",
 }
 
 
@@ -98,6 +100,11 @@ class GuardianStub:
             return httpx2.Response(200, json=envelope({
                 "event": {"event_id": query["event_id"][0]}, "inferred": False,
                 "input_fingerprint": "sha256-test"}))
+        if path == "evidence-core":
+            return httpx2.Response(200, json=envelope({
+                "event_core": {"event_id": query["event_id"][0]},
+                "semantics_version": "research_soc_crash_core_evidence_v1",
+                "inferred": False, "input_fingerprint": "sha256-core-test"}))
         if path == "cell-history":
             cell = int(query.get("cell_numbers", ["15"])[0].split(",")[0])
             return httpx2.Response(200, json=envelope({"points": [{
@@ -229,11 +236,15 @@ def test_evidence_package_transport_allows_margin_above_guardian_deadline():
     async def run():
         await client.get("status", {})
         await client.get("evidence-package", {"event_id": "opaque"})
+        await client.get("evidence-core", {"event_id": "opaque"})
     asyncio.run(run())
     assert set(observed["/api/research/status"].values()) == {2}
     assert set(observed["/api/research/evidence-package"].values()) == {
         EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS}
     assert EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS == 20
+    assert set(observed["/api/research/evidence-core"].values()) == {
+        CORE_EVIDENCE_TRANSPORT_TIMEOUT_SECONDS}
+    assert CORE_EVIDENCE_TRANSPORT_TIMEOUT_SECONDS == 15
 
 
 def test_client_cancellation_closes_inflight_guardian_request():
@@ -407,6 +418,7 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
                 ("query_timeseries", {"source": "guardian.cell_history", "metric": "soc",
                                       "physical_serial": "SERIAL-M4", **common}),
                 ("build_evidence_package", {"event_id": "SCE-M4"}),
+                ("build_soc_crash_core_evidence", {"event_id": "SCE-M4"}),
             ]
             for name, arguments in calls:
                 result = await client.call_tool(name, arguments)
@@ -416,7 +428,7 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
         "status", "topology", "identity-epochs", "maintenance", "coverage",
         "module-history", "cell-history", "phases", "daily-diagnostics",
         "diagnostic-evidence", "events/soc-crashes", "events/low-voltage",
-        "alarms", "timeseries", "evidence-package",
+        "alarms", "timeseries", "evidence-package", "evidence-core",
     }
     assert {request.url.path.removeprefix("/api/research/")
             for request in stub.requests} == expected

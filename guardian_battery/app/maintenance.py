@@ -372,7 +372,7 @@ class MaintenanceEventLog:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def read_all(self) -> list[MaintenanceEvent]:
+    def read_all(self, check=None) -> list[MaintenanceEvent]:
         if not self.path.exists():
             return []
         events: list[MaintenanceEvent] = []
@@ -381,6 +381,8 @@ class MaintenanceEventLog:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
                 try:
                     for line_number, line in enumerate(handle, 1):
+                        if check is not None:
+                            check()
                         if not line.strip():
                             continue
                         try:

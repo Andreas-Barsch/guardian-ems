@@ -63,7 +63,7 @@ class TechnicalEventSource:
     def __init__(self, path: Path | str = DEFAULT_TECHNICAL_EVENT_FILE):
         self.path = Path(path)
 
-    def read(self) -> list[TimelineEvent]:
+    def read(self, check=None) -> list[TimelineEvent]:
         if not self.path.exists():
             return []
         try:
@@ -72,6 +72,8 @@ class TechnicalEventSource:
             raise TechnicalHistoryError("technical event history is unavailable") from exc
         events: list[TimelineEvent] = []
         for line_number, line in enumerate(lines, 1):
+            if check is not None:
+                check()
             if not line.strip():
                 continue
             try:

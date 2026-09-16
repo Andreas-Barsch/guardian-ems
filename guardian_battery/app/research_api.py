@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import secrets
+import statistics
 import threading
 import time
 import uuid
@@ -37,6 +38,11 @@ QUERY_TIMEOUT_SECONDS = 10
 EVIDENCE_PACKAGE_TIMEOUT_SECONDS = 15
 SOC_CRASH_VERSION = "guardian_soc_crash_v1"
 EVIDENCE_PACKAGE_VERSION = "research_soc_crash_evidence_v2"
+CORE_EVIDENCE_VERSION = "research_soc_crash_core_evidence_v1"
+CORE_TARGET_BEFORE = timedelta(minutes=10)
+CORE_TARGET_AFTER = timedelta(minutes=30)
+CORE_PEER_BEFORE = timedelta(minutes=5)
+CORE_PEER_AFTER = timedelta(minutes=5)
 LOG = logging.getLogger("guardian_battery.research")
 
 READER_ACCOUNTED_TIMINGS = (
@@ -61,6 +67,15 @@ PACKAGE_PROFILE_STAGES = (
     "peer_module_evidence", "comparison_window_construction",
     "coverage_calculation", "config_context", "provenance_fingerprint",
     "envelope_build", "serialization")
+
+CORE_PROFILE_STAGES = (
+    "event_id_decode_checksum", "bounded_event_reconstruction", "event_match",
+    "core_window_calculation", "historical_position_resolution",
+    "identity_epoch_resolution", "peer_topology_resolution",
+    "target_core_read", "peer_core_read", "target_projection", "peer_projection",
+    "rs485_core_context", "canonical_phase", "alarms", "maintenance",
+    "coverage_calculation", "config_context", "serialization",
+    "provenance_fingerprint", "envelope_build")
 
 
 @dataclass(frozen=True)
@@ -380,6 +395,7 @@ class GuardianResearchApi:
         if endpoint == "events/soc-crashes": return self._soc_crashes(values, deadline)
         if endpoint == "events/low-voltage": return self._low_voltage(values, deadline)
         if endpoint == "alarms": return self._alarms(values)
+        if endpoint == "evidence-core": return self._core(values, deadline)
         if endpoint == "evidence-package": return self._package(values, deadline)
         raise ResearchQueryError("invalid_argument", "research endpoint not found", 404)
 
@@ -462,9 +478,12 @@ class GuardianResearchApi:
             row["quality"] = "unavailable"
         return row
 
-    def _maintenance(self, values):
+    def _maintenance(self, values, deadline=None):
         start, end = self._range(values)
-        events = MaintenanceRepository(MaintenanceEventLog(self.paths.maintenance)).list(include_archived=True)
+        check = ((lambda: self._ensure_package_deadline(deadline))
+                 if deadline is not None else None)
+        events = MaintenanceRepository(MaintenanceEventLog(self.paths.maintenance)).list(
+            include_archived=True, check=check)
         rows = []
         for event in events:
             if not start <= event.occurred_at <= end: continue
@@ -767,13 +786,15 @@ class GuardianResearchApi:
                 "quality": "complete" if records else "unavailable",
                 "records": records, "coverage": coverage, "truncated": False}
 
-    def _config_context(self, timestamp):
+    def _config_context(self, timestamp, deadline=None):
         if not self.paths.config_history or not Path(self.paths.config_history).is_file():
             return {"quality": "absent", "record": None}
         selected = None
         try:
             with Path(self.paths.config_history).open(encoding="utf-8") as handle:
                 for line in handle:
+                    if deadline is not None:
+                        self._ensure_package_deadline(deadline)
                     if not line.strip(): continue
                     record = json.loads(line)
                     effective = record.get("effective_at") or record.get("created_at")
@@ -782,10 +803,13 @@ class GuardianResearchApi:
             return {"quality": "unknown", "record": None}
         return {"quality": "complete" if selected else "absent", "record": selected}
 
-    def _alarms(self, values):
+    def _alarms(self, values, deadline=None):
         start, end = self._range(values)
         rows = []
-        for event in TechnicalEventSource(self.paths.technical_events).read() if self.paths.technical_events else ():
+        check = ((lambda: self._ensure_package_deadline(deadline))
+                 if deadline is not None else None)
+        for event in TechnicalEventSource(self.paths.technical_events).read(
+                check=check) if self.paths.technical_events else ():
             if not start <= event.timestamp <= end or not event.event_type.startswith("alarm_"): continue
             identity = (self.identity.serial_at(event.module_number, event.timestamp)
                         if event.module_number else {"resolved": False, "physical_serial": None})
@@ -817,6 +841,21 @@ class GuardianResearchApi:
                 "peer_modules": 0, "peer_history_queries": 0,
                 "comparison_windows": 0},
             "coverage_status": {}}
+
+    @staticmethod
+    def _core_profile():
+        return {"profile_schema_version": 1, "endpoint": "evidence-core",
+            "status": "running", "total_elapsed_seconds": 0.0,
+            "stages": {name: {"elapsed_seconds": 0.0, "calls": 0,
+                "status": "not_run", "deadline_remaining_seconds_at_entry": None,
+                "deadline_remaining_seconds_at_exit": None,
+                "files_discovered": 0, "files_opened": 0, "bytes_read": 0,
+                "records_inspected": 0, "samples_returned": 0,
+                "index_present": None, "index_valid": None,
+                "read_mode": "not_observed"} for name in CORE_PROFILE_STAGES},
+            "counts": {"cell_history_queries": 0, "cell_history_scans": 0,
+                "target_records": 0, "peer_records": 0, "peer_modules": 0,
+                "rs485_scans": 0}, "coverage_status": {}}
 
     @staticmethod
     def _ensure_package_deadline(deadline):
@@ -904,14 +943,11 @@ class GuardianResearchApi:
                 LOG.info("RESEARCH_PACKAGE_PROFILE %s", json.dumps(
                     profile, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
 
-    def _package_impl(self, values, deadline, profile=None):
+    def _resolve_package_event(self, values, deadline, profile=None):
         self._required(values, "event_id")
-        reference = self._run_package_stage(profile, "event_id_decode_checksum", deadline,
+        reference = self._run_package_stage(
+            profile, "event_id_decode_checksum", deadline,
             lambda: self._event_reference(values["event_id"]))
-        # Event timestamps originate as floating-point epochs but are represented
-        # in the stable identifier as microsecond-resolution ISO strings.  Widen
-        # only the reconstruction boundaries enough to include either side of
-        # that lossless-for-datetime, but potentially rounded, conversion.
         try:
             lookup_start = (datetime.fromisoformat(reference["f"])
                             - timedelta(microseconds=1)).isoformat()
@@ -921,12 +957,363 @@ class GuardianResearchApi:
             raise ResearchQueryError("invalid_argument", "event_id is invalid") from exc
         detector_values = {"physical_serial": reference["s"], "from": lookup_start,
                            "to": lookup_end}
-        crashes = self._run_package_stage(profile, "bounded_event_reconstruction", deadline,
+        crashes = self._run_package_stage(
+            profile, "bounded_event_reconstruction", deadline,
             lambda: self._soc_crashes(detector_values, deadline))
-        event = self._run_package_stage(profile, "event_match", deadline,
+        event = self._run_package_stage(
+            profile, "event_match", deadline,
             lambda: next((item for item in crashes["data"]["events"]
                           if item["event_id"] == values["event_id"]), None))
-        if event is None: raise ResearchQueryError("coverage_absent", "event is unavailable", 404)
+        if event is None:
+            raise ResearchQueryError("coverage_absent", "event is unavailable", 404)
+        return event, crashes
+
+    @staticmethod
+    def _core_record(row, *, peer=False):
+        voltages = [float(value) for value in row.get("cell_voltages_mv", ())]
+        median = statistics.median(voltages) if voltages else None
+        derived = dict(row.get("derived") or {})
+        derived["median_cell_voltage_mv"] = median
+        if voltages:
+            derived["cell_deviation_from_module_median_mv"] = [
+                value - median for value in voltages]
+        result = {
+            "timestamp": row["timestamp"],
+            "physical_serial": row["physical_serial"],
+            "position_at_time": row.get("position_at_time"),
+            "position_history_id": row.get("position_history_id"),
+            "identity_epoch_id": row.get("identity_epoch_id"),
+            "identity_resolved": row.get("identity_resolved", False),
+            "identity_source": row.get("identity_source"),
+            "soc": row.get("soc"),
+            "module_current_a": row.get("module_current_a"),
+            "module_voltage_v": row.get("module_voltage_v"),
+            "module_power_w": row.get("module_power_w"),
+            "cell_voltages_mv": list(row.get("cell_voltages_mv", ())),
+            "cell_temperatures_c": list(row.get("cell_temperatures_c", ())),
+            "derived": derived,
+        }
+        if not peer:
+            result["balancing"] = row.get("balancing")
+        else:
+            result["derived"] = {key: derived.get(key) for key in (
+                "minimum_cell_voltage_mv", "cell_spread_mv", "lowest_cell")}
+        return result
+
+    @classmethod
+    def _core_metric_coverage(cls, start, end, rows, *, truncated=False):
+        def timestamps(predicate):
+            return [row["timestamp"] for row in rows if predicate(row)]
+        metrics = {
+            "soc": timestamps(lambda row: row.get("soc") is not None),
+            "module_current": timestamps(
+                lambda row: row.get("module_current_a") is not None),
+            "module_voltage": timestamps(
+                lambda row: row.get("module_voltage_v") is not None),
+            "cell_voltage": timestamps(lambda row: bool(row.get("cell_voltages_mv"))),
+            "cell_temperature": timestamps(
+                lambda row: bool(row.get("cell_temperatures_c"))),
+            "balancing": timestamps(lambda row: row.get("balancing") is not None),
+        }
+        return {name: cls._evidence_coverage(
+            start, end, observed, truncated=truncated)
+            for name, observed in metrics.items()}
+
+    def _rs485_core_context(self, serial, start, end, deadline):
+        requested = {"from": start, "to": end}
+        unavailable = {"evidence_class": "OBSERVED", "quality": "unavailable",
+            "records": [], "coverage": {"requested_range": requested,
+                "covered_intervals": [], "missing_intervals": [requested],
+                "first_observation": None, "last_observation": None,
+                "sample_count": 0, "expected_cadence_seconds": None,
+                "largest_gap_seconds": None, "quality": "unavailable"}}
+        if not self.paths.rs485_history or not Path(self.paths.rs485_history).exists():
+            return {"management": dict(unavailable), "low_voltage": dict(unavailable)}
+        identities, management, low_voltage = {}, [], []
+        first, last = start[:10], end[:10]
+        for path in sorted(Path(self.paths.rs485_history).glob("*.jsonl")):
+            if not first <= path.stem <= last:
+                continue
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    self._ensure_package_deadline(deadline)
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    identity = decode_identity_record(record)
+                    if identity:
+                        identities[int(record.get("adr", -1))] = identity["serial_string"]
+                        continue
+                    timestamp = record.get("timestamp")
+                    if isinstance(timestamp, (int, float)):
+                        timestamp = datetime.fromtimestamp(
+                            float(timestamp), timezone.utc).isoformat()
+                    if not isinstance(timestamp, str) or not start <= timestamp <= end:
+                        continue
+                    adr = int(record.get("adr", -1))
+                    if identities.get(adr) != serial:
+                        continue
+                    if not (record.get("direction") == "response"
+                            and record.get("checksum_valid") is True
+                            and record.get("frame_complete") is True
+                            and record.get("request_matched") is True):
+                        continue
+                    command = record.get("paired_command")
+                    decoded = record.get("decoded") if isinstance(
+                        record.get("decoded"), dict) else {}
+                    if command in {0x92, 0x44}:
+                        fields = ({key: decoded.get(key) for key in (
+                            "charge_current_limit_a", "discharge_current_limit_a",
+                            "charge_voltage_limit_v", "discharge_voltage_limit_v",
+                            "charge_enable", "discharge_enable")}
+                            if command == 0x92 else
+                            {"command": "0x44", "decoded": decoded or None})
+                        management.append({"timestamp": timestamp,
+                            "physical_serial": serial, "adr": adr,
+                            "paired_command": command, **fields})
+                    low = {key: value for key, value in decoded.items()
+                           if "low_voltage" in key or "under_voltage" in key}
+                    if low or command == 0x44:
+                        low_voltage.append({"timestamp": timestamp,
+                            "physical_serial": serial, "adr": adr,
+                            "paired_command": command,
+                            "checksum_valid": True, "request_matched": True,
+                            "decoded": low or None})
+                    if len(management) + len(low_voltage) >= 10_000:
+                        break
+        def result(rows):
+            coverage = self._evidence_coverage(
+                start, end, [row["timestamp"] for row in rows])
+            return {"evidence_class": "OBSERVED",
+                "quality": "complete" if rows else "unavailable",
+                "records": rows, "coverage": coverage,
+                "truncated": len(management) + len(low_voltage) >= 10_000}
+        return {"management": result(management), "low_voltage": result(low_voltage)}
+
+    def _core(self, values, deadline):
+        unexpected = set(values) - {"event_id", "profile"}
+        if unexpected:
+            raise ResearchQueryError(
+                "invalid_argument", "evidence-core accepts only event_id and profile")
+        profiling = values.get("profile")
+        if profiling not in (None, "false", "true"):
+            raise ResearchQueryError("invalid_argument", "profile must be true or false")
+        profile = self._core_profile() if profiling == "true" else None
+        started = time.perf_counter()
+        try:
+            result = self._core_impl(values, deadline, profile)
+            if profile is not None:
+                profile["status"] = "ok"
+            return result
+        except ResearchQueryError as exc:
+            if profile is not None:
+                profile["status"] = exc.code
+            raise
+        except Exception:
+            if profile is not None:
+                profile["status"] = "source_unavailable"
+            raise
+        finally:
+            if profile is not None:
+                profile["total_elapsed_seconds"] = time.perf_counter() - started
+                LOG.info("RESEARCH_CORE_PROFILE %s", json.dumps(
+                    profile, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+
+    def _core_impl(self, values, deadline, profile=None):
+        event, crashes = self._resolve_package_event(values, deadline, profile)
+        serial = event["physical_serial"]
+        crash_start = datetime.fromisoformat(event["start"])
+        crash_end = datetime.fromisoformat(event["end"])
+        def windows():
+            return {
+                "target": {"from": (crash_start - CORE_TARGET_BEFORE).isoformat(),
+                           "to": (crash_end + CORE_TARGET_AFTER).isoformat()},
+                "peers": {"from": (crash_start - CORE_PEER_BEFORE).isoformat(),
+                          "to": (crash_end + CORE_PEER_AFTER).isoformat()},
+            }
+        core_windows = self._run_package_stage(
+            profile, "core_window_calculation", deadline, windows)
+        target_start, target_end = (core_windows["target"]["from"],
+                                    core_windows["target"]["to"])
+        peer_start, peer_end = (core_windows["peers"]["from"],
+                                core_windows["peers"]["to"])
+        identity = self._run_package_stage(
+            profile, "historical_position_resolution", deadline,
+            lambda: self.identity.position_at(serial, event["start"]))
+        self._run_package_stage(profile, "identity_epoch_resolution", deadline,
+                                lambda: identity.get("identity_epoch_id"))
+        topology = self._run_package_stage(
+            profile, "peer_topology_resolution", deadline,
+            lambda: self.identity.topology_at(event["start"]))
+        peer_serials = [row["physical_serial"] for row in topology["positions"]
+                        if row.get("physical_serial")
+                        and row["physical_serial"] != serial]
+        if profile is not None:
+            profile["counts"].update({"cell_history_queries": 1 + bool(peer_serials),
+                "cell_history_scans": 1 + bool(peer_serials),
+                "peer_modules": len(peer_serials)})
+        target_io = {} if profile is not None else None
+        target_evidence = self._run_package_stage(
+            profile, "target_core_read", deadline,
+            lambda: self.series.evidence_by_serial(
+                [serial], target_start, target_end, deadline=deadline,
+                io_profile=target_io, profile_target_serial=serial),
+            io_profile=target_io)
+        peer_io = {} if profile is not None and peer_serials else None
+        peer_evidence = (self._run_package_stage(
+            profile, "peer_core_read", deadline,
+            lambda: self.series.evidence_by_serial(
+                peer_serials, peer_start, peer_end, deadline=deadline,
+                io_profile=peer_io), io_profile=peer_io)
+            if peer_serials else {"records": {}, "truncated": False,
+                "truncated_serials": [], "source_signature": [],
+                "source_fingerprint": None})
+        target_rows = self._run_package_stage(
+            profile, "target_projection", deadline,
+            lambda: [self._core_record(row) for row in
+                     target_evidence["records"].get(serial, ())])
+        peer_rows = self._run_package_stage(
+            profile, "peer_projection", deadline,
+            lambda: [{"physical_serial": peer,
+                "position_at_event": self.identity.position_at(
+                    peer, event["start"]).get("position_at_time"),
+                "evidence_class": "OBSERVED",
+                "records": [self._core_record(row, peer=True) for row in
+                            peer_evidence["records"].get(peer, ())],
+                "coverage": self._evidence_coverage(peer_start, peer_end,
+                    [row["timestamp"] for row in
+                     peer_evidence["records"].get(peer, ())],
+                    truncated=peer in peer_evidence.get("truncated_serials", ())) }
+                for peer in peer_serials])
+        if profile is not None:
+            profile["counts"]["target_records"] = len(target_rows)
+            profile["counts"]["peer_records"] = sum(
+                len(item["records"]) for item in peer_rows)
+            profile["counts"]["rs485_scans"] = 1
+        rs485 = self._run_package_stage(
+            profile, "rs485_core_context", deadline,
+            lambda: self._rs485_core_context(
+                serial, target_start, target_end, deadline))
+        phase_envelope = self._run_package_stage(
+            profile, "canonical_phase", deadline,
+            lambda: self._phases({"physical_serial": serial,
+                "from": target_start, "to": target_end}))
+        alarms_envelope = self._run_package_stage(
+            profile, "alarms", deadline,
+            lambda: self._alarms({"physical_serial": serial,
+                "from": target_start, "to": target_end}, deadline=deadline))
+        maintenance_envelope = self._run_package_stage(
+            profile, "maintenance", deadline,
+            lambda: self._maintenance({"physical_serial": serial,
+                "from": target_start, "to": target_end}, deadline=deadline))
+        config = self._run_package_stage(
+            profile, "config_context", deadline,
+            lambda: self._config_context(event["start"], deadline=deadline))
+        config_revision = ((config.get("record") or {}).get("config_revision")
+                           or (config.get("record") or {}).get("revision"))
+        target_coverage = self._run_package_stage(
+            profile, "coverage_calculation", deadline,
+            lambda: self._evidence_coverage(target_start, target_end,
+                [row["timestamp"] for row in target_rows],
+                truncated=target_evidence.get("truncated", False)))
+        target_metric_coverage = self._core_metric_coverage(
+            target_start, target_end, target_rows,
+            truncated=target_evidence.get("truncated", False))
+        coverage = {"target": target_coverage,
+            "target_metrics": target_metric_coverage,
+            "peers": {item["physical_serial"]: item["coverage"] for item in peer_rows},
+            "bms_management": rs485["management"]["coverage"],
+            "rs485_low_voltage": rs485["low_voltage"]["coverage"],
+            "alarms": self._coverage_row(target_start, target_end,
+                [row["timestamp"] for row in alarms_envelope["data"]["alarms"]]),
+            "maintenance": self._coverage_row(target_start, target_end,
+                [row["occurred_at"] for row in maintenance_envelope["data"]["events"]])}
+        if not self.paths.technical_events:
+            coverage["alarms"]["quality"] = "unavailable"
+        if not self.paths.maintenance or not Path(self.paths.maintenance).exists():
+            coverage["maintenance"]["quality"] = "unavailable"
+        if profile is not None:
+            profile["coverage_status"] = {
+                key: value.get("quality", "unknown")
+                for key, value in coverage.items() if isinstance(value, dict)
+                and "quality" in value}
+        event_core = {"event_id": event["event_id"],
+            "detector_version": event["detector_version"],
+            "detector_thresholds": crashes["data"]["thresholds"],
+            "event_start": event["start"], "event_end": event["end"],
+            "duration_seconds": (crash_end - crash_start).total_seconds(),
+            "soc_before": event["soc_before"], "soc_after": event["soc_after"],
+            "delta_soc": event["soc_after"] - event["soc_before"],
+            "physical_serial": serial,
+            "historical_position": identity.get("position_at_time"),
+            "identity_epoch_id": identity.get("identity_epoch_id"),
+            "position_history_id": identity.get("position_history_id"),
+            "identity_resolved": identity.get("resolved", False),
+            "event_quality": event.get("coverage"),
+            "source_references": event.get("source_references", [])}
+        package = {"core_schema_version": 1,
+            "purpose": "bounded_evidence_for_external_research_not_causal_interpretation",
+            "event_core": event_core,
+            "identity_topology": identity,
+            "requested_intervals": core_windows,
+            "target_evidence": {"evidence_class": "OBSERVED",
+                "derived_fields_evidence_class": "DERIVED",
+                "temperature_semantics": "recorded_module_temperature_channels_only",
+                "records": target_rows, "coverage": target_coverage,
+                "truncated": target_evidence.get("truncated", False)},
+            "peer_evidence": {"historical_stack_at": event["start"],
+                "modules": peer_rows,
+                "quality": "complete" if peer_rows else "unavailable"},
+            "event_context": {"canonical_phase": {
+                    "evidence_class": "DERIVED",
+                    "quality": phase_envelope["quality"]["status"],
+                    "data": phase_envelope["data"]},
+                "alarms": {"evidence_class": "OBSERVED",
+                    "quality": alarms_envelope["quality"]["status"],
+                    "records": alarms_envelope["data"]["alarms"]},
+                "low_voltage": rs485["low_voltage"],
+                "bms_management": rs485["management"],
+                "maintenance": {"evidence_class": "OBSERVED",
+                    "quality": coverage["maintenance"]["quality"],
+                    "records": maintenance_envelope["data"]["events"]},
+                "soc_recalibration": {"evidence_class": "OBSERVED",
+                    "quality": "unavailable", "records": []}},
+            "coverage": coverage,
+            "evidence_classes": ["OBSERVED", "DERIVED"],
+            "inferred": False, "causality_determined": False}
+        fingerprint_input = self._run_package_stage(
+            profile, "serialization", deadline,
+            lambda: json.dumps(package, sort_keys=True,
+                               separators=(",", ":")).encode())
+        fingerprint = self._run_package_stage(
+            profile, "provenance_fingerprint", deadline,
+            lambda: hashlib.sha256(fingerprint_input).hexdigest())
+        package["input_fingerprint"] = fingerprint
+        def envelope():
+            return research_envelope(
+                source="guardian.soc_crash_core", evidence_class="DERIVED",
+                authoritative=False, timestamp_from=target_start,
+                timestamp_to=target_end, resolution="core_event_window",
+                data=package, semantics_version=CORE_EVIDENCE_VERSION,
+                quality=target_coverage["quality"],
+                provenance={"event_id": event["event_id"],
+                    "physical_serial": serial,
+                    "detector_version": SOC_CRASH_VERSION,
+                    "config_revision": config_revision,
+                    "requested_intervals": core_windows,
+                    "actual_coverage": coverage,
+                    "evidence_classes": ["OBSERVED", "DERIVED"],
+                    "sources": ["guardian.cell_history", "guardian.position_history",
+                        "guardian.canonical_phase", "guardian.events",
+                        "guardian.rs485", "guardian.maintenance"],
+                    "package_created_at": datetime.now(timezone.utc).isoformat(),
+                    "source_fingerprint": fingerprint})
+        return self._run_package_stage(
+            profile, "envelope_build", deadline, envelope)
+
+    def _package_impl(self, values, deadline, profile=None):
+        event, crashes = self._resolve_package_event(values, deadline, profile)
         def duration(value, default):
             raw = value or default
             match = re.fullmatch(

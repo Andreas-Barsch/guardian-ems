@@ -64,13 +64,21 @@ peers are resolved at event time. Missing optional stores remain explicitly
 partial or unavailable; no request-path rebuild or write is performed. See
 `docs/SOC_CRASH_EVIDENCE_BUILDER.md` for the schema and provenance rules.
 
+`GET /api/research/evidence-core?event_id=...` is the additive, fixed-resource
+SOC-crash entry point with semantics `research_soc_crash_core_evidence_v1`.
+Target data is limited to PT10M before through PT30M after the event; historical
+peers are limited to PT5M before/after. The endpoint retains the normal
+10-second Research deadline and 2-MiB response gate, accepts no expandable time
+window, and emits no causal or `INFERRED` claim. See
+`docs/SOC_CRASH_CORE_EVIDENCE.md` for its full contract.
+
 ### Konfiguration und spätere getrennte Abnahme
 
 - Guardian Battery und Guardian Research MCP verwenden für den internen Maschinenkanal denselben geheimen Wert, aber unterschiedliche Optionsnamen: Guardian `guardian_research_api_token`, MCP `guardian_api_token`. Ein leerer Guardian-Wert deaktiviert diesen Zugang.
 - Der separate `mcp_auth_token` authentifiziert spätere MCP-Clients und darf nicht mit dem internen Guardian-API-Token gleichgesetzt werden. `development_auth_mode` bleibt produktiv `false`.
 - Der Maschinenkanal erlaubt ausschließlich `GET /api/research/*`. POST bleibt 405; PUT, PATCH und DELETE sind nicht Teil des Research-Vertrags. Alle Nicht-Research-Routen behalten den bestehenden Ingress-Schutz.
 - Das MCP-Add-on besitzt standardmäßig keinen veröffentlichten Host-Port und keine `/share`-/`/config`-Mounts. Öffentliche Exposition, externe AI, HA-Adapter und Phase D sind nicht Bestandteil dieses Releases.
-- Nach einem späteren separaten Deployment Versionen, `/health`, Auth-, Host-/Origin-Schutz, `initialize`, exakt 15 read-only Tools und kontrolliertes Guardian-Down/Recovery-Verhalten abnehmen. Keine reale Batterie-Evidence für einen reinen Transporttest abfragen.
+- Nach einem späteren separaten Deployment Versionen, `/health`, Auth-, Host-/Origin-Schutz, `initialize`, exakt 16 read-only Tools und kontrolliertes Guardian-Down/Recovery-Verhalten abnehmen. Keine reale Batterie-Evidence für einen reinen Transporttest abfragen.
 - Guardian/Add-on: `0.8.0`; Guardian Research MCP: `0.8.0`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`.
 - Diese Release-Vorbereitung führt kein Deployment, keinen Neustart, keine Tokenkonfiguration und keinen produktiven `/share`- oder `/config`-Zugriff aus.
 

@@ -181,3 +181,9 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
         return await invoke("build_evidence_package", "evidence-package", {
             "event_id": event_id, "before": before, "after": after,
             "trend_windows": trend_windows or ["PT6H", "P1D", "P7D"]})
+
+    @server.tool(annotations=READ_ONLY)
+    async def build_soc_crash_core_evidence(event_id: str) -> dict[str, Any]:
+        """Return small bounded SOC-crash evidence for external research drill-down."""
+        return await invoke("build_soc_crash_core_evidence", "evidence-core", {
+            "event_id": event_id})
