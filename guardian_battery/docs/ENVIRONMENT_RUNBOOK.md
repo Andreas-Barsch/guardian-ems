@@ -1195,3 +1195,33 @@ Tatsächlich verifiziert sind im Projekt unter anderem:
 
 ### Meta-Regel
 Wenn das Runbook gerade zur Vermeidung wiederholter Umgebungsfehler eingeführt wurde, ist es vor jedem vorgeschlagenen technischen Befehl verbindlich anzuwenden. Ein neuer Befehl darf keine dort dokumentierte Annahme erneut einführen.
+# RS485 History Block Index
+
+Die Dateien `rs485_history/YYYY-MM-DD.jsonl` bleiben die authoritative,
+append-only Raw Evidence. Die zugehörigen `.idx`-Sidecars sind ausschließlich
+DERIVED, vollständig rebuildbar und dürfen verworfen werden. Ein Sidecar bindet
+sich über Dateiname, Device/Inode, Größe, `mtime_ns`, bestätigtes Byteende sowie
+Head-/Tail-Fingerprints an den bestätigten Raw-Präfix.
+
+Jeder Block enthält Bytebereich, minimale/maximale Recordzeit, Recordanzahl und
+einen ADR→physische-Seriennummer-Checkpoint unmittelbar vor seinem ersten
+Record. Der Checkpoint entsteht ausschließlich aus gültigen historischen
+0x93-Responses; aktuelle Topologie oder eine ADR→Position-Formel werden nicht
+verwendet. Timestamp-Minimum/-Maximum je Block erhält die Korrektheit bei
+late/out-of-order Records. Der Writer garantiert Append-only-Persistenz, aber
+keine globale monotone Timestamp-Reihenfolge.
+
+Der asynchrone RS485-Indexworker erweitert Indizes in begrenzten Blöcken und
+beeinflusst weder Acquisition noch Raw-Persistenz. Vollständige JSONL-Zeilen
+werden bestätigt; eine partielle letzte Zeile bleibt im offenen Suffix. Bereits
+bestätigte Blöcke werden bei normalem Append nicht neu aufgebaut. Der
+Research-Request schreibt und rebuildet niemals einen Index.
+
+Der Core Reader liest überlappende Blocks plus höchstens 2 MiB offenen Suffix
+und projiziert 0x92, 0x44 sowie Low-/Under-Voltage einschließlich relevanter
+0x47-Felder weiterhin in einem Scan. Kleine Quellen bis 2 MiB dürfen bei
+fehlendem/ungültigem Index bounded vollständig gelesen werden. Für größere
+Quellen wird die RS485-Evidence als `unavailable` geliefert; es erfolgt kein
+stiller Full-Day-Fallback und ein echter Deadline-Timeout bleibt weiterhin ein
+Timeout. Zielwert auf HA Green: `rs485_core_context` deutlich unter einer bis
+wenigen Sekunden und Core typisch unter fünf Sekunden.

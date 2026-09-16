@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from canonical_phase import CanonicalPhaseReader
 from display_history_reader import DisplayHistoryReader
+from history_block_index import BlockIndexError, index_path
 from history_series import CellHistorySeries
 from hycube_evidence import HycubeBatteryCapacitySeries, HycubePolicyHistory
 from guardian_diagnostics import GuardianDiagnosticsRepository
@@ -29,6 +30,8 @@ from research_identity import ResearchIdentityResolver
 from research_timeseries import (CursorCodec, MAX_CELLS, MAX_POINTS,
                                  ResearchQueryError, ResearchTimeseriesService)
 from rs485_evidence import decode_identity_record
+from rs485_history_index import (OPEN_SUFFIX_MAX_BYTES,
+                                 select_ranges as select_rs485_ranges)
 
 API_ROUTE = "/api/research"
 SCHEMA_VERSION = 1
@@ -852,6 +855,9 @@ class GuardianResearchApi:
                 "files_discovered": 0, "files_opened": 0, "bytes_read": 0,
                 "records_inspected": 0, "samples_returned": 0,
                 "index_present": None, "index_valid": None,
+                "selected_blocks": 0, "selected_bytes": 0,
+                "raw_bytes_read": 0, "identity_checkpoint_used": False,
+                "open_suffix_bytes": 0,
                 "read_mode": "not_observed"} for name in CORE_PROFILE_STAGES},
             "counts": {"cell_history_queries": 0, "cell_history_scans": 0,
                 "target_records": 0, "peer_records": 0, "peer_modules": 0,
@@ -910,6 +916,11 @@ class GuardianResearchApi:
                 stage["index_present"] = io_profile.get("index_present")
                 stage["index_valid"] = io_profile.get("index_valid")
                 stage["read_mode"] = io_profile.get("read_mode", "not_observed")
+                for key in ("selected_blocks", "selected_bytes", "raw_bytes_read",
+                            "open_suffix_bytes"):
+                    stage[key] = io_profile.get(key, 0)
+                stage["identity_checkpoint_used"] = bool(
+                    io_profile.get("identity_checkpoint_used", False))
                 timings = io_profile.get("timings_seconds", {})
                 accounted = sum(float(timings.get(key, 0.0))
                                 for key in READER_ACCOUNTED_TIMINGS)
@@ -1019,7 +1030,7 @@ class GuardianResearchApi:
             start, end, observed, truncated=truncated)
             for name, observed in metrics.items()}
 
-    def _rs485_core_context(self, serial, start, end, deadline):
+    def _rs485_core_context(self, serial, start, end, deadline, io_profile=None):
         requested = {"from": start, "to": end}
         unavailable = {"evidence_class": "OBSERVED", "quality": "unavailable",
             "records": [], "coverage": {"requested_range": requested,
@@ -1029,59 +1040,115 @@ class GuardianResearchApi:
                 "largest_gap_seconds": None, "quality": "unavailable"}}
         if not self.paths.rs485_history or not Path(self.paths.rs485_history).exists():
             return {"management": dict(unavailable), "low_voltage": dict(unavailable)}
-        identities, management, low_voltage = {}, [], []
+        profile = io_profile if io_profile is not None else {}
+        profile.update({"files_discovered": 0, "files_opened": 0,
+            "bytes_read": 0, "raw_bytes_read": 0, "records_inspected": 0,
+            "samples_returned": 0, "index_present": True, "index_valid": True,
+            "selected_blocks": 0, "selected_bytes": 0,
+            "identity_checkpoint_used": False, "open_suffix_bytes": 0,
+            "read_mode": "rs485_block_index"})
+        management, low_voltage = [], []
         first, last = start[:10], end[:10]
-        for path in sorted(Path(self.paths.rs485_history).glob("*.jsonl")):
-            if not first <= path.stem <= last:
+        start_epoch, end_epoch = (datetime.fromisoformat(start).timestamp(),
+                                  datetime.fromisoformat(end).timestamp())
+        paths = [path for path in sorted(Path(self.paths.rs485_history).glob("*.jsonl"))
+                 if first <= path.stem <= last]
+        profile["files_discovered"] = len(paths)
+        cross_file_identities = {}
+        for path in paths:
+            try:
+                ranges, selection = select_rs485_ranges(
+                    path, start_epoch, end_epoch)
+            except BlockIndexError:
+                profile["index_present"] = profile["index_present"] and index_path(
+                    path).exists()
+                profile["index_valid"] = False
+                size = path.stat().st_size
+                if size > OPEN_SUFFIX_MAX_BYTES:
+                    profile["read_mode"] = "index_unavailable"
+                    return {"management": dict(unavailable),
+                            "low_voltage": dict(unavailable)}
+                ranges = [{"byte_start": 0, "byte_end": size,
+                           "identity_checkpoint": {}, "open_suffix": True}]
+                selection = {"selected_blocks": 0, "selected_bytes": size,
+                             "open_suffix_bytes": size,
+                             "read_mode": "bounded_small_file_fallback"}
+            profile["selected_blocks"] += selection["selected_blocks"]
+            profile["selected_bytes"] += selection["selected_bytes"]
+            profile["open_suffix_bytes"] += selection["open_suffix_bytes"]
+            if selection["read_mode"] != "rs485_block_index":
+                profile["read_mode"] = selection["read_mode"]
+            if not ranges:
                 continue
-            with path.open(encoding="utf-8") as handle:
-                for line in handle:
-                    self._ensure_package_deadline(deadline)
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    identity = decode_identity_record(record)
-                    if identity:
-                        identities[int(record.get("adr", -1))] = identity["serial_string"]
-                        continue
-                    timestamp = record.get("timestamp")
-                    if isinstance(timestamp, (int, float)):
-                        timestamp = datetime.fromtimestamp(
-                            float(timestamp), timezone.utc).isoformat()
-                    if not isinstance(timestamp, str) or not start <= timestamp <= end:
-                        continue
-                    adr = int(record.get("adr", -1))
-                    if identities.get(adr) != serial:
-                        continue
-                    if not (record.get("direction") == "response"
-                            and record.get("checksum_valid") is True
-                            and record.get("frame_complete") is True
-                            and record.get("request_matched") is True):
-                        continue
-                    command = record.get("paired_command")
-                    decoded = record.get("decoded") if isinstance(
-                        record.get("decoded"), dict) else {}
-                    if command in {0x92, 0x44}:
-                        fields = ({key: decoded.get(key) for key in (
-                            "charge_current_limit_a", "discharge_current_limit_a",
-                            "charge_voltage_limit_v", "discharge_voltage_limit_v",
-                            "charge_enable", "discharge_enable")}
-                            if command == 0x92 else
-                            {"command": "0x44", "decoded": decoded or None})
-                        management.append({"timestamp": timestamp,
-                            "physical_serial": serial, "adr": adr,
-                            "paired_command": command, **fields})
-                    low = {key: value for key, value in decoded.items()
-                           if "low_voltage" in key or "under_voltage" in key}
-                    if low or command == 0x44:
-                        low_voltage.append({"timestamp": timestamp,
-                            "physical_serial": serial, "adr": adr,
-                            "paired_command": command,
-                            "checksum_valid": True, "request_matched": True,
-                            "decoded": low or None})
-                    if len(management) + len(low_voltage) >= 10_000:
-                        break
+            profile["files_opened"] += 1
+            with path.open("rb") as handle:
+                for selected in ranges:
+                    identities = {**cross_file_identities,
+                        **{int(adr): item["physical_serial"] for adr, item in
+                           selected["identity_checkpoint"].items()}}
+                    profile["identity_checkpoint_used"] = bool(
+                        profile["identity_checkpoint_used"]
+                        or not selected["open_suffix"] or identities)
+                    handle.seek(selected["byte_start"])
+                    while handle.tell() < selected["byte_end"]:
+                        self._ensure_package_deadline(deadline)
+                        remaining = selected["byte_end"] - handle.tell()
+                        raw = handle.readline(remaining)
+                        if not raw:
+                            break
+                        profile["bytes_read"] += len(raw)
+                        profile["raw_bytes_read"] += len(raw)
+                        if not raw.endswith(b"\n"):
+                            continue
+                        profile["records_inspected"] += 1
+                        try:
+                            record = json.loads(raw)
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
+                        identity = decode_identity_record(record)
+                        if identity:
+                            identities[int(record.get("adr", -1))] = identity[
+                                "serial_string"]
+                            continue
+                        timestamp = record.get("timestamp")
+                        if isinstance(timestamp, (int, float)):
+                            timestamp = datetime.fromtimestamp(
+                                float(timestamp), timezone.utc).isoformat()
+                        if not isinstance(timestamp, str) or not start <= timestamp <= end:
+                            continue
+                        adr = int(record.get("adr", -1))
+                        if identities.get(adr) != serial:
+                            continue
+                        if not (record.get("direction") == "response"
+                                and record.get("checksum_valid") is True
+                                and record.get("frame_complete") is True
+                                and record.get("request_matched") is True):
+                            continue
+                        command = record.get("paired_command")
+                        decoded = record.get("decoded") if isinstance(
+                            record.get("decoded"), dict) else {}
+                        if command in {0x92, 0x44}:
+                            fields = ({key: decoded.get(key) for key in (
+                                "charge_current_limit_a", "discharge_current_limit_a",
+                                "charge_voltage_limit_v", "discharge_voltage_limit_v",
+                                "charge_enable", "discharge_enable")}
+                                if command == 0x92 else
+                                {"command": "0x44", "decoded": decoded or None})
+                            management.append({"timestamp": timestamp,
+                                "physical_serial": serial, "adr": adr,
+                                "paired_command": command, **fields})
+                        low = {key: value for key, value in decoded.items()
+                               if "low_voltage" in key or "under_voltage" in key}
+                        if low or command == 0x44:
+                            low_voltage.append({"timestamp": timestamp,
+                                "physical_serial": serial, "adr": adr,
+                                "paired_command": command,
+                                "checksum_valid": True, "request_matched": True,
+                                "decoded": low or None})
+                        if len(management) + len(low_voltage) >= 10_000:
+                            break
+                    cross_file_identities = identities
+        profile["samples_returned"] = len(management) + len(low_voltage)
         def result(rows):
             coverage = self._evidence_coverage(
                 start, end, [row["timestamp"] for row in rows])
@@ -1191,10 +1258,12 @@ class GuardianResearchApi:
             profile["counts"]["peer_records"] = sum(
                 len(item["records"]) for item in peer_rows)
             profile["counts"]["rs485_scans"] = 1
+        rs485_io = {} if profile is not None else None
         rs485 = self._run_package_stage(
             profile, "rs485_core_context", deadline,
             lambda: self._rs485_core_context(
-                serial, target_start, target_end, deadline))
+                serial, target_start, target_end, deadline, rs485_io),
+            io_profile=rs485_io)
         phase_envelope = self._run_package_stage(
             profile, "canonical_phase", deadline,
             lambda: self._phases({"physical_serial": serial,

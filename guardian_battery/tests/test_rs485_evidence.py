@@ -10,6 +10,7 @@ from rs485_evidence import (Rs485EvidencePipeline, Rs485EvidenceWriter,
                             Rs485HistorySeries, restore_latest_identities)
 from rs485_sniffer import (Correlation, ResponseCorrelator, calculate_checksum,
                            calculate_lchksum, parse_frame)
+from rs485_history_index import load_valid
 
 
 def frame(*, adr=2, code=0x92, info=b""):
@@ -189,6 +190,18 @@ def test_writer_restart_appends_without_rewriting(tmp_path):
         writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
         writer.start(); writer.append(record); writer.stop()
     assert len(read_records(tmp_path / "2026-08-31.jsonl")) == 2
+
+
+def test_writer_maintains_rebuildable_rs485_index_outside_research(tmp_path):
+    record = {"timestamp": "2026-08-31T00:00:00+00:00", "record_type": "test"}
+    writer = Rs485EvidenceWriter(
+        tmp_path, batch_size=1, flush_interval_seconds=.01,
+        index_interval_seconds=.01)
+    writer.start(); writer.append(record); writer.stop()
+    source = tmp_path / "2026-08-31.jsonl"
+    index = load_valid(source)
+    assert index["complete"] is True
+    assert index["blocks"][0]["record_count"] == 1
 
 
 def test_startup_restore_redecodes_latest_valid_identity_read_only(tmp_path):

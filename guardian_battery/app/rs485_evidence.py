@@ -15,6 +15,7 @@ from rs485_sniffer import (Correlation, ParsedFrame, decode_0x47, decode_0x92,
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryError,
                               PositionHistoryLog,
                               documented_position_at)
+from rs485_history_index import extend as extend_rs485_history_index
 
 
 LOG = logging.getLogger("guardian_battery.rs485_evidence")
@@ -108,13 +109,18 @@ class Rs485EvidenceWriter:
     """Bounded asynchronous JSONL writer; overload never blocks acquisition."""
 
     def __init__(self, directory=DEFAULT_RS485_HISTORY_DIR, *, queue_size=4096,
-                 batch_size=64, flush_interval_seconds=1.0):
+                 batch_size=64, flush_interval_seconds=1.0,
+                 index_interval_seconds=0.25):
         self.directory = Path(directory)
         self.batch_size = int(batch_size)
         self.flush_interval_seconds = float(flush_interval_seconds)
         self._queue = queue.Queue(maxsize=int(queue_size))
         self._stop = threading.Event()
         self._thread = None
+        self._index_thread = None
+        self._index_stop = threading.Event()
+        self._index_wakeup = threading.Event()
+        self.index_interval_seconds = float(index_interval_seconds)
         self.records_written = 0
         self.bytes_written = 0
         self.dropped_records = 0
@@ -130,8 +136,12 @@ class Rs485EvidenceWriter:
             LOG.exception("RS485 evidence writer error: path=%s", self.directory)
             raise
         self._stop.clear()
+        self._index_stop.clear()
         self._thread = threading.Thread(target=self._run, name="guardian-rs485-evidence", daemon=True)
         self._thread.start()
+        self._index_thread = threading.Thread(
+            target=self._run_indexer, name="guardian-rs485-index", daemon=True)
+        self._index_thread.start()
         LOG.info("RS485 evidence writer started: path=%s", self.directory)
         return True
 
@@ -152,7 +162,12 @@ class Rs485EvidenceWriter:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout)
+        self._index_stop.set()
+        self._index_wakeup.set()
+        if self._index_thread:
+            self._index_thread.join(timeout)
         self._thread = None
+        self._index_thread = None
 
     def _write_batch(self, batch):
         groups = {}
@@ -168,6 +183,7 @@ class Rs485EvidenceWriter:
                     self.records_written += 1
                     self.bytes_written += len(line.encode("utf-8"))
                 handle.flush()
+                self._index_wakeup.set()
                 if records and not self._first_record_logged:
                     LOG.info("RS485 evidence first record persisted: path=%s type=%s",
                              path, records[0].get("record_type", "unknown"))
@@ -192,6 +208,36 @@ class Rs485EvidenceWriter:
                     break
                 batch.clear()
                 deadline = time.monotonic() + self.flush_interval_seconds
+
+    def _run_indexer(self):
+        """Advance disposable indexes in bounded units outside Research reads."""
+        while True:
+            progressed = False
+            today = datetime.now(timezone.utc).date().isoformat()
+            try:
+                for path in sorted(self.directory.glob("*.jsonl"), reverse=True):
+                    before = None
+                    sidecar = Path(str(path) + ".idx")
+                    try:
+                        before = sidecar.stat().st_size
+                    except OSError:
+                        pass
+                    extend_rs485_history_index(
+                        path, max_blocks=1, close_source=path.stem < today)
+                    try:
+                        progressed = progressed or sidecar.stat().st_size != before
+                    except OSError:
+                        pass
+                    if progressed:
+                        break
+            except Exception:
+                # Raw evidence remains authoritative; index maintenance is best effort.
+                LOG.warning("RS485 history index maintenance failed", exc_info=True)
+            if self._index_stop.is_set():
+                break
+            self._index_wakeup.wait(
+                self.index_interval_seconds if progressed else self.flush_interval_seconds)
+            self._index_wakeup.clear()
 
 
 class Rs485EvidencePipeline:
