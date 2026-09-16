@@ -5,10 +5,22 @@ Stand: 2026-09-14
 ## Guardian Battery 0.8.1 – SOC Crash Evidence v2 Acceptance Build
 
 - `0.8.1` is an acceptance-build identifier, not yet a final release decision.
-- Runtime identity is logged without configuration values or secrets as Guardian
-  Battery `0.8.1`, source commit
-  `43c04ab0b67fec4bcf2e4bcdb34b31767a90b620`, and Research semantics
-  `research_soc_crash_evidence_v2`.
+- Before copying source to the local HA development app, run
+  `python3 guardian_battery/tools/prepare_build_context.py <new-directory-path>`
+  from a clean Git checkout. The tool archives exactly `HEAD` (not working-tree
+  files), writes that revision to `.guardian-source-commit` in the temporary
+  context, and refuses dirty repositories or an existing destination. Transfer
+  and install only that generated context; never edit the installed app tree.
+- The Dockerfile requires the generated provenance file, validates a full
+  lowercase commit SHA, combines it with Supervisor's `BUILD_VERSION`, and
+  writes immutable read-only `/app/build-info.json`. A direct repository build
+  without the prepared context fails visibly because the provenance file is
+  absent. The runtime does not require or inspect `.git`.
+- Runtime identity is loaded only from the immutable build file and logged as
+  Guardian Battery `0.8.1`, `source_commit=<actual archived HEAD>`, and Research
+  semantics `research_soc_crash_evidence_v2`. Missing, malformed, or
+  version-mismatched provenance refuses startup visibly; a manually maintained
+  Git hash in Python source is forbidden.
 - The acceptance build changes no detector, Evidence Package content, coverage,
   identity, peer, BMS, diagnostic, MQTT, RS485 or Hycube behavior beyond the
   already validated source commit.

@@ -447,4 +447,7 @@ def test_runtime_image_uses_embedded_version_module_identity():
     assert "exec python3 /app/main.py" in run_script
     assert "RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT" in main_source
     assert 'source_commit=%s; research_semantics=%s' in main_source
-    assert 'SOURCE_COMMIT = "43c04ab0b67fec4bcf2e4bcdb34b31767a90b620"' in version_source
+    assert "COPY .guardian-source-commit" in dockerfile
+    assert "build-info.json" in dockerfile
+    assert "require_source_commit()" in main_source
+    assert "43c04ab0b67fec4bcf2e4bcdb34b31767a90b620" not in version_source

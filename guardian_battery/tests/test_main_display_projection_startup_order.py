@@ -95,6 +95,7 @@ def options():
 
 def prepare(monkeypatch):
     config_ui.reset_display_projection_startup()
+    monkeypatch.setattr(main, "require_source_commit", lambda: "a" * 40)
     monkeypatch.setattr(config_ui, "_DISPLAY_PROJECTION_PROVIDER", None)
     monkeypatch.setattr(config_ui, "_DISPLAY_PROJECTION_REBUILD_ACTION", None)
     FakeDisplayWorker.latest = None

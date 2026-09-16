@@ -65,7 +65,8 @@ from rs485_evidence import (DEFAULT_RS485_HISTORY_DIR, Rs485EvidencePipeline,
 from rs485_mqtt import Rs485MqttProjection
 from rs485_identity import project_current_management, resolve_rs485_identity
 from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
-                     RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT)
+                     RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT,
+                     require_source_commit)
 
 import paho.mqtt.client as mqtt
 import serial
@@ -1425,6 +1426,11 @@ def log_result(modules: list[Module], status: str, alarms: list[dict], detailed:
 
 
 def main() -> None:
+    try:
+        require_source_commit()
+    except RuntimeError:
+        LOG.critical("Guardian Battery startup refused: runtime source provenance unavailable")
+        raise
     update_display_projection_startup("DISPLAY_INIT_01_MAIN_REACHED")
     LOG.info("Guardian Battery %s; source_commit=%s; research_semantics=%s",
              GUARDIAN_VERSION, SOURCE_COMMIT, RESEARCH_SEMANTICS_VERSION)

@@ -30,7 +30,9 @@ import research_timeseries
 import research_api
 import research_identity
 from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
-                     RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT)
+                     RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT,
+                     UNAVAILABLE_SOURCE_COMMIT, load_source_commit,
+                     require_source_commit)
 
 
 def snapshot(at, positions):
@@ -231,8 +233,35 @@ def test_envelope_contract_contains_only_observed_or_derived():
 def test_acceptance_build_identity_is_explicit_and_non_secret():
     assert GUARDIAN_VERSION == "0.8.1"
     assert DIAGNOSTIC_ENGINE_VERSION == "0.4.12"
-    assert SOURCE_COMMIT == "43c04ab0b67fec4bcf2e4bcdb34b31767a90b620"
+    assert SOURCE_COMMIT == UNAVAILABLE_SOURCE_COMMIT
     assert RESEARCH_SEMANTICS_VERSION == "research_soc_crash_evidence_v2"
+
+
+def test_build_provenance_reports_supplied_revision_independently_of_version(tmp_path):
+    revision = "a" * 40
+    build_info = tmp_path / "build-info.json"
+    build_info.write_text(json.dumps({
+        "guardian_version": "0.8.1", "source_commit": revision,
+    }))
+    assert load_source_commit(build_info) == revision
+    assert GUARDIAN_VERSION == "0.8.1"
+
+
+@pytest.mark.parametrize("payload", [
+    None,
+    {},
+    {"guardian_version": "0.8.0", "source_commit": "a" * 40},
+    {"guardian_version": "0.8.1", "source_commit": "43c04ab"},
+    {"guardian_version": "0.8.1", "source_commit": "G" * 40},
+])
+def test_missing_or_invalid_build_provenance_is_visible_and_never_stale(tmp_path, payload):
+    build_info = tmp_path / "build-info.json"
+    if payload is not None:
+        build_info.write_text(json.dumps(payload))
+    value = load_source_commit(build_info)
+    assert value == UNAVAILABLE_SOURCE_COMMIT
+    with pytest.raises(RuntimeError, match="source provenance unavailable"):
+        require_source_commit(value)
 
 
 def test_identity_is_time_valid_across_position_change(tmp_path):
