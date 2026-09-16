@@ -21,6 +21,7 @@ from research_api import (CORE_EVIDENCE_VERSION, CORE_PROFILE_STAGES,
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
 from history_block_index import build_index, index_path
+from rs485_history_index import rebuild as rebuild_rs485_index
 from timeline_index import rebuild as rebuild_timeline_index
 import research_timeseries
 import research_api
@@ -1106,6 +1107,123 @@ def test_soc_crash_core_profile_has_two_scans_and_bounded_counts(tmp_path, caplo
     assert profile["stages"]["target_core_read"]["read_mode"] == "indexed_chunk"
     assert profile["stages"]["peer_core_read"]["read_mode"] == "indexed_chunk"
     assert profile["total_elapsed_seconds"] < QUERY_TIMEOUT_SECONDS
+
+
+def profiled_rs485_core_environment(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    rs485 = tmp_path / "rs485"
+    rows = [
+        {"record_type": "frame", "timestamp": "2026-09-11T09:50:00+00:00",
+         "direction": "response", "paired_command": 0x93, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True},
+        {"record_type": "frame", "timestamp": "2026-09-11T10:03:00+00:00",
+         "direction": "response", "paired_command": 0x92, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True,
+         "decoded": {"charge_current_limit_a": 10,
+                     "discharge_current_limit_a": -25,
+                     "charge_enable": True, "discharge_enable": True}},
+        {"record_type": "frame", "timestamp": "2026-09-11T10:04:00+00:00",
+         "direction": "response", "paired_command": 0x44, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True,
+         "decoded": {"low_voltage_warning": True}},
+        {"record_type": "frame", "timestamp": "2026-09-11T10:05:00+00:00",
+         "direction": "response", "paired_command": 0x47, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True,
+         "decoded": {"module_under_voltage_limit_v": 45.0}},
+        {"record_type": "frame", "timestamp": "2026-09-11T10:06:00+00:00",
+         "direction": "response", "paired_command": 0x42, "adr": 4,
+         "checksum_valid": True, "frame_complete": True, "request_matched": True,
+         "decoded": {}},
+    ]
+    source = rs485 / "2026-09-11.jsonl"
+    write_jsonl(source, rows)
+    rebuild_rs485_index(source, block_records=2)
+    monkeypatch.setattr(research_api, "decode_identity_record",
+        lambda record: ({"serial_string": "SERIAL-M4"}
+                        if record.get("paired_command") == 0x93 else None))
+    return GuardianResearchApi(replace(api.paths, rs485_history=rs485),
+                               cursor_secret=b"test"), source
+
+
+def test_rs485_core_profile_has_non_overlapping_substages_and_preserves_evidence(
+        tmp_path, monkeypatch):
+    api, source = profiled_rs485_core_environment(tmp_path, monkeypatch)
+    start, end = "2026-09-11T09:52:00+00:00", "2026-09-11T10:36:00+00:00"
+    raw_before = source.read_bytes()
+    expected = api._rs485_core_context("SERIAL-M4", start, end, float("inf"))
+    profile = api._core_profile()
+    io_profile = {}
+    actual = api._run_package_stage(
+        profile, "rs485_core_context", float("inf"),
+        lambda: api._rs485_core_context(
+            "SERIAL-M4", start, end, float("inf"), io_profile=io_profile),
+        io_profile=io_profile)
+
+    assert actual == expected
+    assert source.read_bytes() == raw_before
+    reader = profile["stages"]["rs485_core_context"]["reader"]
+    assert set(reader["timings_seconds"]) == set(
+        research_api.RS485_CORE_ACCOUNTED_TIMINGS)
+    assert reader["raw_records"] == reader["full_json_decode_count"] == 5
+    assert {key: reader[key] for key in (
+        "0x93_records", "0x92_records", "0x44_records", "0x47_records",
+        "other_records", "identity_updates")} == {
+            "0x93_records": 1, "0x92_records": 1, "0x44_records": 1,
+            "0x47_records": 1, "other_records": 1, "identity_updates": 1}
+    assert reader["target_identity_matches"] == 4
+    accounted = sum(reader["timings_seconds"].values())
+    assert reader["reader_accounted_seconds"] == pytest.approx(accounted)
+    assert reader["reader_unattributed_seconds"] == pytest.approx(max(
+        0.0, profile["stages"]["rs485_core_context"]["elapsed_seconds"] - accounted))
+    encoded = json.dumps(reader)
+    assert "SERIAL-M4" not in encoded and "charge_current_limit_a" not in encoded
+
+
+def test_rs485_core_unprofiled_path_does_not_read_profiling_clock(
+        tmp_path, monkeypatch):
+    api, _ = profiled_rs485_core_environment(tmp_path, monkeypatch)
+    monkeypatch.setattr(research_api.time, "perf_counter",
+                        lambda: pytest.fail("unprofiled RS485 reader used profiling clock"))
+
+    result = api._rs485_core_context(
+        "SERIAL-M4", "2026-09-11T09:52:00+00:00",
+        "2026-09-11T10:36:00+00:00", float("inf"))
+
+    assert result["management"]["records"]
+
+
+def test_rs485_core_timeout_retains_complete_profile_balance(tmp_path, monkeypatch):
+    api, _ = profiled_rs485_core_environment(tmp_path, monkeypatch)
+    profile = api._core_profile()
+    io_profile = {}
+    checks = 0
+    original = api._ensure_package_deadline
+
+    def timeout_after_first_record(deadline):
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise research_timeseries.ResearchQueryError(
+                "timeout", "research query timed out", 503)
+        return original(float("inf"))
+
+    monkeypatch.setattr(api, "_ensure_package_deadline", timeout_after_first_record)
+    with pytest.raises(research_timeseries.ResearchQueryError):
+        api._run_package_stage(
+            profile, "rs485_core_context", float("inf"),
+            lambda: api._rs485_core_context(
+                "SERIAL-M4", "2026-09-11T09:52:00+00:00",
+                "2026-09-11T10:36:00+00:00", float("inf"),
+                io_profile=io_profile), io_profile=io_profile)
+
+    stage = profile["stages"]["rs485_core_context"]
+    reader = stage["reader"]
+    assert stage["status"] == "timeout"
+    assert reader["raw_records"] == reader["full_json_decode_count"] == 1
+    assert reader["reader_accounted_seconds"] == pytest.approx(
+        sum(reader["timings_seconds"].values()))
+    assert reader["reader_unattributed_seconds"] == pytest.approx(max(
+        0.0, stage["elapsed_seconds"] - reader["reader_accounted_seconds"]))
 
 
 def test_soc_crash_core_golden_contract_cases(tmp_path):

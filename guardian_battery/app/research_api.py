@@ -56,6 +56,13 @@ READER_ACCOUNTED_TIMINGS = (
     "balancing_extraction", "module_metric_extraction", "record_materialization",
     "deadline_check", "result_sort_signature_fingerprint")
 
+RS485_CORE_ACCOUNTED_TIMINGS = (
+    "index_load_validate_select", "source_open_seek_read",
+    "binary_line_framing", "full_json_decode", "identity_processing",
+    "record_validation_filter", "management_0x92_projection",
+    "command_0x44_projection", "low_voltage_projection",
+    "result_finalize", "deadline_check")
+
 PACKAGE_PROFILE_STAGES = (
     "event_id_decode_checksum", "bounded_event_reconstruction", "event_match",
     "identity_epoch_resolution", "historical_position_resolution",
@@ -933,8 +940,11 @@ class GuardianResearchApi:
                 stage["identity_checkpoint_used"] = bool(
                     io_profile.get("identity_checkpoint_used", False))
                 timings = io_profile.get("timings_seconds", {})
+                accounted_keys = (RS485_CORE_ACCOUNTED_TIMINGS
+                                  if "index_load_validate_select" in timings
+                                  else READER_ACCOUNTED_TIMINGS)
                 accounted = sum(float(timings.get(key, 0.0))
-                                for key in READER_ACCOUNTED_TIMINGS)
+                                for key in accounted_keys)
                 io_profile["reader_accounted_seconds"] = accounted
                 io_profile["reader_unattributed_seconds"] = max(
                     0.0, stage["elapsed_seconds"] - accounted)
@@ -1058,23 +1068,51 @@ class GuardianResearchApi:
             "selected_blocks": 0, "selected_bytes": 0,
             "identity_checkpoint_used": False, "open_suffix_bytes": 0,
             "read_mode": "rs485_block_index"})
+        timings = None
+        if io_profile is not None:
+            timings = profile["timings_seconds"] = {
+                name: 0.0 for name in RS485_CORE_ACCOUNTED_TIMINGS}
+            profile.update({"raw_records": 0, "full_json_decode_count": 0,
+                "0x93_records": 0, "identity_updates": 0,
+                "target_identity_matches": 0, "0x92_records": 0,
+                "0x44_records": 0, "0x47_records": 0, "other_records": 0})
+
+        def measure(name, callback):
+            if timings is None:
+                return callback()
+            measured_at = time.perf_counter()
+            try:
+                return callback()
+            finally:
+                timings[name] += time.perf_counter() - measured_at
+
         management, low_voltage = [], []
-        first, last = start[:10], end[:10]
-        start_epoch, end_epoch = (datetime.fromisoformat(start).timestamp(),
-                                  datetime.fromisoformat(end).timestamp())
-        paths = [path for path in sorted(Path(self.paths.rs485_history).glob("*.jsonl"))
-                 if first <= path.stem <= last]
+        def discover_paths():
+            first, last = start[:10], end[:10]
+            start_epoch, end_epoch = (datetime.fromisoformat(start).timestamp(),
+                                      datetime.fromisoformat(end).timestamp())
+            paths = [path for path in sorted(
+                Path(self.paths.rs485_history).glob("*.jsonl"))
+                if first <= path.stem <= last]
+            return start_epoch, end_epoch, paths
+        start_epoch, end_epoch, paths = measure(
+            "index_load_validate_select", discover_paths)
         profile["files_discovered"] = len(paths)
         cross_file_identities = {}
         for path in paths:
             try:
-                ranges, selection = select_rs485_ranges(
-                    path, start_epoch, end_epoch)
+                ranges, selection = measure(
+                    "index_load_validate_select",
+                    lambda: select_rs485_ranges(path, start_epoch, end_epoch))
             except BlockIndexError:
-                profile["index_present"] = profile["index_present"] and index_path(
-                    path).exists()
+                def fallback_selection():
+                    present = index_path(path).exists()
+                    size = path.stat().st_size
+                    return present, size
+                present, size = measure(
+                    "index_load_validate_select", fallback_selection)
+                profile["index_present"] = profile["index_present"] and present
                 profile["index_valid"] = False
-                size = path.stat().st_size
                 if size > OPEN_SUFFIX_MAX_BYTES:
                     profile["read_mode"] = "index_unavailable"
                     return {"management": dict(unavailable),
@@ -1092,82 +1130,133 @@ class GuardianResearchApi:
             if not ranges:
                 continue
             profile["files_opened"] += 1
-            with path.open("rb") as handle:
+            handle = measure("source_open_seek_read", lambda: path.open("rb"))
+            try:
                 for selected in ranges:
-                    identities = {**cross_file_identities,
-                        **{int(adr): item["physical_serial"] for adr, item in
-                           selected["identity_checkpoint"].items()}}
-                    profile["identity_checkpoint_used"] = bool(
-                        profile["identity_checkpoint_used"]
-                        or not selected["open_suffix"] or identities)
-                    handle.seek(selected["byte_start"])
-                    while handle.tell() < selected["byte_end"]:
-                        self._ensure_package_deadline(deadline)
-                        remaining = selected["byte_end"] - handle.tell()
-                        raw = handle.readline(remaining)
+                    def prepare_identity():
+                        identities = {**cross_file_identities,
+                            **{int(adr): item["physical_serial"] for adr, item in
+                               selected["identity_checkpoint"].items()}}
+                        profile["identity_checkpoint_used"] = bool(
+                            profile["identity_checkpoint_used"]
+                            or not selected["open_suffix"] or identities)
+                        return identities
+                    identities = measure("identity_processing", prepare_identity)
+                    measure("source_open_seek_read",
+                            lambda: handle.seek(selected["byte_start"]))
+                    while True:
+                        position = measure("binary_line_framing", handle.tell)
+                        if position >= selected["byte_end"]:
+                            break
+                        measure("deadline_check",
+                                lambda: self._ensure_package_deadline(deadline))
+                        remaining = measure(
+                            "binary_line_framing",
+                            lambda: selected["byte_end"] - handle.tell())
+                        raw = measure("source_open_seek_read",
+                                      lambda: handle.readline(remaining))
                         if not raw:
                             break
                         profile["bytes_read"] += len(raw)
                         profile["raw_bytes_read"] += len(raw)
-                        if not raw.endswith(b"\n"):
+                        complete_line = measure(
+                            "binary_line_framing", lambda: raw.endswith(b"\n"))
+                        if not complete_line:
                             continue
                         profile["records_inspected"] += 1
+                        if timings is not None:
+                            profile["raw_records"] += 1
                         try:
-                            record = json.loads(raw)
+                            record = measure("full_json_decode", lambda: json.loads(raw))
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             continue
-                        identity = decode_identity_record(record)
+                        if timings is not None:
+                            profile["full_json_decode_count"] += 1
+                            command = measure(
+                                "record_validation_filter",
+                                lambda: record.get("paired_command"))
+                            count_key = {0x93: "0x93_records", 0x92: "0x92_records",
+                                         0x44: "0x44_records", 0x47: "0x47_records"}.get(
+                                             command, "other_records")
+                            profile[count_key] += 1
+                        identity = measure(
+                            "identity_processing", lambda: decode_identity_record(record))
                         if identity:
-                            identities[int(record.get("adr", -1))] = identity[
-                                "serial_string"]
+                            def update_identity():
+                                identities[int(record.get("adr", -1))] = identity[
+                                    "serial_string"]
+                                if timings is not None:
+                                    profile["identity_updates"] += 1
+                            measure("identity_processing", update_identity)
                             continue
-                        timestamp = record.get("timestamp")
-                        if isinstance(timestamp, (int, float)):
-                            timestamp = datetime.fromtimestamp(
-                                float(timestamp), timezone.utc).isoformat()
-                        if not isinstance(timestamp, str) or not start <= timestamp <= end:
+                        def validate_record():
+                            timestamp = record.get("timestamp")
+                            if isinstance(timestamp, (int, float)):
+                                timestamp = datetime.fromtimestamp(
+                                    float(timestamp), timezone.utc).isoformat()
+                            if (not isinstance(timestamp, str)
+                                    or not start <= timestamp <= end):
+                                return None
+                            adr = int(record.get("adr", -1))
+                            if identities.get(adr) != serial:
+                                return None
+                            if timings is not None:
+                                profile["target_identity_matches"] += 1
+                            if not (record.get("direction") == "response"
+                                    and record.get("checksum_valid") is True
+                                    and record.get("frame_complete") is True
+                                    and record.get("request_matched") is True):
+                                return None
+                            command = record.get("paired_command")
+                            decoded = record.get("decoded") if isinstance(
+                                record.get("decoded"), dict) else {}
+                            return timestamp, adr, command, decoded
+                        validated = measure("record_validation_filter", validate_record)
+                        if validated is None:
                             continue
-                        adr = int(record.get("adr", -1))
-                        if identities.get(adr) != serial:
-                            continue
-                        if not (record.get("direction") == "response"
-                                and record.get("checksum_valid") is True
-                                and record.get("frame_complete") is True
-                                and record.get("request_matched") is True):
-                            continue
-                        command = record.get("paired_command")
-                        decoded = record.get("decoded") if isinstance(
-                            record.get("decoded"), dict) else {}
-                        if command in {0x92, 0x44}:
-                            fields = ({key: decoded.get(key) for key in (
+                        timestamp, adr, command, decoded = validated
+                        if command == 0x92:
+                            def project_management():
+                                fields = {key: decoded.get(key) for key in (
                                 "charge_current_limit_a", "discharge_current_limit_a",
                                 "charge_voltage_limit_v", "discharge_voltage_limit_v",
-                                "charge_enable", "discharge_enable")}
-                                if command == 0x92 else
-                                {"command": "0x44", "decoded": decoded or None})
-                            management.append({"timestamp": timestamp,
-                                "physical_serial": serial, "adr": adr,
-                                "paired_command": command, **fields})
-                        low = {key: value for key, value in decoded.items()
-                               if "low_voltage" in key or "under_voltage" in key}
-                        if low or command == 0x44:
-                            low_voltage.append({"timestamp": timestamp,
-                                "physical_serial": serial, "adr": adr,
-                                "paired_command": command,
-                                "checksum_valid": True, "request_matched": True,
-                                "decoded": low or None})
+                                    "charge_enable", "discharge_enable")}
+                                management.append({"timestamp": timestamp,
+                                    "physical_serial": serial, "adr": adr,
+                                    "paired_command": command, **fields})
+                            measure("management_0x92_projection", project_management)
+                        elif command == 0x44:
+                            measure("command_0x44_projection", lambda: management.append({
+                                "timestamp": timestamp, "physical_serial": serial,
+                                "adr": adr, "paired_command": command,
+                                "command": "0x44", "decoded": decoded or None}))
+                        def project_low_voltage():
+                            low = {key: value for key, value in decoded.items()
+                                   if "low_voltage" in key or "under_voltage" in key}
+                            if low or command == 0x44:
+                                low_voltage.append({"timestamp": timestamp,
+                                    "physical_serial": serial, "adr": adr,
+                                    "paired_command": command,
+                                    "checksum_valid": True, "request_matched": True,
+                                    "decoded": low or None})
+                        measure("low_voltage_projection", project_low_voltage)
                         if len(management) + len(low_voltage) >= 10_000:
                             break
                     cross_file_identities = identities
-        profile["samples_returned"] = len(management) + len(low_voltage)
-        def result(rows):
-            coverage = self._evidence_coverage(
-                start, end, [row["timestamp"] for row in rows])
-            return {"evidence_class": "OBSERVED",
-                "quality": "complete" if rows else "unavailable",
-                "records": rows, "coverage": coverage,
-                "truncated": len(management) + len(low_voltage) >= 10_000}
-        return {"management": result(management), "low_voltage": result(low_voltage)}
+            finally:
+                measure("source_open_seek_read", handle.close)
+        def finalize():
+            profile["samples_returned"] = len(management) + len(low_voltage)
+            def result(rows):
+                coverage = self._evidence_coverage(
+                    start, end, [row["timestamp"] for row in rows])
+                return {"evidence_class": "OBSERVED",
+                    "quality": "complete" if rows else "unavailable",
+                    "records": rows, "coverage": coverage,
+                    "truncated": len(management) + len(low_voltage) >= 10_000}
+            return {"management": result(management),
+                    "low_voltage": result(low_voltage)}
+        return measure("result_finalize", finalize)
 
     def _core(self, values, deadline):
         unexpected = set(values) - {"event_id", "profile"}
