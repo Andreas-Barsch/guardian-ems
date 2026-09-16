@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import bisect
 import json
+import logging
 import math
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,7 +69,7 @@ class DiagnosticAggregateBackfill:
                           float(record["soc_percent"]), temperatures,
                           [bool(value) for value in balancing], serial, snapshot_id)
 
-    def run(self, aggregate_store, options):
+    def run(self, aggregate_store, options, *, stop_event=None):
         report = {"files_discovered": 0, "files_scanned": 0, "files_skipped": 0,
                   "lines_seen": 0, "valid_samples": 0, "aggregated_samples": 0,
                   "identity_unknown": 0, "invalid_lines": 0, "file_errors": 0}
@@ -87,6 +90,9 @@ class DiagnosticAggregateBackfill:
         paths = sorted(self.history_directory.glob("*.jsonl"))
         report["files_discovered"] = len(paths)
         for path in paths:
+            if stop_event is not None and stop_event.is_set():
+                report["cancelled"] = True
+                break
             try:
                 signature = {
                     "cell_history": aggregate_store.source_signature(path),
@@ -108,6 +114,9 @@ class DiagnosticAggregateBackfill:
                 with path.open(encoding="utf-8") as handle:
                     report["files_scanned"] += 1
                     for line in handle:
+                        if stop_event is not None and stop_event.is_set():
+                            report["cancelled"] = True
+                            break
                         if not line.strip():
                             continue
                         report["lines_seen"] += 1
@@ -131,6 +140,8 @@ class DiagnosticAggregateBackfill:
             except OSError:
                 report["file_errors"] += 1
                 continue
+            if report.get("cancelled"):
+                break
             file_stats["records_updated"] = aggregate_store.merge_backfill_records(
                 temporary.records
             )
@@ -145,3 +156,72 @@ class DiagnosticAggregateBackfill:
             aggregate_store.prune_through(max(valid_days))
             aggregate_store.save()
         return report
+
+
+class DiagnosticAggregateBackfillWorker:
+    """Run the startup backfill off-thread while retaining exclusive store ownership."""
+
+    def __init__(self, backfill, aggregate_store, options, *, logger=None):
+        self.backfill = backfill
+        self.aggregate_store = aggregate_store
+        self.options = options
+        self.log = logger or logging.getLogger("guardian_battery.diagnostic_backfill")
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = None
+        self._status = {
+            "state": "not_started", "started_at": None, "completed_at": None,
+            "last_error": None, "report": None,
+        }
+
+    def start(self):
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            self._stop.clear()
+            self._status.update({
+                "state": "running", "started_at": time.time(),
+                "completed_at": None, "last_error": None, "report": None,
+            })
+            self._thread = threading.Thread(
+                target=self._run, name="guardian-diagnostic-aggregate-backfill", daemon=True)
+            self._thread.start()
+        self.log.info("Diagnostic aggregate backfill background started")
+        return True
+
+    def _run(self):
+        try:
+            report = self.backfill.run(
+                self.aggregate_store, self.options, stop_event=self._stop)
+            state = "cancelled" if report.get("cancelled") else "completed"
+            with self._lock:
+                self._status.update({
+                    "state": state, "completed_at": time.time(), "report": dict(report),
+                })
+            self.log.info("Diagnostic aggregate backfill background completed")
+        except Exception as exc:
+            with self._lock:
+                self._status.update({
+                    "state": "failed", "completed_at": time.time(),
+                    "last_error": type(exc).__name__,
+                })
+            self.log.warning(
+                "Diagnostic aggregate backfill background failed: %s", type(exc).__name__)
+
+    def is_alive(self):
+        thread = self._thread
+        return bool(thread and thread.is_alive())
+
+    def wait(self, timeout=None):
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+        return not self.is_alive()
+
+    def stop(self, timeout=2.0):
+        self._stop.set()
+        return self.wait(timeout)
+
+    def status(self):
+        with self._lock:
+            return {**self._status, "thread_alive": self.is_alive()}

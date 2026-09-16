@@ -633,9 +633,9 @@ def test_main_lifecycle_wiring_starts_after_live_initialization_and_stops_first(
     assert worker_start < source.index("while RUNNING:")
     worker_stop = source.index("daily_worker.stop()")
     assert source.index("finally:", source.index("while RUNNING:")) < worker_stop
-    assert worker_stop < source.index("rs485_reader.stop()")
-    assert worker_stop < source.index("publisher.close()")
-    shutdown = source[worker_stop:source.index("rs485_reader.stop()")]
+    assert worker_stop < source.index("rs485_reader.stop()", worker_stop)
+    assert worker_stop < source.index("publisher.close()", worker_stop)
+    shutdown = source[worker_stop:source.index("rs485_reader.stop()", worker_stop)]
     assert "except Exception as exc:" in shutdown
 
 

@@ -1,4 +1,7 @@
 import json
+import logging
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,7 +10,8 @@ from cell_diagnostics import CellDiagnosticStore, CellSample
 from config_history import config_id, diagnostic_parameters
 from config_ui import DEFAULTS
 from diagnostic_aggregates import DiagnosticAggregateStore
-from diagnostic_backfill import DiagnosticAggregateBackfill
+from diagnostic_backfill import (DiagnosticAggregateBackfill,
+                                 DiagnosticAggregateBackfillWorker)
 
 
 def raw(timestamp, module=1, serial="SN-A", current=-2.0, soc=50.0, delta=0):
@@ -228,3 +232,67 @@ def test_new_position_history_revisits_previously_unknown_identity(tmp_path):
     report = backfill.run(aggregate, DEFAULTS)
     assert report["files_scanned"] == 1
     assert {item["physical_module_serial"] for item in aggregate.records.values()} == {"SN-LATE"}
+
+
+def test_background_worker_runs_without_blocking_caller_and_preserves_results(tmp_path):
+    aggregate, backfill = stores(tmp_path)
+    write_day(tmp_path / "cell_history", "2026-08-16", [raw(epoch("2026-08-16"))])
+    entered = threading.Event()
+    release = threading.Event()
+    original = backfill.run
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original(*args, **kwargs)
+
+    backfill.run = blocked
+    worker = DiagnosticAggregateBackfillWorker(backfill, aggregate, DEFAULTS)
+    assert worker.start()
+    assert entered.wait(1)
+    assert worker.is_alive()
+    assert worker.status()["state"] == "running"
+    release.set()
+    assert worker.wait(2)
+    assert worker.status()["state"] == "completed"
+    assert phase_records(aggregate)
+    assert backfill.run(aggregate, DEFAULTS)["files_skipped"] == 1
+
+
+def test_background_worker_failure_is_isolated_and_reported(tmp_path, caplog):
+    aggregate, backfill = stores(tmp_path)
+
+    def failed(*_args, **_kwargs):
+        raise RuntimeError("synthetic failure")
+
+    backfill.run = failed
+    caplog.set_level(logging.INFO)
+    worker = DiagnosticAggregateBackfillWorker(backfill, aggregate, DEFAULTS)
+    worker.start()
+    assert worker.wait(2)
+    assert worker.status()["state"] == "failed"
+    assert worker.status()["last_error"] == "RuntimeError"
+    assert "synthetic failure" not in caplog.text
+
+
+def test_background_worker_shutdown_discards_partial_file_without_completion_marker(tmp_path):
+    aggregate, backfill = stores(tmp_path)
+    history = tmp_path / "cell_history"
+    write_day(history, "2026-08-16", [raw(epoch("2026-08-16", hour % 24), delta=hour)
+                                      for hour in range(2000)])
+    started = threading.Event()
+    original_sample = backfill._sample
+
+    def slow_sample(*args, **kwargs):
+        started.set()
+        time.sleep(.0005)
+        return original_sample(*args, **kwargs)
+
+    backfill._sample = slow_sample
+    worker = DiagnosticAggregateBackfillWorker(backfill, aggregate, DEFAULTS)
+    worker.start()
+    assert started.wait(1)
+    assert worker.stop(2)
+    assert worker.status()["state"] == "cancelled"
+    assert aggregate.backfill_sources == {}
+    assert aggregate.records == {}

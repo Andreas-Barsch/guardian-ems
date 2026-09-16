@@ -406,6 +406,10 @@ def test_main_lifecycle_enabled_reader_persists_0x92_and_logs(tmp_path, caplog):
         'LOG.info("RS485 evidence lifecycle: writer start requested")') < source.index(
         "rs485_writer.start()")
     assert source.index("rs485_writer.start()") < source.index("rs485_reader.start()")
+    assert source.index("rs485_reader.start()") < source.index(
+        "aggregate_backfill_worker.start()")
+    assert source.index("aggregate_backfill_worker.start()") < source.index(
+        "persistence_worker.start()")
     messages = [record.getMessage() for record in caplog.records]
     assert any("RS485 evidence writer started" in message for message in messages)
     assert any("RS485 evidence first record persisted" in message for message in messages)

@@ -24,7 +24,8 @@ from derived_persistence import DerivedPersistenceWorker
 from derived_mqtt_projection import publish_derived_results
 from derived_mqtt_worker import DerivedMqttWorker
 from diagnostic_aggregates import DiagnosticAggregateStore
-from diagnostic_backfill import DiagnosticAggregateBackfill
+from diagnostic_backfill import (DiagnosticAggregateBackfill,
+                                 DiagnosticAggregateBackfillWorker)
 from current_condition_backfill import CurrentConditionBackfill
 from config_history import ConfigHistory
 from daily_diagnostics import DailyDiagnosticSources
@@ -1462,6 +1463,7 @@ def main() -> None:
     )
     rs485_writer = None
     rs485_pipeline = None
+    aggregate_backfill_worker = None
     if bool(options.get("rs485_sniffer_enabled", False)):
         rs485_writer = Rs485EvidenceWriter(DEFAULT_RS485_HISTORY_DIR)
         rs485_pipeline = Rs485EvidencePipeline(rs485_writer)
@@ -1481,6 +1483,9 @@ def main() -> None:
                       position_history_path=DEFAULT_POSITION_HISTORY_FILE),
                   "identities": rs485_reader.identities(),
                   "history": rs485_writer.status() if rs485_writer else {},
+                  "diagnostic_aggregate_backfill": (
+                      aggregate_backfill_worker.status()
+                      if aggregate_backfill_worker else {"state": "not_started"}),
                   "collector_timing": timing.snapshot(),
                   "hycube_projection": {
                       "live": (hycube_collector.status().get("projection", {})
@@ -1510,20 +1515,30 @@ def main() -> None:
         CellDiagnosticStore.phases,
         int(options.get("cell_diag_aggregate_retention_days", 730)),
     )
-    try:
-        backfill = DiagnosticAggregateBackfill(
-            CELL_HISTORY_DIR, DEFAULT_POSITION_HISTORY_FILE
-        ).run(aggregate_store, options)
-        LOG.info(
-            "Diagnostic aggregate backfill: discovered=%s scanned=%s skipped=%s "
-            "valid=%s aggregated=%s identity_unknown=%s invalid=%s errors=%s",
-            backfill["files_discovered"], backfill["files_scanned"],
-            backfill["files_skipped"], backfill["valid_samples"],
-            backfill["aggregated_samples"], backfill["identity_unknown"],
-            backfill["invalid_lines"], backfill["file_errors"],
-        )
-    except Exception as exc:
-        LOG.warning("Diagnostic aggregate backfill fehlgeschlagen: %s", exc)
+    if rs485_reader is not None:
+        restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
+        rs485_reader.restore_identities(restored_identities)
+        LOG.info("RS485 evidence lifecycle: writer start requested")
+        rs485_writer.start()
+        rs485_reader.start()
+    aggregate_backfill_worker = DiagnosticAggregateBackfillWorker(
+        DiagnosticAggregateBackfill(CELL_HISTORY_DIR, DEFAULT_POSITION_HISTORY_FILE),
+        aggregate_store, options, logger=LOG)
+    aggregate_backfill_worker.start()
+    while RUNNING and aggregate_backfill_worker.is_alive():
+        aggregate_backfill_worker.wait(0.1)
+    if not RUNNING:
+        if not aggregate_backfill_worker.stop():
+            LOG.warning("Diagnostic aggregate backfill did not stop within timeout")
+        if rs485_reader is not None:
+            rs485_reader.stop()
+        if rs485_writer is not None:
+            rs485_writer.stop()
+        if display_projection_worker is not None:
+            display_projection_worker.stop()
+        console.close()
+        publisher.close()
+        return
     poll_deadline = PeriodicDeadline(float(options["poll_interval_seconds"]))
     cell_deadline = PeriodicDeadline(
         float(options["cell_diagnostics_interval_seconds"]))
@@ -1548,13 +1563,6 @@ def main() -> None:
     identity_resolution_log: dict[int, tuple[str, int | None]] = {}
     daily_worker = None
     canonical_phase_worker = None
-
-    if rs485_reader is not None:
-        restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
-        rs485_reader.restore_identities(restored_identities)
-        LOG.info("RS485 evidence lifecycle: writer start requested")
-        rs485_writer.start()
-        rs485_reader.start()
     try:
         daily_worker = DailyDiagnosticWorker(
             DailyDiagnosticSources(
