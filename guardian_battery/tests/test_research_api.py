@@ -21,6 +21,7 @@ from research_api import (CORE_EVIDENCE_VERSION, CORE_PROFILE_STAGES,
 from research_identity import ResearchIdentityResolver
 from hycube_evidence import policy_observation
 from history_block_index import build_index, index_path
+from timeline_index import rebuild as rebuild_timeline_index
 import research_timeseries
 import research_api
 from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
@@ -1257,6 +1258,58 @@ def test_soc_crash_core_context_sources_are_bounded_to_target_window(
     assert all("2026-09-11T09:52:00" <= row["timestamp"]
                <= "2026-09-11T10:36:00+00:00"
                for row in context["bms_management"]["records"])
+
+
+def test_soc_crash_core_uses_bounded_alarm_timeline_index(tmp_path, caplog):
+    api, _, _ = environment(tmp_path)
+    technical = tmp_path / "events.jsonl"
+    origin = datetime(2026, 9, 4, tzinfo=timezone.utc)
+    rows = [{"type": "alarm_started",
+             "timestamp": (origin + timedelta(minutes=index)).timestamp(),
+             "status": "active", "alarm": {"code": f"4:test-{index}",
+             "message": f"event {index}", "module": 4, "level": "warning"}}
+            for index in range(20_749)]
+    write_jsonl(technical, rows)
+    raw = technical.read_bytes()
+    rebuild_timeline_index(technical)
+    api = GuardianResearchApi(replace(api.paths, technical_events=technical),
+                              cursor_secret=b"test")
+
+    with caplog.at_level(logging.INFO, logger="guardian_battery.research"):
+        _, response = core_for_crash(api, "&profile=true")
+
+    assert response.status == 200
+    profile = json.loads(next(record.message.removeprefix("RESEARCH_CORE_PROFILE ")
+        for record in caplog.records
+        if record.message.startswith("RESEARCH_CORE_PROFILE ")))
+    stage = profile["stages"]["alarms"]
+    assert stage["status"] == "complete"
+    assert stage["read_mode"] == "timeline_block_index"
+    assert stage["index_present"] is True and stage["index_valid"] is True
+    assert 0 < stage["selected_blocks"] < 10
+    assert stage["raw_bytes_read"] < len(raw)
+    assert stage["records_inspected"] < len(rows)
+    assert stage["full_json_decode_count"] == stage["records_inspected"]
+    assert technical.read_bytes() == raw
+
+
+def test_soc_crash_core_large_alarm_source_without_index_is_unavailable(tmp_path):
+    api, _, _ = environment(tmp_path)
+    technical = tmp_path / "events.jsonl"
+    row = {"type": "alarm_started", "timestamp": datetime(
+        2026, 9, 11, 10, tzinfo=timezone.utc).timestamp(), "status": "active",
+        "alarm": {"code": "4:test", "message": "test", "module": 4,
+                  "level": "warning"}}
+    write_jsonl(technical, [row] * 4_000)
+    api = GuardianResearchApi(replace(api.paths, technical_events=technical),
+                              cursor_secret=b"test")
+
+    _, response = core_for_crash(api)
+
+    assert response.status == 200
+    assert response.body["data"]["event_context"]["alarms"] == {
+        "evidence_class": "OBSERVED", "quality": "unavailable", "records": []}
+    assert response.body["data"]["coverage"]["alarms"]["quality"] == "unavailable"
 
 
 def test_soc_crash_core_passes_one_absolute_deadline_to_detector_and_readers(

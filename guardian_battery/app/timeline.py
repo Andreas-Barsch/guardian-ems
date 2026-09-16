@@ -10,6 +10,9 @@ from typing import Any, Iterable, Mapping
 
 from maintenance_service import MaintenanceService
 from maintenance_ui import maintenance_deep_link
+from timeline_index import (SMALL_SOURCE_MAX_BYTES, TimelineIndexError,
+                            index_path as timeline_index_path,
+                            select_ranges as select_timeline_ranges)
 
 
 DEFAULT_TECHNICAL_EVENT_FILE = Path("/share/guardian_battery/events.jsonl")
@@ -84,6 +87,79 @@ class TechnicalEventSource:
                 ) from exc
             events.append(self._project(raw, line_number))
         return events
+
+    @staticmethod
+    def validate_index_record(raw: Any) -> None:
+        TechnicalEventSource._project(raw, 1)
+
+    def read_range(self, timestamp_from: str, timestamp_to: str, *, check=None,
+                   profile=None) -> tuple[list[TimelineEvent], bool]:
+        """Read a bounded event range, or report that indexed evidence is unavailable."""
+        if profile is not None:
+            profile.update({"read_mode": "not_observed", "index_present": False,
+                "index_valid": False, "selected_blocks": 0, "selected_bytes": 0,
+                "raw_bytes_read": 0, "records_inspected": 0,
+                "full_json_decode_count": 0, "open_suffix_bytes": 0,
+                "files_discovered": 1, "files_opened": 0, "bytes_read": 0,
+                "samples_returned": 0})
+        if not self.path.exists():
+            return [], True
+        start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
+        end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
+        size = self.path.stat().st_size
+        try:
+            ranges, selection = select_timeline_ranges(self.path, start_epoch, end_epoch)
+        except TimelineIndexError:
+            present = timeline_index_path(self.path).is_file()
+            if profile is not None:
+                profile["index_present"] = present
+            if size > SMALL_SOURCE_MAX_BYTES:
+                return [], False
+            ranges = [{"byte_start": 0, "byte_end": size, "line_start": 1,
+                       "open_suffix": True}]
+            selection = {"index_present": present, "index_valid": False,
+                "selected_blocks": 0, "selected_bytes": size,
+                "open_suffix_bytes": size, "read_mode": "bounded_small_source"}
+        if profile is not None:
+            profile.update(selection)
+        events = []
+        try:
+            with self.path.open("rb") as handle:
+                if profile is not None:
+                    profile["files_opened"] = 1
+                for selected_range in ranges:
+                    range_start = selected_range["byte_start"]
+                    range_end = selected_range["byte_end"]
+                    line_number = selected_range["line_start"]
+                    handle.seek(range_start)
+                    while handle.tell() < range_end:
+                        if check is not None:
+                            check()
+                        raw_line = handle.readline(range_end - handle.tell())
+                        if not raw_line:
+                            break
+                        if profile is not None:
+                            profile["raw_bytes_read"] += len(raw_line)
+                            profile["bytes_read"] += len(raw_line)
+                            profile["records_inspected"] += int(bool(raw_line.strip()))
+                        if not raw_line.strip():
+                            line_number += 1
+                            continue
+                        if not raw_line.endswith(b"\n") and handle.tell() >= self.path.stat().st_size:
+                            continue
+                        raw = json.loads(raw_line)
+                        if profile is not None:
+                            profile["full_json_decode_count"] += 1
+                        event = self._project(raw, line_number)
+                        line_number += 1
+                        epoch = datetime.fromisoformat(event.timestamp).timestamp()
+                        if start_epoch <= epoch <= end_epoch:
+                            events.append(event)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TechnicalHistoryError("technical event history is unavailable") from exc
+        if profile is not None:
+            profile["samples_returned"] = len(events)
+        return events, True
 
     @staticmethod
     def _project(raw: Any, line_number: int) -> TimelineEvent:

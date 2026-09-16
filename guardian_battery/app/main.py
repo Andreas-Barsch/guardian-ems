@@ -45,6 +45,8 @@ from config_ui import (configure_canonical_phase, configure_hycube_projection,
                        update_display_projection_startup)
 from maintenance_mqtt import MaintenanceMqttPublisher
 from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
+from timeline import TechnicalEventSource
+from timeline_index import TimelineIndexWorker
 from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_text)
@@ -1464,6 +1466,7 @@ def main() -> None:
     rs485_writer = None
     rs485_pipeline = None
     aggregate_backfill_worker = None
+    timeline_index_worker = None
     if bool(options.get("rs485_sniffer_enabled", False)):
         rs485_writer = Rs485EvidenceWriter(DEFAULT_RS485_HISTORY_DIR)
         rs485_pipeline = Rs485EvidencePipeline(rs485_writer)
@@ -1521,6 +1524,14 @@ def main() -> None:
         LOG.info("RS485 evidence lifecycle: writer start requested")
         rs485_writer.start()
         rs485_reader.start()
+    try:
+        timeline_index_worker = TimelineIndexWorker(
+            EVENT_FILE, validate_record=TechnicalEventSource.validate_index_record,
+            logger=LOG)
+        timeline_index_worker.start()
+    except Exception as exc:
+        timeline_index_worker = None
+        LOG.warning("Timeline index worker could not be started: %s", exc)
     aggregate_backfill_worker = DiagnosticAggregateBackfillWorker(
         DiagnosticAggregateBackfill(CELL_HISTORY_DIR, DEFAULT_POSITION_HISTORY_FILE),
         aggregate_store, options, logger=LOG)
@@ -1534,6 +1545,8 @@ def main() -> None:
             rs485_reader.stop()
         if rs485_writer is not None:
             rs485_writer.stop()
+        if timeline_index_worker is not None:
+            timeline_index_worker.stop()
         if display_projection_worker is not None:
             display_projection_worker.stop()
         console.close()
@@ -1955,6 +1968,12 @@ def main() -> None:
                 poll_deadline.consume()
             time.sleep(poll_deadline.delay())
     finally:
+        if timeline_index_worker is not None:
+            try:
+                if not timeline_index_worker.stop():
+                    LOG.warning("Timeline index worker did not stop within timeout")
+            except Exception as exc:
+                LOG.warning("Timeline index worker stop failed: %s", exc)
         if canonical_phase_worker is not None:
             try:
                 if not canonical_phase_worker.stop():

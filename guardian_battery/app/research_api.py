@@ -806,13 +806,23 @@ class GuardianResearchApi:
             return {"quality": "unknown", "record": None}
         return {"quality": "complete" if selected else "absent", "record": selected}
 
-    def _alarms(self, values, deadline=None):
+    def _alarms(self, values, deadline=None, *, bounded=False, io_profile=None):
         start, end = self._range(values)
         rows = []
         check = ((lambda: self._ensure_package_deadline(deadline))
                  if deadline is not None else None)
-        for event in TechnicalEventSource(self.paths.technical_events).read(
-                check=check) if self.paths.technical_events else ():
+        available = True
+        if self.paths.technical_events:
+            source = TechnicalEventSource(self.paths.technical_events)
+            if bounded:
+                events, available = source.read_range(
+                    start, end, check=check, profile=io_profile)
+            else:
+                events = source.read(check=check)
+        else:
+            events = ()
+            available = False
+        for event in events:
             if not start <= event.timestamp <= end or not event.event_type.startswith("alarm_"): continue
             identity = (self.identity.serial_at(event.module_number, event.timestamp)
                         if event.module_number else {"resolved": False, "physical_serial": None})
@@ -827,7 +837,8 @@ class GuardianResearchApi:
                 "identity_resolved": identity.get("resolved", False)})
         return research_envelope(source="guardian.events", evidence_class="OBSERVED",
             authoritative=True, timestamp_from=start, timestamp_to=end, resolution="events",
-            data={"alarms": rows}, quality="complete" if self.paths.technical_events else "unknown")
+            data={"alarms": rows}, quality=("complete" if available else
+                "unknown" if not self.paths.technical_events else "unavailable"))
 
     @staticmethod
     def _package_profile():
@@ -857,7 +868,7 @@ class GuardianResearchApi:
                 "index_present": None, "index_valid": None,
                 "selected_blocks": 0, "selected_bytes": 0,
                 "raw_bytes_read": 0, "identity_checkpoint_used": False,
-                "open_suffix_bytes": 0,
+                "open_suffix_bytes": 0, "full_json_decode_count": 0,
                 "read_mode": "not_observed"} for name in CORE_PROFILE_STAGES},
             "counts": {"cell_history_queries": 0, "cell_history_scans": 0,
                 "target_records": 0, "peer_records": 0, "peer_modules": 0,
@@ -917,7 +928,7 @@ class GuardianResearchApi:
                 stage["index_valid"] = io_profile.get("index_valid")
                 stage["read_mode"] = io_profile.get("read_mode", "not_observed")
                 for key in ("selected_blocks", "selected_bytes", "raw_bytes_read",
-                            "open_suffix_bytes"):
+                            "open_suffix_bytes", "full_json_decode_count"):
                     stage[key] = io_profile.get(key, 0)
                 stage["identity_checkpoint_used"] = bool(
                     io_profile.get("identity_checkpoint_used", False))
@@ -1268,10 +1279,12 @@ class GuardianResearchApi:
             profile, "canonical_phase", deadline,
             lambda: self._phases({"physical_serial": serial,
                 "from": target_start, "to": target_end}))
+        alarm_io = {} if profile is not None else None
         alarms_envelope = self._run_package_stage(
             profile, "alarms", deadline,
             lambda: self._alarms({"physical_serial": serial,
-                "from": target_start, "to": target_end}, deadline=deadline))
+                "from": target_start, "to": target_end}, deadline=deadline,
+                bounded=True, io_profile=alarm_io), io_profile=alarm_io)
         maintenance_envelope = self._run_package_stage(
             profile, "maintenance", deadline,
             lambda: self._maintenance({"physical_serial": serial,
@@ -1300,6 +1313,8 @@ class GuardianResearchApi:
                 [row["occurred_at"] for row in maintenance_envelope["data"]["events"]])}
         if not self.paths.technical_events:
             coverage["alarms"]["quality"] = "unavailable"
+        elif alarms_envelope["quality"]["status"] != "complete":
+            coverage["alarms"]["quality"] = alarms_envelope["quality"]["status"]
         if not self.paths.maintenance or not Path(self.paths.maintenance).exists():
             coverage["maintenance"]["quality"] = "unavailable"
         if profile is not None:

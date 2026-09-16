@@ -407,6 +407,8 @@ def test_main_lifecycle_enabled_reader_persists_0x92_and_logs(tmp_path, caplog):
         "rs485_writer.start()")
     assert source.index("rs485_writer.start()") < source.index("rs485_reader.start()")
     assert source.index("rs485_reader.start()") < source.index(
+        "timeline_index_worker.start()")
+    assert source.index("timeline_index_worker.start()") < source.index(
         "aggregate_backfill_worker.start()")
     assert source.index("aggregate_backfill_worker.start()") < source.index(
         "persistence_worker.start()")
