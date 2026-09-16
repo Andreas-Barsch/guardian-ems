@@ -1552,6 +1552,7 @@ def main() -> None:
     if rs485_reader is not None:
         restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
         rs485_reader.restore_identities(restored_identities)
+        LOG.info("RS485 evidence lifecycle: writer start requested")
         rs485_writer.start()
         rs485_reader.start()
     try:

@@ -125,11 +125,22 @@ class Rs485EvidenceWriter:
         self.bytes_written = 0
         self.dropped_records = 0
         self.last_error = None
+        self.index_last_run_at = None
+        self.index_files_seen = 0
+        self.index_last_error = None
         self._first_record_logged = False
+        self._index_first_run_logged = False
+        self._index_first_candidate_logged = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
             return False
+        LOG.info(
+            "RS485 evidence lifecycle: writer start entered "
+            "directory_contract=%s directory_matches_contract=%s",
+            DEFAULT_RS485_HISTORY_DIR,
+            self.directory == DEFAULT_RS485_HISTORY_DIR,
+        )
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -140,9 +151,14 @@ class Rs485EvidenceWriter:
         self._thread = threading.Thread(target=self._run, name="guardian-rs485-evidence", daemon=True)
         self._thread.start()
         self._index_thread = threading.Thread(
-            target=self._run_indexer, name="guardian-rs485-index", daemon=True)
+            target=self._index_thread_main, name="guardian-rs485-index", daemon=True)
         self._index_thread.start()
-        LOG.info("RS485 evidence writer started: path=%s", self.directory)
+        LOG.info(
+            "RS485 evidence writer started: directory_contract=%s "
+            "evidence_thread_alive=%s index_thread_alive=%s",
+            DEFAULT_RS485_HISTORY_DIR, self._thread.is_alive(),
+            self._index_thread.is_alive(),
+        )
         return True
 
     def append(self, record: dict) -> bool:
@@ -156,7 +172,13 @@ class Rs485EvidenceWriter:
     def status(self):
         return {"queue_depth": self._queue.qsize(), "queue_capacity": self._queue.maxsize,
                 "records_written": self.records_written, "bytes_written": self.bytes_written,
-                "dropped_records": self.dropped_records, "last_error": self.last_error}
+                "dropped_records": self.dropped_records, "last_error": self.last_error,
+                "writer_thread_alive": bool(self._thread and self._thread.is_alive()),
+                "index_thread_alive": bool(
+                    self._index_thread and self._index_thread.is_alive()),
+                "index_last_run_at": self.index_last_run_at,
+                "index_files_seen": self.index_files_seen,
+                "index_last_error": self.index_last_error}
 
     def stop(self, timeout=5.0):
         self._stop.set()
@@ -209,31 +231,65 @@ class Rs485EvidenceWriter:
                 batch.clear()
                 deadline = time.monotonic() + self.flush_interval_seconds
 
+    def _index_thread_main(self):
+        try:
+            self._run_indexer()
+        except Exception as exc:
+            self.index_last_error = type(exc).__name__
+            LOG.error(
+                "RS485 evidence lifecycle: index thread exited reason=error "
+                "exception_type=%s", type(exc).__name__)
+
     def _run_indexer(self):
         """Advance disposable indexes in bounded units outside Research reads."""
+        LOG.info("RS485 evidence lifecycle: index thread entered")
         while True:
             progressed = False
             today = datetime.now(timezone.utc).date().isoformat()
             try:
-                for path in sorted(self.directory.glob("*.jsonl"), reverse=True):
+                candidates = sorted(self.directory.glob("*.jsonl"), reverse=True)
+                self.index_last_run_at = time.time()
+                self.index_files_seen = len(candidates)
+                if not self._index_first_run_logged:
+                    LOG.info(
+                        "RS485 evidence lifecycle: index first run candidate_files=%s",
+                        len(candidates))
+                    self._index_first_run_logged = True
+                for path in candidates:
                     before = None
                     sidecar = Path(str(path) + ".idx")
+                    first_candidate = not self._index_first_candidate_logged
+                    if first_candidate:
+                        LOG.info(
+                            "RS485 evidence lifecycle: index first candidate "
+                            "day_file=%s sidecar_present=%s",
+                            path.name, sidecar.exists())
+                        self._index_first_candidate_logged = True
                     try:
                         before = sidecar.stat().st_size
                     except OSError:
                         pass
-                    extend_rs485_history_index(
+                    result = extend_rs485_history_index(
                         path, max_blocks=1, close_source=path.stem < today)
+                    self.index_last_error = None
+                    if first_candidate:
+                        LOG.info(
+                            "RS485 evidence lifecycle: index first extend result=success "
+                            "indexed_size=%s block_count=%s",
+                            int(result.get("indexed_size", 0)),
+                            len(result.get("blocks", ())))
                     try:
                         progressed = progressed or sidecar.stat().st_size != before
                     except OSError:
                         pass
                     if progressed:
                         break
-            except Exception:
+            except Exception as exc:
                 # Raw evidence remains authoritative; index maintenance is best effort.
+                self.index_last_error = type(exc).__name__
                 LOG.warning("RS485 history index maintenance failed", exc_info=True)
             if self._index_stop.is_set():
+                LOG.info("RS485 evidence lifecycle: index thread exited reason=stop")
                 break
             self._index_wakeup.wait(
                 self.index_interval_seconds if progressed else self.flush_interval_seconds)
