@@ -11,11 +11,14 @@ from urllib.parse import quote
 
 import pytest
 
-from position_history import PositionSnapshot
+from position_history import PositionHistoryLog, PositionSnapshot
 from maintenance import new_maintenance_event
 from research_api import (CORE_EVIDENCE_VERSION, CORE_PROFILE_STAGES,
                           EVIDENCE_PACKAGE_TIMEOUT_SECONDS, GuardianResearchApi,
                           PACKAGE_PROFILE_STAGES, QUERY_TIMEOUT_SECONDS,
+                          RAW_EVIDENCE_MAX_PAGE_RECORDS,
+                          RAW_EVIDENCE_MAX_SCAN_RECORDS,
+                          RAW_EVIDENCE_MAX_WINDOW_SECONDS,
                           QueryGate, READER_ACCOUNTED_TIMINGS, ResearchPaths,
                           research_envelope)
 from research_identity import ResearchIdentityResolver
@@ -25,6 +28,7 @@ from rs485_history_index import rebuild as rebuild_rs485_index
 from timeline_index import rebuild as rebuild_timeline_index
 import research_timeseries
 import research_api
+import research_identity
 from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
                      RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT)
 
@@ -280,6 +284,345 @@ def test_status_is_read_only_and_sources_are_explicit(tmp_path):
     assert "guardian.cell_history" in response.body["available_sources"]
     rejected = api.handle("POST", "/api/research/status")
     assert rejected.status == 405 and rejected.headers["Allow"] == "GET"
+
+
+def test_external_research_capabilities_are_scan_free_and_explicit(tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    monkeypatch.setattr(api, "_refresh_identity",
+                        lambda: pytest.fail("status must not refresh history"))
+    monkeypatch.setattr(api.series, "evidence_by_serial",
+                        lambda *args, **kwargs: pytest.fail("status must not scan history"))
+    response = get(api, "status")
+    contract = response.body["external_research_contract"]
+    source = contract["sources"]["guardian.cell_history"]
+    assert response.status == 200
+    assert contract["scan_free_capability_discovery"] is True
+    assert contract["acquisition_priority"] == "not_enforced_for_research_io"
+    assert contract["background_io_budget_available"] is False
+    assert contract["raw_evidence_endpoint"] == "/api/research/evidence/raw"
+    assert contract["required_parameters"] == [
+        "source", "physical_serial", "from", "to", "fields"]
+    assert contract["unbounded_access"] is False
+    assert source == {"physical_access": "required_block_index",
+        "index_required": True, "index_availability": "validated_per_requested_day",
+        "fallback": "fail_closed", "max_window_seconds": RAW_EVIDENCE_MAX_WINDOW_SECONDS,
+        "max_page_records": RAW_EVIDENCE_MAX_PAGE_RECORDS,
+        "max_scanned_records": RAW_EVIDENCE_MAX_SCAN_RECORDS,
+        "fields": sorted(research_api.RAW_EVIDENCE_FIELDS),
+        "pagination": "signed_cursor"}
+
+
+def test_external_raw_evidence_requires_bounds_and_rejects_before_history_io(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    monkeypatch.setattr(api, "_refresh_identity",
+                        lambda: pytest.fail("invalid request refreshed identity history"))
+    monkeypatch.setattr(api.series, "evidence_by_serial",
+                        lambda *args, **kwargs: pytest.fail("invalid request touched history"))
+    base = ("evidence/raw?source=guardian.cell_history&physical_serial=SERIAL-M4"
+            "&fields=timestamp,soc")
+    for missing_range in (base + "&to=2026-09-11T01:00:00Z",
+                          base + "&from=2026-09-11T00:00:00Z"):
+        missing = get(api, missing_range)
+        assert missing.status == 400 and missing.body["error"]["code"] == "invalid_argument"
+    empty = get(api, base + "&from=2026-09-11T01:00:00Z"
+                "&to=2026-09-11T01:00:00Z")
+    assert empty.status == 400 and empty.body["error"]["code"] == "invalid_argument"
+    oversized = get(api, "evidence/raw?source=guardian.cell_history&physical_serial=SERIAL-M4"
+        "&from=2026-09-11T00:00:00Z&to=2026-09-11T06:00:01Z&fields=timestamp,soc")
+    assert oversized.status == 413 and oversized.body["error"]["code"] == "range_too_large"
+    excessive_page = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:00:00Z"
+        "&to=2026-09-11T12:00:00Z&fields=soc&max_records=501")
+    assert excessive_page.status == 400
+    unknown_source = get(api, "evidence/raw?source=guardian.unknown"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:00:00Z"
+        "&to=2026-09-11T12:00:00Z&fields=soc")
+    assert unknown_source.status == 400
+    invalid_field = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:00:00Z"
+        "&to=2026-09-11T12:00:00Z&fields=soc,secret_internal_field")
+    assert invalid_field.status == 400
+
+
+def test_external_raw_evidence_is_indexed_bounded_identity_aware_and_paginated(tmp_path):
+    api, first, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    original = path.read_bytes()
+    build_index(path, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    query = ("evidence/raw?source=guardian.cell_history&physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:59:00Z&to=2026-09-11T10:10:00Z"
+        "&fields=timestamp,soc,current,voltage,cell_01,cell_15,temperature_channels"
+        "&max_records=2")
+    first_page = get(api, query)
+    assert first_page.status == 200
+    assert first_page.body["semantics_version"] == "guardian_external_raw_evidence_v1"
+    assert first_page.body["truncated"] is True and first_page.body["next_cursor"]
+    assert first_page.body["data"]["physical_access"]["read_mode"] == "indexed_chunk"
+    assert first_page.body["data"]["physical_access"]["index_valid"] is True
+    first_record = first_page.body["data"]["records"][0]
+    assert first_record["physical_serial"] == "SERIAL-M4"
+    assert first_record["position_at_time"] == 4
+    assert first_record["position_history_id"] == first.position_history_id
+    assert first_record["cell_01"] == 3300.0 and first_record["cell_15"] == 3314.0
+    assert first_record["voltage"] == pytest.approx(sum(range(3300, 3315)) / 1000)
+    second_page = get(api, query + "&cursor=" + quote(first_page.body["next_cursor"]))
+    assert second_page.status == 200
+    assert second_page.body["data"]["records"][0]["soc"] == 67
+    wrong_query = query.replace("fields=timestamp", "fields=soc,timestamp")
+    invalid = get(api, wrong_query + "&cursor=" + quote(first_page.body["next_cursor"]))
+    assert invalid.status == 400 and invalid.body["error"]["code"] == "cursor_invalid"
+    other_serial = query.replace("SERIAL-M4", "SERIAL-M5")
+    invalid = get(api, other_serial + "&cursor=" + quote(first_page.body["next_cursor"]))
+    assert invalid.status == 400 and invalid.body["error"]["code"] == "cursor_invalid"
+    other_window = query.replace("09:59:00Z", "09:58:00Z")
+    invalid = get(api, other_window + "&cursor=" + quote(first_page.body["next_cursor"]))
+    assert invalid.status == 400 and invalid.body["error"]["code"] == "cursor_invalid"
+    assert path.read_bytes() == original
+
+
+def test_external_raw_evidence_preserves_missing_values_as_null(tmp_path):
+    api, _, _ = environment(tmp_path)
+    path = api.paths.cell_history / "2026-09-11.jsonl"
+    epoch = datetime(2026, 9, 11, 10, tzinfo=timezone.utc).timestamp()
+    write_jsonl(path, [{"timestamp": epoch, "module": 4,
+        "module_serial": "SERIAL-M4", "soc_percent": 70}])
+    build_index(path, timestamp_field="timestamp", iso_timestamp=False, block_records=1)
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:59:00Z"
+        "&to=2026-09-11T10:01:00Z&fields=current,voltage,cell_01")
+    assert response.status == 200
+    record = response.body["data"]["records"][0]
+    assert record["current"] is record["voltage"] is record["cell_01"] is None
+
+
+@pytest.mark.parametrize("index_state", ["missing", "invalid"])
+def test_external_raw_evidence_fails_closed_without_valid_index(
+        tmp_path, monkeypatch, index_state):
+    api, _, _ = environment(tmp_path)
+    source = api.paths.cell_history / "2026-09-11.jsonl"
+    original_open = Path.open
+    source_reads = []
+    if index_state == "invalid":
+        index_path(source).write_text("{}", encoding="utf-8")
+
+    def tracked_open(path, mode="r", *args, **kwargs):
+        if Path(path) == source and "r" in mode:
+            source_reads.append(mode)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:00:00Z"
+        "&to=2026-09-11T12:00:00Z&fields=timestamp,soc")
+    assert response.status == 503
+    assert response.body["error"]["code"] == "source_unavailable"
+    assert source_reads == []
+
+
+def test_external_raw_evidence_unknown_serial_is_explicitly_absent(tmp_path):
+    api, _, _ = environment(tmp_path)
+    source = api.paths.cell_history / "2026-09-11.jsonl"
+    build_index(source, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=UNKNOWN-SERIAL&from=2026-09-11T09:00:00Z"
+        "&to=2026-09-11T12:00:00Z&fields=timestamp,soc")
+    assert response.status == 200
+    assert response.body["quality"]["status"] == "unavailable"
+    assert response.body["data"]["records"] == []
+    assert response.body["data"]["coverage"]["quality"] == "unavailable"
+
+
+def test_external_raw_evidence_cursor_expires_when_source_changes(tmp_path):
+    api, _, _ = environment(tmp_path)
+    source = api.paths.cell_history / "2026-09-11.jsonl"
+    build_index(source, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    query = ("evidence/raw?source=guardian.cell_history&physical_serial=SERIAL-M4"
+        "&from=2026-09-11T09:59:00Z&to=2026-09-11T10:10:00Z"
+        "&fields=timestamp,soc&max_records=2")
+    first = get(api, query)
+    assert first.status == 200 and first.body["next_cursor"]
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"timestamp": datetime(
+            2026, 9, 11, 10, 9, tzinfo=timezone.utc).timestamp(),
+            "module": 4, "module_serial": "SERIAL-M4", "soc_percent": 60}) + "\n")
+    build_index(source, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    expired = get(api, query + "&cursor=" + quote(first.body["next_cursor"]))
+    assert expired.status == 400 and expired.body["error"]["code"] == "cursor_invalid"
+
+
+def test_external_raw_evidence_matching_record_limit_fails_closed(tmp_path):
+    api, _, _ = environment(tmp_path)
+    source = api.paths.cell_history / "2026-09-11.jsonl"
+    base = datetime(2026, 9, 11, 10, tzinfo=timezone.utc).timestamp()
+    write_jsonl(source, [{"timestamp": base + index / 2, "module": 4,
+        "module_serial": "SERIAL-M4", "soc_percent": 70}
+        for index in range(RAW_EVIDENCE_MAX_SCAN_RECORDS + 1)])
+    build_index(source, timestamp_field="timestamp", iso_timestamp=False, block_records=256)
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:59:00Z"
+        "&to=2026-09-11T12:00:00Z&fields=timestamp,soc")
+    assert response.status == 413
+    assert response.body["error"]["code"] == "range_too_dense"
+
+
+def test_external_raw_evidence_does_not_touch_unrequested_historical_days(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    requested = api.paths.cell_history / "2026-09-11.jsonl"
+    build_index(requested, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    unrelated = api.paths.cell_history / "2020-01-01.jsonl"
+    write_jsonl(unrelated, [{"timestamp": 1, "module_serial": "SERIAL-M4"}])
+    original_open = Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        if Path(path) == unrelated:
+            pytest.fail("unrequested system-age history was opened")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:00:00Z"
+        "&to=2026-09-11T12:00:00Z&fields=timestamp,soc")
+    assert response.status == 200
+
+
+def test_external_raw_evidence_selects_only_overlapping_index_blocks(tmp_path):
+    api, _, _ = environment(tmp_path)
+    source = api.paths.cell_history / "2026-09-11.jsonl"
+    index = build_index(source, timestamp_field="timestamp", iso_timestamp=False,
+                        block_records=2)
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T10:03:30Z"
+        "&to=2026-09-11T10:04:30Z&fields=timestamp,soc")
+    access = response.body["data"]["physical_access"]
+    start_epoch = datetime(2026, 9, 11, 10, 3, 30, tzinfo=timezone.utc).timestamp()
+    end_epoch = datetime(2026, 9, 11, 10, 4, 30, tzinfo=timezone.utc).timestamp()
+    overlapping = [block for block in index["blocks"]
+                   if block["max_timestamp"] >= start_epoch
+                   and block["min_timestamp"] <= end_epoch]
+    expected = sum(block["end_offset"] - block["start_offset"]
+                   for block in overlapping)
+    assert response.status == 200
+    assert len(overlapping) == 2
+    assert access["selected_ranges"] == 1
+    assert access["selected_bytes"] == access["raw_bytes_read"] == expected
+    assert access["records_inspected"] == 4
+    assert access["full_json_decode_count"] == 3
+    assert access["record_materialization_count"] == 1
+
+
+def test_external_raw_evidence_never_reads_complete_position_history(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    source = api.paths.cell_history / "2026-09-11.jsonl"
+    build_index(source, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    monkeypatch.setattr(PositionHistoryLog, "read_all",
+                        lambda self: pytest.fail("bounded request called read_all"))
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:59:00Z"
+        "&to=2026-09-11T10:10:00Z&fields=timestamp,soc")
+    assert response.status == 200
+    assert response.body["data"]["physical_access"]["identity_assignment_count"] == 5
+
+
+def test_deferred_production_identity_snapshot_keeps_status_and_raw_requests_scan_free(
+        tmp_path, monkeypatch):
+    prepared, first, second = environment(tmp_path)
+    source = prepared.paths.cell_history / "2026-09-11.jsonl"
+    build_index(source, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    api = GuardianResearchApi(prepared.paths, cursor_secret=b"test", defer_identity=True)
+    monkeypatch.setattr(PositionHistoryLog, "read_all",
+                        lambda self: pytest.fail("HTTP request called read_all"))
+    assert get(api, "status").status == 200
+    unavailable = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:59:00Z"
+        "&to=2026-09-11T10:10:00Z&fields=timestamp,soc")
+    assert unavailable.status == 503
+    api.install_identity_snapshot((first, second),
+                                  api._file_signature(api.paths.position_history))
+    available = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:59:00Z"
+        "&to=2026-09-11T10:10:00Z&fields=timestamp,soc")
+    assert available.status == 200
+
+
+def test_external_raw_identity_lookup_cost_ignores_unrelated_older_history(
+        tmp_path, monkeypatch):
+    positions = tmp_path / "position.jsonl"
+    old = [snapshot((datetime(2020, 1, 1, tzinfo=timezone.utc)
+        + timedelta(minutes=index)).isoformat(), {4: "SERIAL-M4"})
+        for index in range(1000)]
+    current = snapshot("2026-09-11T00:00:00Z", {4: "SERIAL-M4"})
+    write_jsonl(positions, [item.to_dict() for item in (*old, current)])
+    history = tmp_path / "cells"
+    base = datetime(2026, 9, 11, 10, tzinfo=timezone.utc).timestamp()
+    write_jsonl(history / "2026-09-11.jsonl", [{"timestamp": base + index * 60,
+        "module": 4, "module_serial": "SERIAL-M4", "soc_percent": 70}
+        for index in range(4)])
+    build_index(history / "2026-09-11.jsonl", timestamp_field="timestamp",
+                iso_timestamp=False, block_records=2)
+    api = GuardianResearchApi(ResearchPaths(history, positions,
+        tmp_path / "maintenance.jsonl", tmp_path / "canonical", tmp_path / "daily"),
+        cursor_secret=b"test")
+    bisect_calls = []
+    real_bisect = research_identity.bisect_right
+    monkeypatch.setattr(research_identity, "bisect_right",
+                        lambda values, target: bisect_calls.append(len(values))
+                        or real_bisect(values, target))
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:59:00Z"
+        "&to=2026-09-11T10:05:00Z&fields=timestamp,soc")
+    access = response.body["data"]["physical_access"]
+    assert response.status == 200
+    assert access["identity_assignment_count"] == 4
+    assert access["record_materialization_count"] == 4
+    assert len(bisect_calls) == 8
+
+
+def test_external_raw_identity_snapshot_preserves_position_epoch_change(tmp_path):
+    positions = tmp_path / "position.jsonl"
+    before = snapshot("2026-09-11T10:00:00Z", {4: "SERIAL-M4"})
+    after = snapshot("2026-09-11T10:03:00Z", {2: "SERIAL-M4"})
+    write_jsonl(positions, [before.to_dict(), after.to_dict()])
+    history = tmp_path / "cells"
+    write_jsonl(history / "2026-09-11.jsonl", [
+        {"timestamp": datetime(2026, 9, 11, 10, 2, tzinfo=timezone.utc).timestamp(),
+         "module": 4, "module_serial": "SERIAL-M4",
+         "position_history_id": before.position_history_id, "soc_percent": 70},
+        {"timestamp": datetime(2026, 9, 11, 10, 4, tzinfo=timezone.utc).timestamp(),
+         "module": 2, "module_serial": "SERIAL-M4",
+         "position_history_id": after.position_history_id, "soc_percent": 69}])
+    build_index(history / "2026-09-11.jsonl", timestamp_field="timestamp",
+                iso_timestamp=False, block_records=1)
+    api = GuardianResearchApi(ResearchPaths(history, positions,
+        tmp_path / "maintenance.jsonl", tmp_path / "canonical", tmp_path / "daily"),
+        cursor_secret=b"test")
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T10:01:00Z"
+        "&to=2026-09-11T10:05:00Z&fields=timestamp,soc")
+    records = response.body["data"]["records"]
+    assert [item["position_at_time"] for item in records] == [4, 2]
+    assert [item["position_history_id"] for item in records] == [
+        before.position_history_id, after.position_history_id]
+    assert records[0]["identity_epoch_id"] != records[1]["identity_epoch_id"]
+
+
+def test_external_raw_identity_change_fails_closed_without_refresh(
+        tmp_path, monkeypatch):
+    api, _, _ = environment(tmp_path)
+    source = api.paths.cell_history / "2026-09-11.jsonl"
+    build_index(source, timestamp_field="timestamp", iso_timestamp=False, block_records=2)
+    with api.paths.position_history.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(snapshot(
+            "2026-09-13T00:00:00Z", {3: "SERIAL-M4"}).to_dict()) + "\n")
+    monkeypatch.setattr(PositionHistoryLog, "read_all",
+                        lambda self: pytest.fail("stale snapshot triggered read_all"))
+    response = get(api, "evidence/raw?source=guardian.cell_history"
+        "&physical_serial=SERIAL-M4&from=2026-09-11T09:59:00Z"
+        "&to=2026-09-11T10:10:00Z&fields=timestamp,soc")
+    assert response.status == 503
+    assert response.body["error"]["code"] == "source_unavailable"
 
 
 @pytest.mark.parametrize("metric", ["soc", "module_current", "module_voltage",

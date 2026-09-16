@@ -40,6 +40,7 @@ from config_ui import (configure_canonical_phase, configure_hycube_projection,
                        display_projection_startup_status,
                        configure_maintenance_live_publisher,
                        configure_rs485_status_provider,
+                       install_research_identity_snapshot,
                        record_stable_observed_positions, start_config_server,
                        start_display_projection_traced,
                        update_display_projection_startup)
@@ -1742,8 +1743,14 @@ def main() -> None:
                         cell_deadline.next_deadline, skipped_slots)
                     try:
                         identity_started = time.monotonic()
+                        identity_stat = DEFAULT_POSITION_HISTORY_FILE.stat()
+                        identity_signature_before = (
+                            identity_stat.st_size, identity_stat.st_mtime_ns)
                         identity_resolver = DocumentedIdentityResolver.from_path(
                             DEFAULT_POSITION_HISTORY_FILE)
+                        identity_stat = DEFAULT_POSITION_HISTORY_FILE.stat()
+                        identity_signature_after = (
+                            identity_stat.st_size, identity_stat.st_mtime_ns)
                         identity_load_seconds = time.monotonic() - identity_started
                     except Exception as identity_exc:
                         identity_resolver = None
@@ -1754,6 +1761,10 @@ def main() -> None:
                         modules, console, identity_resolver, cell_history,
                         parse_bat_fn=parse_bat, timing=timing,
                         identity_resolution_base=identity_load_seconds)
+                    if (identity_resolver is not None
+                            and identity_signature_before == identity_signature_after):
+                        install_research_identity_snapshot(
+                            identity_resolver.snapshots, identity_signature_after)
                     # Derived state follows durable append-only raw evidence. Its
                     # expensive JSON serialization is handled by one coalescing
                     # single-writer worker; Console ownership remains here.

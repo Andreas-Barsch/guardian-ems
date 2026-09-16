@@ -46,6 +46,11 @@ CORE_TARGET_BEFORE = timedelta(minutes=10)
 CORE_TARGET_AFTER = timedelta(minutes=30)
 CORE_PEER_BEFORE = timedelta(minutes=5)
 CORE_PEER_AFTER = timedelta(minutes=5)
+RAW_EVIDENCE_MAX_WINDOW_SECONDS = 6 * 60 * 60
+RAW_EVIDENCE_MAX_PAGE_RECORDS = 500
+RAW_EVIDENCE_MAX_SCAN_RECORDS = 10_000
+RAW_EVIDENCE_FIELDS = frozenset({"timestamp", "soc", "current", "voltage",
+    "temperature_channels", *(f"cell_{number:02d}" for number in range(1, 16))})
 LOG = logging.getLogger("guardian_battery.research")
 
 READER_ACCOUNTED_TIMINGS = (
@@ -176,13 +181,27 @@ class GuardianResearchApi:
     SOURCE_REGISTRY = frozenset({"guardian.cell_history", "guardian.hycube",
         "guardian.display_history", "guardian.canonical_phase"})
 
-    def __init__(self, paths, cursor_secret=None):
+    def __init__(self, paths, cursor_secret=None, *, defer_identity=False):
         self.paths = paths
-        self.identity = ResearchIdentityResolver.from_path(paths.position_history)
-        self._position_signature = self._file_signature(paths.position_history)
+        self.identity = (ResearchIdentityResolver(()) if defer_identity else
+                         ResearchIdentityResolver.from_path(paths.position_history))
+        self.identity.epochs()
+        self._position_signature = (None if defer_identity else
+                                    self._file_signature(paths.position_history))
+        self._identity_snapshot_ready = not defer_identity
+        self._identity_lock = threading.Lock()
         self.series = ResearchTimeseriesService(
             paths.cell_history, self.identity, CursorCodec(cursor_secret or secrets.token_bytes(32)))
         self.gate = QueryGate()
+
+    def install_identity_snapshot(self, snapshots, source_signature):
+        resolver = ResearchIdentityResolver(snapshots)
+        resolver.epochs()
+        with self._identity_lock:
+            self.identity = resolver
+            self.series.identity = resolver
+            self._position_signature = source_signature
+            self._identity_snapshot_ready = True
 
     @staticmethod
     def _file_signature(path):
@@ -194,9 +213,12 @@ class GuardianResearchApi:
     def _refresh_identity(self):
         signature = self._file_signature(self.paths.position_history)
         if signature != self._position_signature:
-            self.identity = ResearchIdentityResolver.from_path(self.paths.position_history)
-            self.series.identity = self.identity
-            self._position_signature = signature
+            identity = ResearchIdentityResolver.from_path(self.paths.position_history)
+            with self._identity_lock:
+                self.identity = identity
+                self.series.identity = identity
+                self._position_signature = signature
+                self._identity_snapshot_ready = True
 
     @staticmethod
     def _event_id(serial, start, end):
@@ -234,7 +256,8 @@ class GuardianResearchApi:
             if any(len(items) != 1 for items in raw.values()):
                 raise ResearchQueryError("invalid_argument", "parameters must occur once")
             values = {key: items[0] for key, items in raw.items()}
-            body = self.gate.run(endpoint, values.get("resolution") == "full",
+            body = self.gate.run(endpoint,
+                                 endpoint == "evidence/raw" or values.get("resolution") == "full",
                                  lambda deadline: self._dispatch(endpoint, values, deadline))
             return ApiResponse(200, body)
         except ResearchQueryError as exc:
@@ -271,6 +294,107 @@ class GuardianResearchApi:
             truncated=result["truncated"], next_cursor=result["next_cursor"],
             provenance={"physical_serial": values["physical_serial"],
                         "source_fingerprint": result["source_fingerprint"]})
+
+    def _raw_evidence(self, values, deadline):
+        allowed = {"source", "physical_serial", "from", "to", "fields",
+                   "max_records", "cursor"}
+        unexpected = sorted(set(values) - allowed)
+        if unexpected:
+            raise ResearchQueryError("invalid_argument",
+                "unsupported parameters: " + ", ".join(unexpected))
+        self._required(values, "source", "physical_serial", "from", "to", "fields")
+        if values["source"] != "guardian.cell_history":
+            raise ResearchQueryError("invalid_argument",
+                "source is not available for external raw evidence")
+        start, end = self._range(values)
+        window_seconds = (datetime.fromisoformat(end)
+                          - datetime.fromisoformat(start)).total_seconds()
+        if window_seconds <= 0:
+            raise ResearchQueryError("invalid_argument", "from must be earlier than to")
+        if window_seconds > RAW_EVIDENCE_MAX_WINDOW_SECONDS:
+            raise ResearchQueryError("range_too_large",
+                "external raw evidence range must not exceed PT6H", 413)
+        fields = tuple(dict.fromkeys(item.strip() for item in values["fields"].split(",")
+                                     if item.strip()))
+        if not fields or any(field not in RAW_EVIDENCE_FIELDS for field in fields):
+            raise ResearchQueryError("invalid_argument", "fields contain unsupported values")
+        try:
+            page_size = int(values.get("max_records", RAW_EVIDENCE_MAX_PAGE_RECORDS))
+        except ValueError as exc:
+            raise ResearchQueryError("invalid_argument", "max_records must be an integer") from exc
+        if not 1 <= page_size <= RAW_EVIDENCE_MAX_PAGE_RECORDS:
+            raise ResearchQueryError("invalid_argument", "max_records must be 1..500")
+        identity_signature = self._file_signature(self.paths.position_history)
+        with self._identity_lock:
+            if (not self._identity_snapshot_ready
+                    or identity_signature != self._position_signature):
+                raise ResearchQueryError("source_unavailable",
+                    "bounded identity snapshot is stale", 503)
+            identity_snapshot = self.identity
+        query_identity = {"source": values["source"],
+            "physical_serial": values["physical_serial"], "from": start, "to": end,
+            "fields": fields, "max_records": page_size}
+        io_profile = {}
+        evidence = self.series.evidence_by_serial((values["physical_serial"],), start, end,
+            deadline=deadline, max_records=RAW_EVIDENCE_MAX_SCAN_RECORDS,
+            io_profile=io_profile, profile_target_serial=values["physical_serial"],
+            require_index=True, identity_resolver=identity_snapshot)
+        if evidence["truncated"]:
+            raise ResearchQueryError("range_too_dense",
+                "bounded range exceeds the external raw evidence record limit", 413)
+        query_identity["source_fingerprint"] = evidence["source_fingerprint"]
+        query_hash = hashlib.sha256(json.dumps(query_identity, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        offset = self.series.cursor.decode(values["cursor"], query_hash) \
+            if values.get("cursor") else 0
+        source_rows = evidence["records"].get(values["physical_serial"], ())
+        if offset > len(source_rows):
+            raise ResearchQueryError("cursor_invalid", "cursor offset is outside the result")
+
+        def project(row):
+            projected = {"physical_serial": row["physical_serial"],
+                "position_at_time": row.get("position_at_time"),
+                "position_history_id": row.get("position_history_id"),
+                "identity_epoch_id": row.get("identity_epoch_id"),
+                "identity_resolved": row.get("identity_resolved", False),
+                "identity_source": row.get("identity_source")}
+            for field in fields:
+                if field == "timestamp": projected[field] = row.get("timestamp")
+                elif field == "soc": projected[field] = row.get("soc")
+                elif field == "current": projected[field] = row.get("module_current_a")
+                elif field == "voltage": projected[field] = row.get("module_voltage_v")
+                elif field == "temperature_channels":
+                    projected[field] = row.get("cell_temperatures_c") or []
+                else:
+                    index = int(field.removeprefix("cell_")) - 1
+                    cells = row.get("cell_voltages_mv") or ()
+                    projected[field] = cells[index] if index < len(cells) else None
+            return projected
+
+        rows = [project(row) for row in source_rows[offset:offset + page_size]]
+        next_offset = offset + len(rows)
+        truncated = next_offset < len(source_rows)
+        next_cursor = self.series.cursor.encode(query_hash, next_offset) if truncated else None
+        timestamps = [row["timestamp"] for row in source_rows if row.get("timestamp")]
+        coverage = self._evidence_coverage(start, end, timestamps, truncated=False)
+        access = {key: io_profile.get(key) for key in ("read_mode", "index_present",
+            "index_valid", "selected_bytes", "range_count", "raw_bytes_read",
+            "records_inspected", "full_json_decode_count",
+            "identity_assignment_count", "record_materialization_count",
+            "samples_returned")}
+        access["selected_ranges"] = access.pop("range_count")
+        data = {"physical_serial": values["physical_serial"], "fields": list(fields),
+            "records": rows, "record_count": len(rows),
+            "source_record_count": len(source_rows), "coverage": coverage,
+            "physical_access": access,
+            "field_evidence_classes": {field: ("DERIVED" if field == "voltage" else "OBSERVED")
+                                       for field in fields}}
+        return research_envelope(source="guardian.cell_history", evidence_class="OBSERVED",
+            authoritative=True, timestamp_from=start, timestamp_to=end, resolution="raw",
+            data=data, quality=coverage["quality"], truncated=truncated,
+            next_cursor=next_cursor, semantics_version="guardian_external_raw_evidence_v1",
+            provenance={"physical_serial": values["physical_serial"],
+                        "source_fingerprint": evidence["source_fingerprint"]})
 
     def _query_hycube(self, values):
         start, end = self._range(values)
@@ -354,7 +478,6 @@ class GuardianResearchApi:
         return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()
 
     def _dispatch(self, endpoint, values, deadline):
-        self._refresh_identity()
         if endpoint == "status":
             return {"research_schema_version": 1, "enabled": True, "schema_version": 1,
                 "read_only": True, "available_sources": sorted(self.SOURCE_REGISTRY),
@@ -368,8 +491,34 @@ class GuardianResearchApi:
                     "display_history": bool(self.paths.display_history and self.paths.display_history.exists()),
                     "config_history": bool(self.paths.config_history and self.paths.config_history.exists()),
                     "rs485": bool(self.paths.rs485_history and self.paths.rs485_history.exists())},
+                "external_research_contract": {
+                    "version": "guardian_external_research_v1",
+                    "read_only": True, "scan_free_capability_discovery": True,
+                    "acquisition_priority": "not_enforced_for_research_io",
+                    "background_io_budget_available": False,
+                    "query_timeout_seconds": QUERY_TIMEOUT_SECONDS,
+                    "max_response_bytes": MAX_RESPONSE_BYTES,
+                    "raw_evidence_endpoint": "/api/research/evidence/raw",
+                    "required_parameters": ["source", "physical_serial", "from", "to", "fields"],
+                    "unbounded_access": False,
+                    "sources": {"guardian.cell_history": {
+                        "physical_access": "required_block_index",
+                        "index_required": True,
+                        "index_availability": "validated_per_requested_day",
+                        "fallback": "fail_closed", "max_window_seconds":
+                            RAW_EVIDENCE_MAX_WINDOW_SECONDS,
+                        "max_page_records": RAW_EVIDENCE_MAX_PAGE_RECORDS,
+                        "max_scanned_records": RAW_EVIDENCE_MAX_SCAN_RECORDS,
+                        "fields": sorted(RAW_EVIDENCE_FIELDS),
+                        "pagination": "signed_cursor"}},
+                    "missing_values": "null_not_zero",
+                    "oversized_requests": "rejected_before_history_io",
+                    "recommended_query_strategy": ["status", "small_bounded_window",
+                        "follow_signed_cursor", "request_more_only_if_needed"]},
                 "last_query_at": self.gate.last_query_at, "active_queries": self.gate.active,
                 "queued_queries": self.gate.queued, "query_failures": self.gate.failures}
+        if endpoint == "evidence/raw": return self._raw_evidence(values, deadline)
+        self._refresh_identity()
         if endpoint == "topology":
             timestamp = values.get("timestamp", datetime.now(timezone.utc).isoformat())
             data = self.identity.topology_at(timestamp)

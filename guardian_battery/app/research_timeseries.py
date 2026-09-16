@@ -541,13 +541,15 @@ class ResearchTimeseriesService:
 
     def evidence_by_serial(self, physical_serials, timestamp_from, timestamp_to,
                            deadline=None, max_records=10_000, io_profile=None,
-                           profile_target_serial=None):
+                           profile_target_serial=None, require_index=False,
+                           identity_resolver=None):
         """Read at most ``max_records`` observations per identity in one scan."""
         start, end = self.normalize_range(timestamp_from, timestamp_to)
         start_epoch = datetime.fromisoformat(start).timestamp()
         end_epoch = datetime.fromisoformat(end).timestamp()
         setup_started = time.perf_counter() if io_profile is not None else None
         wanted = set(physical_serials)
+        identity_resolver = identity_resolver or self.identity
         result = {serial: deque(maxlen=max_records) for serial in wanted}
         truncated = False; truncated_serials = set()
         selected_paths = list(self._paths(start, end))
@@ -591,6 +593,9 @@ class ResearchTimeseriesService:
                 if mode != "indexed_chunk": io_profile["read_mode"] = mode
                 io_profile["selected_bytes"] += sum(end - begin for begin, end in ranges)
                 io_profile["range_count"] += len(ranges)
+            if require_index and mode != "indexed_chunk":
+                raise ResearchQueryError("source_unavailable",
+                    "bounded cell history index is unavailable", 503)
             operation_started = time.perf_counter() if io_profile is not None else None
             handle = path.open("rb")
             if io_profile is not None:
@@ -650,7 +655,8 @@ class ResearchTimeseriesService:
                         position = int(record.get("module", 0))
                         observed = record.get("module_serial")
                         if observed is None and 1 <= position <= 6:
-                            observed = self.identity.serial_at(position, timestamp).get("physical_serial")
+                            observed = identity_resolver.serial_at(
+                                position, timestamp).get("physical_serial")
                         if observed not in wanted:
                             if io_profile is not None:
                                 io_profile["timings_seconds"]["timestamp_range_check"] += (
@@ -668,7 +674,7 @@ class ResearchTimeseriesService:
                             truncated = True
                             truncated_serials.add(observed)
                         operation_started = time.perf_counter() if io_profile is not None else None
-                        identity = self.identity.position_at(observed, timestamp)
+                        identity = identity_resolver.position_at(observed, timestamp)
                         if io_profile is not None:
                             io_profile["timings_seconds"]["identity_assignment"] += (
                                 time.perf_counter() - operation_started)

@@ -18,6 +18,7 @@ class ResearchIdentityResolver:
             item.effective_at, item.created_at, item.position_history_id))
         self._effective_at = [item.effective_at for item in self.snapshots]
         self._epochs_by_serial = None
+        self._epoch_starts_by_serial = None
 
     @classmethod
     def from_path(cls, path: Path | str):
@@ -101,6 +102,8 @@ class ResearchIdentityResolver:
                 values.append(current)
             result[serial] = values
         self._epochs_by_serial = result
+        self._epoch_starts_by_serial = {serial: [datetime.fromisoformat(
+            item["valid_from"]) for item in values] for serial, values in result.items()}
         return result
 
     def epochs(self, physical_serial=None, timestamp_from=None, timestamp_to=None):
@@ -119,8 +122,12 @@ class ResearchIdentityResolver:
 
     def epoch_at(self, physical_serial, timestamp):
         target = datetime.fromisoformat(normalize_utc_timestamp(timestamp, "timestamp"))
-        for item in self.epochs(physical_serial):
-            if datetime.fromisoformat(item["valid_from"]) <= target and (
-                    item["valid_to"] is None or target < datetime.fromisoformat(item["valid_to"])):
-                return item
-        return None
+        epochs = self._all_epochs().get(physical_serial, ())
+        starts = (self._epoch_starts_by_serial or {}).get(physical_serial, ())
+        index = bisect_right(starts, target) - 1
+        if index < 0:
+            return None
+        item = epochs[index]
+        if item["valid_to"] is not None and target >= datetime.fromisoformat(item["valid_to"]):
+            return None
+        return dict(item)

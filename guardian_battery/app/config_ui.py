@@ -66,6 +66,7 @@ _HISTORY_TIMING = HistoryRequestTimingState()
 _POSITION_HISTORY_API = None
 _DIAGNOSTICS_API = None
 _RESEARCH_API = None
+_RESEARCH_IDENTITY_SNAPSHOT = None
 _MAINTENANCE_LIVE_PUBLISHER = None
 _RS485_STATUS_PROVIDER = None
 _HYCUBE_PROJECTION_PROVIDER = None
@@ -344,9 +345,26 @@ def _get_research_api():
                     display_history=DEFAULT_DISPLAY_HISTORY_DIR,
                     config_history=CONFIG_HISTORY_FILE,
                     rs485_history=DEFAULT_RS485_HISTORY_DIR,
-                ))
+                ), defer_identity=True)
+                if _RESEARCH_IDENTITY_SNAPSHOT is not None:
+                    snapshots, signature = _RESEARCH_IDENTITY_SNAPSHOT
+                    _RESEARCH_API.install_identity_snapshot(snapshots, signature)
                 LOG.info("Guardian Research API initialisiert (read-only)")
     return _RESEARCH_API
+
+
+def install_research_identity_snapshot(snapshots, source_signature):
+    """Publish one already-loaded immutable identity view without request-path I/O."""
+    global _RESEARCH_IDENTITY_SNAPSHOT
+    with _MAINTENANCE_API_LOCK:
+        if (_RESEARCH_IDENTITY_SNAPSHOT is not None
+                and _RESEARCH_IDENTITY_SNAPSHOT[1] == source_signature):
+            return False
+        value = (tuple(snapshots), source_signature)
+        _RESEARCH_IDENTITY_SNAPSHOT = value
+        if _RESEARCH_API is not None:
+            _RESEARCH_API.install_identity_snapshot(*value)
+        return True
 
 
 def record_stable_observed_positions() -> bool:
