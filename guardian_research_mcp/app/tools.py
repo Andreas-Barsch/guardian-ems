@@ -174,6 +174,22 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
             "max_points": max_points, "cell_numbers": cell_numbers, "cursor": cursor})
 
     @server.tool(annotations=READ_ONLY)
+    async def query_raw_evidence(source: str, physical_serial: str,
+                                 timestamp_from: str, timestamp_to: str,
+                                 fields: list[str],
+                                 cursor: str | None = None) -> dict[str, Any]:
+        """Return one bounded raw-evidence page unchanged. Call guardian_status first,
+        inspect external_research_contract, use the smallest sufficient window and only
+        required fields, and respect Guardian's advertised window, record, byte, and
+        scan limits. Follow the signed cursor only when another page is actually needed;
+        expand a window only when the analysis justifies a separate bounded request.
+        """
+        return await invoke("query_raw_evidence", "evidence/raw", {
+            "source": source, "physical_serial": physical_serial,
+            "from": timestamp_from, "to": timestamp_to,
+            "fields": fields, "cursor": cursor})
+
+    @server.tool(annotations=READ_ONLY)
     async def build_evidence_package(event_id: str, before: str = "P1D",
                                      after: str = "PT30M",
                                      trend_windows: list[str] | None = None) -> dict[str, Any]:

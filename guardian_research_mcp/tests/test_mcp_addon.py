@@ -36,7 +36,7 @@ TOOL_NAMES = {
     "query_cell_history", "query_phase_history", "query_daily_diagnostics",
     "query_diagnostic_evidence", "find_soc_crashes", "find_low_voltage_events",
     "query_alarm_history", "query_timeseries", "build_evidence_package",
-    "build_soc_crash_core_evidence",
+    "build_soc_crash_core_evidence", "query_raw_evidence",
 }
 
 
@@ -83,7 +83,12 @@ class GuardianStub:
         query = parse_qs(request.url.query.decode())
         if path == "status":
             return httpx2.Response(200, json={"research_schema_version": 1,
-                "read_only": True, "enabled": True})
+                "read_only": True, "enabled": True,
+                "external_research_contract": {
+                    "sources": {"guardian.cell_history": {
+                        "read_only": True, "unbounded_access": False,
+                        "pagination": "signed_cursor",
+                    }}}})
         if path == "topology":
             return httpx2.Response(200, json=envelope({"positions": [{
                 "position": 4, "physical_serial": "SERIAL-M4"}]}))
@@ -110,6 +115,37 @@ class GuardianStub:
             return httpx2.Response(200, json=envelope({"points": [{
                 "cell_number": cell, "physical_serial": query["physical_serial"][0],
                 "value": 3271}], "point_count": 1}))
+        if path == "evidence/raw":
+            if query.get("source") == ["guardian.error"]:
+                return httpx2.Response(400, json={"error": {
+                    "code": "invalid_argument", "message": "bounded request rejected"}})
+            return httpx2.Response(200, json={
+                "research_schema_version": 1,
+                "data_source": "guardian.cell_history",
+                "evidence_class": "OBSERVED",
+                "authoritative": True,
+                "timestamp_range": {
+                    "from": query["from"][0], "to": query["to"][0]},
+                "resolution": "raw",
+                "quality": {"status": "complete", "confidence": None},
+                "truncated": True,
+                "next_cursor": "signed.cursor.exact",
+                "physical_access": {
+                    "read_mode": "block_index", "selected_ranges": 2,
+                    "selected_blocks": 2, "selected_bytes": 4096,
+                    "raw_bytes_read": 3072, "records_inspected": 17,
+                    "records_decoded": 5, "records_materialized": 2,
+                    "records_returned": 2,
+                },
+                "data": {"records": [{
+                    "timestamp": query["from"][0],
+                    "physical_serial": query["physical_serial"][0],
+                    "position_at_time": 6,
+                    "identity_epoch_id": "epoch-observed",
+                    "identity_resolved": True,
+                    "soc": None,
+                }]},
+            })
         if path == "coverage":
             return httpx2.Response(200, json=envelope({"datasets": [{
                 "dataset": name, "quality": "absent" if name == "soh" else "complete"
@@ -347,6 +383,11 @@ def test_protocol_discovery_security_health_and_read_only_catalog():
             status = await client.call_tool("guardian_status", {})
             assert status.is_error is False
             assert status.structured_content["read_only"] is True
+            assert status.structured_content["external_research_contract"] == {
+                "sources": {"guardian.cell_history": {
+                    "read_only": True, "unbounded_access": False,
+                    "pagination": "signed_cursor",
+                }}}
             unknown = await client.call_tool("write_guardian_config", {})
             assert unknown.is_error is True
         asyncio.run(protocol_client(base, check))
@@ -417,6 +458,9 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
                 ("query_alarm_history", {"physical_serial": "SERIAL-M4", **common}),
                 ("query_timeseries", {"source": "guardian.cell_history", "metric": "soc",
                                       "physical_serial": "SERIAL-M4", **common}),
+                ("query_raw_evidence", {"source": "guardian.cell_history",
+                                        "physical_serial": "SERIAL-M4",
+                                        "fields": ["soc", "module_current"], **common}),
                 ("build_evidence_package", {"event_id": "SCE-M4"}),
                 ("build_soc_crash_core_evidence", {"event_id": "SCE-M4"}),
             ]
@@ -428,7 +472,7 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
         "status", "topology", "identity-epochs", "maintenance", "coverage",
         "module-history", "cell-history", "phases", "daily-diagnostics",
         "diagnostic-evidence", "events/soc-crashes", "events/low-voltage",
-        "alarms", "timeseries", "evidence-package", "evidence-core",
+        "alarms", "timeseries", "evidence/raw", "evidence-package", "evidence-core",
     }
     assert {request.url.path.removeprefix("/api/research/")
             for request in stub.requests} == expected
@@ -438,6 +482,91 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
     package_query = parse_qs(package_request.url.query.decode())
     assert package_query["before"] == ["P1D"]
     assert package_query["after"] == ["PT30M"]
+
+
+def test_raw_evidence_maps_exactly_one_page_and_preserves_guardian_contract():
+    stub = GuardianStub()
+    app = build_app(settings(), client=client_for(stub))
+    with running_app(app) as base:
+        async def check(client):
+            result = await client.call_tool("query_raw_evidence", {
+                "source": "guardian.cell_history",
+                "physical_serial": "SERIAL-M6",
+                "timestamp_from": "2026-09-11T10:00:00Z",
+                "timestamp_to": "2026-09-11T10:40:00Z",
+                "fields": ["soc", "module_current", "lowest_cell"],
+                "cursor": "incoming.signed.cursor",
+            })
+            assert result.is_error is False
+            payload = result.structured_content
+            assert payload["evidence_class"] == "OBSERVED"
+            assert payload["next_cursor"] == "signed.cursor.exact"
+            assert payload["data"]["records"][0] == {
+                "timestamp": "2026-09-11T10:00:00Z",
+                "physical_serial": "SERIAL-M6",
+                "position_at_time": 6,
+                "identity_epoch_id": "epoch-observed",
+                "identity_resolved": True,
+                "soc": None,
+            }
+            assert payload["physical_access"] == {
+                "read_mode": "block_index", "selected_ranges": 2,
+                "selected_blocks": 2, "selected_bytes": 4096,
+                "raw_bytes_read": 3072, "records_inspected": 17,
+                "records_decoded": 5, "records_materialized": 2,
+                "records_returned": 2,
+            }
+        asyncio.run(protocol_client(base, check))
+
+    assert len(stub.requests) == 1
+    request = stub.requests[0]
+    assert request.method == "GET"
+    assert request.url.path == "/api/research/evidence/raw"
+    assert parse_qs(request.url.query.decode()) == {
+        "source": ["guardian.cell_history"],
+        "physical_serial": ["SERIAL-M6"],
+        "from": ["2026-09-11T10:00:00Z"],
+        "to": ["2026-09-11T10:40:00Z"],
+        "fields": ["soc,module_current,lowest_cell"],
+        "cursor": ["incoming.signed.cursor"],
+    }
+
+
+def test_raw_evidence_guardian_error_is_fatal_without_legacy_fallback():
+    stub = GuardianStub()
+    app = build_app(settings(), client=client_for(stub))
+    with running_app(app) as base:
+        async def check(client):
+            result = await client.call_tool("query_raw_evidence", {
+                "source": "guardian.error", "physical_serial": "SERIAL-M6",
+                "timestamp_from": "2026-09-11T10:00:00Z",
+                "timestamp_to": "2026-09-11T10:40:00Z",
+                "fields": ["soc"],
+            })
+            assert result.is_error is True
+            assert "invalid_argument" in result.content[0].text
+        asyncio.run(protocol_client(base, check))
+
+    assert len(stub.requests) == 1
+    assert stub.requests[0].url.path == "/api/research/evidence/raw"
+
+
+def test_raw_evidence_tool_schema_requires_bounds_identity_source_and_fields():
+    stub = GuardianStub()
+    app = build_app(settings(), client=client_for(stub))
+    with running_app(app) as base:
+        async def check(client):
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            schema = tools["query_raw_evidence"].input_schema
+            assert set(schema["required"]) == {
+                "source", "physical_serial", "timestamp_from", "timestamp_to", "fields"}
+            assert schema["properties"]["fields"]["type"] == "array"
+            assert "cursor" not in schema["required"]
+            description = tools["query_raw_evidence"].description
+            assert "guardian_status" in description
+            assert "external_research_contract" in description
+            assert "signed cursor" in description
+        asyncio.run(protocol_client(base, check))
 
 
 def test_m4_m5_m6_evidence_chain_and_absent_coverage_use_only_mcp():

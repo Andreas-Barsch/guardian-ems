@@ -34,6 +34,16 @@ read-only tool. It forwards only the event ID to Guardian's fixed-window Core
 contract; it has no caller-controlled time-window expansion. Existing tools,
 including `build_evidence_package`, retain their contracts.
 
+`query_raw_evidence(source, physical_serial, timestamp_from, timestamp_to,
+fields, cursor=None)` is the seventeenth read-only tool. It forwards exactly
+one request to Guardian's bounded `/api/research/evidence/raw` endpoint and
+returns exactly one page unchanged. It never follows a cursor, widens a time
+window, aggregates pages, reads evidence files, or falls back to a legacy
+history, detector, or evidence-package tool. Clients must call
+`guardian_status` first and follow Guardian's advertised
+`external_research_contract`; Guardian remains authoritative for supported
+sources and all bounds.
+
 For the local Home Assistant application network, the safe default Host
 allowlist is `guardian_research_mcp,3195b09a-guardian-research-mcp,localhost,127.0.0.1`.
 The repository-qualified DNS name is the Host used by Guardian MCP Tunnel's
