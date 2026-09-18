@@ -32,6 +32,7 @@ from research_timeseries import (CursorCodec, MAX_CELLS, MAX_POINTS,
 from rs485_evidence import decode_identity_record
 from rs485_history_index import (OPEN_SUFFIX_MAX_BYTES,
                                  select_ranges as select_rs485_ranges)
+from soc_crash_v2 import SocCrashV2Policy, discover_soc_crash_events
 
 API_ROUTE = "/api/research"
 SCHEMA_VERSION = 1
@@ -40,6 +41,7 @@ MAX_SERIALS = 6
 QUERY_TIMEOUT_SECONDS = 10
 EVIDENCE_PACKAGE_TIMEOUT_SECONDS = 15
 SOC_CRASH_VERSION = "guardian_soc_crash_v1"
+SOC_CRASH_V2_VERSION = "guardian_soc_crash_v2"
 EVIDENCE_PACKAGE_VERSION = "research_soc_crash_evidence_v2"
 CORE_EVIDENCE_VERSION = "research_soc_crash_core_evidence_v1"
 CORE_TARGET_BEFORE = timedelta(minutes=10)
@@ -181,7 +183,8 @@ class GuardianResearchApi:
     SOURCE_REGISTRY = frozenset({"guardian.cell_history", "guardian.hycube",
         "guardian.display_history", "guardian.canonical_phase"})
 
-    def __init__(self, paths, cursor_secret=None, *, defer_identity=False):
+    def __init__(self, paths, cursor_secret=None, *, defer_identity=False,
+                 soc_crash_v2_policy=None):
         self.paths = paths
         self.identity = (ResearchIdentityResolver(()) if defer_identity else
                          ResearchIdentityResolver.from_path(paths.position_history))
@@ -193,6 +196,7 @@ class GuardianResearchApi:
         self.series = ResearchTimeseriesService(
             paths.cell_history, self.identity, CursorCodec(cursor_secret or secrets.token_bytes(32)))
         self.gate = QueryGate()
+        self.soc_crash_v2_policy = (soc_crash_v2_policy or SocCrashV2Policy()).validated()
 
     def install_identity_snapshot(self, snapshots, source_signature):
         resolver = ResearchIdentityResolver(snapshots)
@@ -518,6 +522,7 @@ class GuardianResearchApi:
                 "last_query_at": self.gate.last_query_at, "active_queries": self.gate.active,
                 "queued_queries": self.gate.queued, "query_failures": self.gate.failures}
         if endpoint == "evidence/raw": return self._raw_evidence(values, deadline)
+        if endpoint == "events/soc-crashes-v2": return self._soc_crash_v2(values, deadline)
         self._refresh_identity()
         if endpoint == "topology":
             timestamp = values.get("timestamp", datetime.now(timezone.utc).isoformat())
@@ -764,6 +769,72 @@ class GuardianResearchApi:
                 profile["total_elapsed_seconds"] = time.perf_counter() - started
                 LOG.info("RESEARCH_PROFILE %s", json.dumps(
                     profile, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+
+    def _soc_crash_v2(self, values, deadline):
+        allowed = {"physical_serial", "from", "to", "max_event_window_s",
+            "max_sample_gap_s", "min_samples", "min_observed_soc_drop_pp",
+            "min_unexplained_soc_drop_pp", "min_unexplained_fraction",
+            "min_discharge_current_a", "reference_capacity_ah"}
+        unexpected = sorted(set(values) - allowed)
+        if unexpected:
+            raise ResearchQueryError("invalid_argument",
+                "unsupported parameters: " + ", ".join(unexpected))
+        self._required(values, "physical_serial"); start, end = self._range(values)
+        names = {"max_event_window_s": float, "max_sample_gap_s": float,
+            "min_samples": int, "min_observed_soc_drop_pp": float,
+            "min_unexplained_soc_drop_pp": float,
+            "min_unexplained_fraction": float, "min_discharge_current_a": float,
+            "reference_capacity_ah": float}
+        overrides = {}
+        try:
+            for name, converter in names.items():
+                if name in values:
+                    value = values[name]
+                    if converter is int and (not value.isdigit() or str(int(value)) != value):
+                        raise ValueError
+                    overrides[name] = converter(value)
+            policy = self.soc_crash_v2_policy.with_overrides(**overrides)
+        except (TypeError, ValueError) as exc:
+            raise ResearchQueryError("invalid_argument", "SOC crash v2 policy is invalid") from exc
+        capacity_provenance = ("request_override" if "reference_capacity_ah" in overrides
+                               else "production_configuration")
+        io_profile = {}
+        identity_signature = self._file_signature(self.paths.position_history)
+        with self._identity_lock:
+            identity_ready = (self._identity_snapshot_ready
+                              and identity_signature == self._position_signature)
+            identity_snapshot = self.identity
+        unavailable_reason = None
+        observations = []
+        if not identity_ready:
+            unavailable_reason = "bounded_identity_snapshot_unavailable"
+        else:
+            try:
+                observations = self.series.soc_crash_v2_observations(
+                    values["physical_serial"], start, end, deadline,
+                    identity_resolver=identity_snapshot, io_profile=io_profile)
+            except ResearchQueryError as exc:
+                if exc.code != "insufficient_evidence": raise
+                unavailable_reason = "bounded_index_unavailable"
+        result = discover_soc_crash_events(physical_serial=values["physical_serial"],
+            observations=observations, policy=policy,
+            reference_capacity_provenance=capacity_provenance)
+        if unavailable_reason:
+            result["classification"] = "INSUFFICIENT_EVIDENCE"
+            result["reason_codes"] = list(dict.fromkeys(
+                [*result["reason_codes"], unavailable_reason]))
+        result.update({"detector_version": SOC_CRASH_V2_VERSION,
+            "policy_version": policy.policy_version, "policy_id": policy.identity(),
+            "effective_policy": policy.parameters(),
+            "reference_capacity_provenance": capacity_provenance,
+            "search": {"requested_from": start, "requested_to": end,
+                "physical_serial": values["physical_serial"], **io_profile}})
+        return research_envelope(source="guardian.cell_history",
+            evidence_class="DERIVED", authoritative=False,
+            timestamp_from=start, timestamp_to=end, resolution="event_search",
+            data=result, quality=("insufficient_evidence" if result["classification"] ==
+                "INSUFFICIENT_EVIDENCE" else "complete"),
+            semantics_version=SOC_CRASH_V2_VERSION)
 
     def _soc_crashes_impl(self, values, deadline, profile=None):
         started = time.perf_counter(); start, end = self._range(values)

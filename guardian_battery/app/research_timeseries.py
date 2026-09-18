@@ -539,6 +539,82 @@ class ResearchTimeseriesService:
         for rows in result.values(): rows.sort(key=lambda item: item["timestamp"])
         return result
 
+    def soc_crash_v2_observations(self, physical_serial, timestamp_from, timestamp_to,
+                                  deadline=None, identity_resolver=None, io_profile=None):
+        """Read only bounded SOC/current/identity observations for v2 evaluation."""
+        start, end = self.normalize_range(timestamp_from, timestamp_to)
+        start_epoch = datetime.fromisoformat(start).timestamp()
+        end_epoch = datetime.fromisoformat(end).timestamp()
+        identity_resolver = identity_resolver or self.identity
+        result = []
+        if io_profile is not None:
+            io_profile.update({"read_mode": "indexed_chunk", "files_considered": 0,
+                "files_opened": 0, "ranges_read": 0, "selected_bytes": 0,
+                "raw_bytes_read": 0, "records_decoded": 0,
+                "records_materialized": 0})
+        for path in self._paths(start, end):
+            if io_profile is not None: io_profile["files_considered"] += 1
+            if not index_path(path).is_file():
+                raise ResearchQueryError(
+                    "insufficient_evidence", "bounded cell-history index unavailable", 422)
+            try:
+                ranges, _selection = selected_ranges(
+                    path, start_epoch, end_epoch,
+                    timestamp_field="timestamp", iso_timestamp=False)
+            except Exception as exc:
+                raise ResearchQueryError(
+                    "insufficient_evidence", "bounded cell-history index unavailable", 422
+                ) from exc
+            if io_profile is not None:
+                io_profile["ranges_read"] += len(ranges)
+                io_profile["selected_bytes"] += sum(stop - begin
+                                                      for begin, stop in ranges)
+                io_profile["files_opened"] += 1
+            with path.open("rb") as handle:
+                for range_start, range_end in ranges:
+                    for line in iter_binary_range_lines(
+                            handle, range_start, range_end, deadline=deadline):
+                        if io_profile is not None:
+                            io_profile["raw_bytes_read"] += len(line)
+                        if deadline is not None and time.monotonic() > deadline:
+                            raise ResearchQueryError(
+                                "timeout", "research query timed out", 503)
+                        serial_token = _SERIAL_TOKEN_BYTES.search(line)
+                        if serial_token is not None:
+                            try: explicit_serial = json.loads(serial_token.group(1))
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                explicit_serial = None
+                            if isinstance(explicit_serial, str) and explicit_serial != physical_serial:
+                                continue
+                        try:
+                            record = json.loads(line)
+                            epoch = float(record["timestamp"])
+                        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                            continue
+                        if io_profile is not None: io_profile["records_decoded"] += 1
+                        if not start_epoch <= epoch <= end_epoch: continue
+                        timestamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+                        observed = record.get("module_serial")
+                        if observed is None:
+                            try: position = int(record.get("module", 0))
+                            except (TypeError, ValueError): position = 0
+                            observed = (identity_resolver.serial_at(position, timestamp).get(
+                                "physical_serial") if 1 <= position <= 6 else None)
+                        if observed != physical_serial: continue
+                        identity = identity_resolver.position_at(physical_serial, timestamp)
+                        soc, current = record.get("soc_percent"), record.get("current_a")
+                        try: soc = float(soc) if soc is not None else None
+                        except (TypeError, ValueError): soc = None
+                        try: current = float(current) if current is not None else None
+                        except (TypeError, ValueError): current = None
+                        result.append({"timestamp": timestamp,
+                            "physical_serial": physical_serial, "soc": soc,
+                            "current": current,
+                            "identity_epoch_id": identity.get("identity_epoch_id")})
+                        if io_profile is not None:
+                            io_profile["records_materialized"] += 1
+        return result
+
     def evidence_by_serial(self, physical_serials, timestamp_from, timestamp_to,
                            deadline=None, max_records=10_000, io_profile=None,
                            profile_target_serial=None, require_index=False,

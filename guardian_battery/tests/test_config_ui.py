@@ -14,6 +14,24 @@ def test_defaults_valid():
     assert validate(dict(DEFAULTS)) == []
 
 
+@pytest.mark.parametrize('value', ['0', '-1', 'nan', 'invalid'])
+def test_soc_crash_v2_reference_capacity_rejects_invalid_values(value):
+    cfg = dict(DEFAULTS); cfg['reference_capacity_ah'] = value
+    assert any('Referenzkapazität' in item for item in validate(cfg))
+
+
+def test_soc_crash_v2_reference_capacity_is_optional_and_reaches_production_api(
+        tmp_path, monkeypatch):
+    options = tmp_path / 'options.json'
+    options.write_text(json.dumps({'reference_capacity_ah': '100.0'}), encoding='utf-8')
+    monkeypatch.setattr(config_ui, 'OPTIONS_FILE', options)
+    monkeypatch.setattr(config_ui, '_RESEARCH_API', None)
+    monkeypatch.setattr(config_ui, '_RESEARCH_IDENTITY_SNAPSHOT', None)
+    api = config_ui._get_research_api()
+    assert api.soc_crash_v2_policy.reference_capacity_ah == 100.0
+    assert validate(dict(DEFAULTS)) == []
+
+
 def test_configuration_navigation_has_no_extra_portal_level():
     html = config_ui._config_html()
     assert "Zentrales Funktionsportal" not in html

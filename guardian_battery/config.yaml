@@ -42,6 +42,7 @@ options:
   mqtt_topic_prefix: guardian
   publish_discovery: true
   guardian_research_api_token: ""
+  reference_capacity_ah: ""
 
   warning_cell_delta_mv: 30
   critical_cell_delta_mv: 80
@@ -140,6 +141,7 @@ schema:
   mqtt_topic_prefix: str
   publish_discovery: bool
   guardian_research_api_token: str
+  reference_capacity_ah: str
 
   warning_cell_delta_mv: int(1,1000)
   critical_cell_delta_mv: int(1,1000)

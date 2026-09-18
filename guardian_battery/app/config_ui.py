@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import secrets
 import threading
@@ -51,6 +52,7 @@ from config_history import ConfigHistory
 from phase_engine import PhaseEngine
 from version import GUARDIAN_VERSION, DIAGNOSTIC_ENGINE_VERSION
 from research_api import API_ROUTE as RESEARCH_API_ROUTE, GuardianResearchApi, ResearchPaths
+from soc_crash_v2 import SocCrashV2Policy
 
 OPTIONS_FILE = Path('/data/options.json')
 CONFIG_HISTORY_FILE = Path('/share/guardian_battery/config_history.jsonl')
@@ -345,7 +347,7 @@ def _get_research_api():
                     display_history=DEFAULT_DISPLAY_HISTORY_DIR,
                     config_history=CONFIG_HISTORY_FILE,
                     rs485_history=DEFAULT_RS485_HISTORY_DIR,
-                ), defer_identity=True)
+                ), defer_identity=True, soc_crash_v2_policy=_soc_crash_v2_policy())
                 if _RESEARCH_IDENTITY_SNAPSHOT is not None:
                     snapshots, signature = _RESEARCH_IDENTITY_SNAPSHOT
                     _RESEARCH_API.install_identity_snapshot(snapshots, signature)
@@ -441,10 +443,12 @@ DEFAULTS = {
  'cell_diag_curve_max_rms_mad_mv':5,
  'hycube_evidence_enabled':False,'hycube_base_url':'','hycube_interval_seconds':5,
  'hycube_timeout_seconds':0.8,
+ 'reference_capacity_ah':'',
 }
 
 # group, label, unit, min, max, step, consequence, level
 META = {
+ 'reference_capacity_ah':('Anlage','SOC Crash v2 · Referenzkapazität','Ah',None,None,None,'Explizite Modul-Referenzkapazität für die elektrische Plausibilisierung. Leer deaktiviert SOC_CRASH; es wird keine Nennkapazität angenommen.','normal'),
  'module_count':('Anlage','Installierte Batteriemodule','Module',1,6,1,'Ändert die Soll-Topologie. Nur Module 1 bis zur eingestellten Anzahl werden erwartet; höhere Modulnummern dürfen keine Missing-/Unavailable-Warnung erzeugen.','normal'),
  'poll_interval_seconds':('Anlage','BMS-Abfrageintervall','s',5,3600,1,'Kleinere Werte erhöhen Aktualität und serielle Last; größere Werte verzögern Status-, Alarm- und Trendreaktionen.','normal'),
  'warning_cell_delta_mv':('Bewertungsgrenzen','Stack-Warnschwelle Zellspreizung','mV',1,1000,1,'Niedrigere Werte erzeugen früher Warnungen aus der allgemeinen Zellspreizung; höhere Werte machen diese Bewertung toleranter.','normal'),
@@ -535,6 +539,18 @@ def _read_options():
     data=json.loads(OPTIONS_FILE.read_text(encoding='utf-8'))
     return {**DEFAULTS, **data}
 
+
+def _soc_crash_v2_policy():
+    raw = _read_options().get("reference_capacity_ah", "")
+    if raw in (None, ""):
+        return SocCrashV2Policy(reference_capacity_ah=None)
+    try: capacity = float(raw)
+    except (TypeError, ValueError): capacity = None
+    if capacity is None or not math.isfinite(capacity) or capacity <= 0:
+        LOG.warning("SOC Crash v2 reference_capacity_ah is invalid; classification disabled")
+        capacity = None
+    return SocCrashV2Policy(reference_capacity_ah=capacity)
+
 def _last_record():
     if not CONFIG_HISTORY_FILE.exists(): return {}
     try:
@@ -573,6 +589,13 @@ def validate(cfg):
             data_row_url(cfg.get('hycube_base_url',''))
         except (TypeError, ValueError):
             errors.append('Hycube lokale Basisadresse: ungültig oder nicht lokal.')
+    capacity = cfg.get('reference_capacity_ah', '')
+    if capacity not in (None, ''):
+        try: parsed_capacity = float(capacity)
+        except (TypeError, ValueError): parsed_capacity = None
+        if (parsed_capacity is None or not math.isfinite(parsed_capacity)
+                or parsed_capacity <= 0):
+            errors.append('SOC Crash v2 Referenzkapazität: muss leer oder endlich und >0 Ah sein.')
     return errors
 
 def _config_html(maintenance_path='maintenance', timeline_path='timeline', history_path='history',
