@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import time
+import re
+from urllib.parse import quote
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -136,11 +138,11 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
             "from": timestamp_from, "to": timestamp_to, "component": component})
 
     @server.tool(annotations=READ_ONLY)
-    async def find_soc_crashes(timestamp_from: str, timestamp_to: str,
-                               physical_serial: str | None = None) -> dict[str, Any]:
-        """Return deterministic SOC-crash events; Guardian asserts no causal explanation."""
-        return await invoke("find_soc_crashes", "events/soc-crashes", {
-            "physical_serial": physical_serial, "from": timestamp_from, "to": timestamp_to})
+    async def list_soc_crash_events(timestamp_from: str, timestamp_to: str,
+                                    max_records: int = 100) -> dict[str, Any]:
+        """Read persisted SOC events in at most 31 days, 1..500 records; no replay or causality."""
+        return await invoke("list_soc_crash_events", "soc-crash-events", {
+            "from": timestamp_from, "to": timestamp_to, "max_records": max_records})
 
     @server.tool(annotations=READ_ONLY)
     async def find_low_voltage_events(physical_serial: str, timestamp_from: str,
@@ -174,32 +176,8 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
             "max_points": max_points, "cell_numbers": cell_numbers, "cursor": cursor})
 
     @server.tool(annotations=READ_ONLY)
-    async def query_raw_evidence(source: str, physical_serial: str,
-                                 timestamp_from: str, timestamp_to: str,
-                                 fields: list[str],
-                                 cursor: str | None = None) -> dict[str, Any]:
-        """Return one bounded raw-evidence page unchanged. Call guardian_status first,
-        inspect external_research_contract, use the smallest sufficient window and only
-        required fields, and respect Guardian's advertised window, record, byte, and
-        scan limits. Follow the signed cursor only when another page is actually needed;
-        expand a window only when the analysis justifies a separate bounded request.
-        """
-        return await invoke("query_raw_evidence", "evidence/raw", {
-            "source": source, "physical_serial": physical_serial,
-            "from": timestamp_from, "to": timestamp_to,
-            "fields": fields, "cursor": cursor})
-
-    @server.tool(annotations=READ_ONLY)
-    async def build_evidence_package(event_id: str, before: str = "P1D",
-                                     after: str = "PT30M",
-                                     trend_windows: list[str] | None = None) -> dict[str, Any]:
-        """Return a reproducible evidence package; MCP adds no INFERRED or causal content."""
-        return await invoke("build_evidence_package", "evidence-package", {
-            "event_id": event_id, "before": before, "after": after,
-            "trend_windows": trend_windows or ["PT6H", "P1D", "P7D"]})
-
-    @server.tool(annotations=READ_ONLY)
-    async def build_soc_crash_core_evidence(event_id: str) -> dict[str, Any]:
-        """Return small bounded SOC-crash evidence for external research drill-down."""
-        return await invoke("build_soc_crash_core_evidence", "evidence-core", {
-            "event_id": event_id})
+    async def get_soc_crash_event(event_id: str) -> dict[str, Any]:
+        """Read exactly one persisted SOC event; never build evidence or follow up automatically."""
+        if re.fullmatch(r"SCS-[0-9a-f]{64}", event_id) is None:
+            raise GatewayError("invalid_argument", "invalid SOC event ID").as_tool_error()
+        return await invoke("get_soc_crash_event", "soc-crash-events/" + quote(event_id, safe=""), {})

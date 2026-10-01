@@ -1,9 +1,46 @@
 # Guardian Research MCP
 
-Version `0.8.1` is a separate, provider-neutral, read-only
+Prepared, unpublished version `0.8.2` is a separate, provider-neutral, read-only
 Streamable HTTP MCP adapter for Guardian Battery's Research API.
 
+Battery 0.8.2 and Research-MCP 0.8.2 require a coordinated update and client
+adaptation. Battery 0.8.1 already identifies the other development line; 0.8.2
+distinguishes this release. Tunnel stays 0.8.1 and Diagnostic Engine stays
+0.4.12. No publication or production acceptance is claimed.
+
 ## Contract
+
+This prepared release removes the legacy `find_soc_crashes`,
+`build_evidence_package`, `query_raw_evidence` and
+`build_soc_crash_core_evidence` tools present in the previous GitHub main
+source. The new `list_soc_crash_events` and `get_soc_crash_event` tools read
+persisted events only and forward exactly one Battery GET response; they do
+not replace raw-evidence or core-evidence retrieval. The list tool requires
+`timestamp_from` and `timestamp_to` (at most 31 days), forwarded as Battery API
+parameters `from` and `to`, with `max_records` 1..500 (default 100).
+No event creation, historical detection, evidence packages, automatic
+follow-up, raw-evidence extension or causal interpretation is added.
+The target catalogue contains 15 read-only tools, compared with 17 in the
+previous GitHub main source; the adapter version is 0.8.2. Existing clients
+may hold an older cached catalogue. Refresh the connection metadata after the
+coordinated update and verify the 15-tool catalogue; do not infer it from the
+version string alone.
+Historical events (including drop exactly X) remain readable with their original
+IDs and payloads; retrieval does not reclassify them under the new strict > X
+recognition rule. A null `reference_module` (and null reference serial) denotes
+no uniquely determined previous weakest module at an initial tie. Both tools
+forward these values unchanged.
+
+The old API routes `/api/research/events/soc-crashes`,
+`/api/research/evidence-package` and `/api/research/evidence-core` return 404.
+The replacement tools use `/api/research/soc-crash-events` and its event-ID
+route. Old and new calls and results are not equivalent. The coordinated
+Battery release follows these confirmed recognition and persistence rules:
+configurable X = 5 percentage points and Y = 300 seconds, fixed candidate start,
+strictly > X within <= Y, immediate recognition, one candidate ending on role
+change, no candidate on an initial tie and a null reference on its subsequent
+strict minimum; a later tie alone starts no candidate. No median or additional
+recognition criterion is introduced.
 
 - Endpoint: `/mcp` (stateless Streamable HTTP)
 - Operations: exactly the documented read-only Guardian evidence tools
@@ -28,21 +65,6 @@ credentials.
 
 The MCP layer never reads Guardian evidence files, writes MQTT/RS485/Hycube,
 calls Home Assistant services, rebuilds projections, or stores conversations.
-
-The additive `build_soc_crash_core_evidence(event_id)` tool is the sixteenth
-read-only tool. It forwards only the event ID to Guardian's fixed-window Core
-contract; it has no caller-controlled time-window expansion. Existing tools,
-including `build_evidence_package`, retain their contracts.
-
-`query_raw_evidence(source, physical_serial, timestamp_from, timestamp_to,
-fields, cursor=None)` is the seventeenth read-only tool. It forwards exactly
-one request to Guardian's bounded `/api/research/evidence/raw` endpoint and
-returns exactly one page unchanged. It never follows a cursor, widens a time
-window, aggregates pages, reads evidence files, or falls back to a legacy
-history, detector, or evidence-package tool. Clients must call
-`guardian_status` first and follow Guardian's advertised
-`external_research_contract`; Guardian remains authoritative for supported
-sources and all bounds.
 
 For the local Home Assistant application network, the safe default Host
 allowlist is `guardian_research_mcp,3195b09a-guardian-research-mcp,localhost,127.0.0.1`.
