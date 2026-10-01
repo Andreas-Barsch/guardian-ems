@@ -41,7 +41,7 @@ class GuardianResearchClient:
         headers = {
             "Authorization": "Bearer " + self.settings.guardian_api_token,
             "Accept": "application/json",
-            "User-Agent": "guardian-research-mcp/0.8.2",
+            "User-Agent": "guardian-research-mcp/0.8.3",
         }
         try:
             async with httpx2.AsyncClient(
@@ -55,32 +55,32 @@ class GuardianResearchClient:
                         if content_length:
                             try:
                                 if int(content_length) > MAX_RESPONSE_BYTES:
-                                    raise GatewayError("response_too_large", "")
+                                    raise GatewayError("response_too_large", "", origin="guardian_response")
                             except ValueError as exc:
-                                raise GatewayError("source_unavailable", "") from exc
+                                raise GatewayError("source_unavailable", "", origin="guardian_response") from exc
                         chunks = bytearray()
                         async for chunk in response.aiter_bytes():
                             if len(chunks) + len(chunk) > MAX_RESPONSE_BYTES:
-                                raise GatewayError("response_too_large", "")
+                                raise GatewayError("response_too_large", "", origin="guardian_response")
                             chunks.extend(chunk)
                         body = bytes(chunks)
                         status_code = response.status_code
         except TimeoutError as exc:
-            raise GatewayError("timeout", "Guardian Research API timed out") from exc
+            raise GatewayError("timeout", "Guardian Research API timed out", origin="guardian_transport") from exc
         except httpx2.TimeoutException as exc:
-            raise GatewayError("timeout", "Guardian Research API timed out") from exc
+            raise GatewayError("timeout", "Guardian Research API timed out", origin="guardian_transport") from exc
         except httpx2.RequestError as exc:
-            raise GatewayError("source_unavailable", "Guardian Research API unavailable") from exc
+            raise GatewayError("source_unavailable", "Guardian Research API unavailable", origin="guardian_transport") from exc
         try:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise GatewayError("source_unavailable", "Guardian returned invalid JSON") from exc
+            raise GatewayError("source_unavailable", "Guardian returned invalid JSON", origin="guardian_response") from exc
         if not isinstance(payload, dict):
-            raise GatewayError("source_unavailable", "Guardian returned an invalid envelope")
+            raise GatewayError("source_unavailable", "Guardian returned an invalid envelope", origin="guardian_response")
         if status_code >= 400:
             detail = payload.get("error") if isinstance(payload.get("error"), dict) else {}
             raise GatewayError(
                 str(detail.get("code", "source_unavailable")),
-                "",
+                "", origin="guardian_api",
             )
         return payload, len(body)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 import re
 from urllib.parse import quote
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
@@ -12,6 +12,17 @@ from mcp.types import ToolAnnotations
 from errors import GatewayError
 from gateway import QueryGate, ServiceState, audit, request_id
 from guardian_client import GuardianResearchClient
+
+Resolution = Literal["auto", "full", "display"]
+Source = Literal["guardian.cell_history", "guardian.hycube", "guardian.display_history", "guardian.canonical_phase"]
+Metric = Literal["soc", "module_voltage", "module_current", "module_temperature",
+                 "cell_voltage", "cell_temperature", "cell_deviation", "cell_spread",
+                 "battery_capacity", "policy"]
+CellMetric = Literal["soc", "module_voltage", "module_current", "module_temperature",
+                     "cell_voltage", "cell_temperature", "cell_deviation", "cell_spread"]
+Dataset = Literal["soc", "module_voltage", "module_current", "cell_voltage",
+                  "cell_temperature", "hycube", "policy", "maintenance", "rs485",
+                  "soh", "cycles", "ah_coulomb", "daily_diagnostics"]
 
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -40,7 +51,7 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
                 state.guardian_reachable = False
             state.last_error = exc.code
             status = exc.code
-            raise exc.as_tool_error() from exc
+            return exc.as_tool_result()
         finally:
             audit(request_id=call_id, tool=tool, client_id=None, params=params,
                   duration=time.monotonic() - started, payload=payload,
@@ -77,32 +88,36 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
             "category": category, "action": action, "max_records": max_records, "cursor": cursor})
 
     @server.tool(annotations=READ_ONLY)
-    async def get_data_coverage(physical_serial: str, datasets: list[str],
+    async def get_data_coverage(physical_serial: str, datasets: list[Dataset],
                                 timestamp_from: str, timestamp_to: str) -> dict[str, Any]:
-        """Return explicit coverage; absent evidence is never converted to zero."""
+        """Return observed coverage including uncovered request edges; absent is never zero.
+        Cell-history units: SOC %, module voltage V, current A, cell voltage mV, temperature degC."""
         return await invoke("get_data_coverage", "coverage", {
             "physical_serial": physical_serial, "datasets": datasets,
             "from": timestamp_from, "to": timestamp_to})
 
     @server.tool(annotations=READ_ONLY)
-    async def query_module_history(physical_serial: str, metric: str,
+    async def query_module_history(physical_serial: str, metric: Metric,
                                    timestamp_from: str, timestamp_to: str,
-                                   resolution: str = "auto", max_points: int = 6000,
+                                   resolution: Resolution = "auto", max_points: int = 6000,
                                    cursor: str | None = None,
-                                   source: str = "guardian.cell_history") -> dict[str, Any]:
-        """Return OBSERVED/DERIVED module evidence unchanged; no inference or causality."""
+                                   source: Source = "guardian.cell_history") -> dict[str, Any]:
+        """Return module evidence: SOC %, voltage V, current A, temperature degC; no causality.
+        Source/metric combinations are validated by Battery; auto selects full up to 24h."""
         return await invoke("query_module_history", "module-history", {
             "physical_serial": physical_serial, "metric": metric,
             "from": timestamp_from, "to": timestamp_to, "resolution": resolution,
             "max_points": max_points, "cursor": cursor, "source": source})
 
     @server.tool(annotations=READ_ONLY)
-    async def query_cell_history(physical_serial: str, metric: str,
+    async def query_cell_history(physical_serial: str, metric: CellMetric,
                                  cell_numbers: list[int], timestamp_from: str,
-                                 timestamp_to: str, resolution: str = "auto",
+                                 timestamp_to: str, resolution: Resolution = "auto",
                                  max_points: int = 6000,
                                  cursor: str | None = None) -> dict[str, Any]:
-        """Return cell evidence for physical identity; OBSERVED and DERIVED remain distinct."""
+        """Return existing cell-history metrics, including supported module metrics.
+        Units: SOC %, module voltage V, current A, temperature degC, cell voltage/deviation/spread mV.
+        Coverage describes source observations, independent of pagination/downsampling."""
         return await invoke("query_cell_history", "cell-history", {
             "physical_serial": physical_serial, "metric": metric,
             "cell_numbers": cell_numbers, "from": timestamp_from, "to": timestamp_to,
@@ -146,7 +161,7 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
 
     @server.tool(annotations=READ_ONLY)
     async def find_low_voltage_events(physical_serial: str, timestamp_from: str,
-                                      timestamp_to: str, resolution: str = "auto",
+                                      timestamp_to: str, resolution: Resolution = "auto",
                                       max_points: int = 6000) -> dict[str, Any]:
         """Return observed low-voltage evidence; missing evidence is not a zero value."""
         return await invoke("find_low_voltage_events", "events/low-voltage", {
@@ -164,9 +179,9 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
             "severity": severity, "type": alarm_type})
 
     @server.tool(annotations=READ_ONLY)
-    async def query_timeseries(source: str, metric: str, physical_serial: str,
+    async def query_timeseries(source: Source, metric: Metric, physical_serial: str,
                                timestamp_from: str, timestamp_to: str,
-                               resolution: str = "auto", max_points: int = 6000,
+                               resolution: Resolution = "auto", max_points: int = 6000,
                                cell_numbers: list[int] | None = None,
                                cursor: str | None = None) -> dict[str, Any]:
         """Return a registered Research timeseries unchanged; position remains time-dependent."""

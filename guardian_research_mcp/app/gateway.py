@@ -49,7 +49,7 @@ class QueryGate:
                     async with asyncio.timeout(timeout):
                         await self._condition.wait_for(available)
                 except TimeoutError as exc:
-                    raise GatewayError("timeout", "MCP query queue timed out") from exc
+                    raise GatewayError("timeout", "MCP query queue timed out", origin="mcp_queue") from exc
                 finally:
                     self.queued -= 1
             self.active += 1
