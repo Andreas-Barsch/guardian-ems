@@ -1,5 +1,38 @@
 # Guardian Research MCP Changelog
 
+## 0.8.3 – Versioned SOC gap events and Research contract (locally prepared, unpublished)
+
+- Coordinates with Battery 0.8.4. Manifest, server/health/initialize version and
+  User-Agent identify 0.8.3; this preparation changes no functional code from the
+  reviewed local checkpoint `3b3f3a4`. No publication or operational acceptance.
+- Forwards mixed stored events without reinterpretation: historical schema 1 /
+  `guardian_soc_crash_simple_v1` keeps eigen-drop fields and equality-read
+  compatibility; schema 2 / `guardian_soc_gap_v1` uses the current gap and all
+  tied current second-minimum references. Original old bytes/IDs remain unchanged.
+  Lists identify `guardian_soc_events_v2`; details retain the event's detector.
+- Battery's configurable defaults are gap X=5 pp and Y=300 s: current gap >= X
+  within <= Y of the fixed candidate start, immediately including the start frame.
+  One candidate, role change first, unique initial minimum only seeds the role,
+  new tied minima wait for uniqueness, incumbent ties/reference changes do not
+  reset the clock, fewer than two values suspend comparison without extending Y,
+  no re-arm without a role change. No additional own-drop/median criterion.
+  `soc_crash_gap_pp` is explicit; legacy `soc_crash_drop_pp` is ignored with a warning.
+- Preserves structured domain errors in text and structuredContent (`isError=true`,
+  explicit origin), all eight Cell-History metrics, units, sample-time metadata
+  and coverage bounds independent of pagination. No timeout increase.
+- The existing 15 tool names and event endpoints remain. Refresh cached schemas;
+  adapt clients to the versioned event fields and structured errors. Previously
+  removed SOC/raw/core-Evidence tools remain absent and have no drop-in replacement.
+- Release scope is MCP only on a separately rechecked GitHub main; do not replace
+  its other Battery development line. Paired Battery/MCP integration tests require
+  the matching local Battery source and are distinct from isolated MCP release tests.
+- A current image/configuration/data rollback record is required before installation.
+  Old Battery readers skip schema 2; preserve bytes and do not promise old readers
+  can retrieve new events. Historical replay results require separate explicit
+  import approval; different schema IDs do not prevent semantic double counting.
+  Tunnel 0.8.1 and Diagnostic Engine 0.4.12 remain unchanged.
+
+
 ## 0.8.2 – Persisted SOC crash event access (prepared, unpublished)
 
 - Removes `find_soc_crashes`, `build_evidence_package`, `query_raw_evidence` and `build_soc_crash_core_evidence` from the previous GitHub main source. Adds `list_soc_crash_events` and `get_soc_crash_event`, forwarding compact persisted Battery events without interpretation; these are not substitutes for raw-evidence or core-evidence retrieval. The target catalogue contains 15 read-only tools, compared with 17 in that source. Refresh cached client tool metadata after the coordinated update and verify the new catalogue.

@@ -72,8 +72,9 @@ def test_invalid_event_id_never_changes_endpoint(event_id):
 def test_event_error_has_no_package_or_history_fallback():
     client = Client({}, GatewayError('not_found', ''))
     function, _ = registered(client)['get_soc_crash_event']
-    with pytest.raises(Exception):
-        asyncio.run(function('SCS-' + 'a' * 64))
+    result = asyncio.run(function('SCS-' + 'a' * 64))
+    assert result.is_error
+    assert result.structured_content['error']['code'] == 'not_found'
     assert len(client.calls) == 1
 
 

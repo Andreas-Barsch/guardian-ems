@@ -171,7 +171,7 @@ def test_manifest_and_runtime_defaults_allow_exact_ha_app_dns_without_wildcard(
         "localhost",
         "127.0.0.1",
     }
-    assert manifest["version"] == VERSION == "0.8.2"
+    assert manifest["version"] == VERSION == "0.8.3"
     assert set(manifest["options"]["allowed_hosts"].split(",")) == expected
     assert "*" not in manifest["options"]["allowed_hosts"]
     options = tmp_path / "options.json"
@@ -195,7 +195,7 @@ def test_guardian_client_get_only_preserves_envelope_and_cursor():
     asyncio.run(run())
     request = stub.requests[0]
     assert request.method == "GET"
-    assert request.headers["User-Agent"] == "guardian-research-mcp/0.8.2"
+    assert request.headers["User-Agent"] == "guardian-research-mcp/0.8.3"
     assert parse_qs(request.url.query.decode())["cursor"] == ["opaque"]
     assert parse_qs(request.url.query.decode())["cell_numbers"] == ["15"]
 
@@ -307,7 +307,7 @@ def test_protocol_discovery_security_health_and_read_only_catalog():
             health = http.get(base + "/health", headers={
                 "Authorization": "Bearer " + TOKEN})
             assert health.status_code == 200
-            assert health.json()["version"] == "0.8.2"
+            assert health.json()["version"] == "0.8.3"
             assert set(health.json()) == {"service", "version", "transport",
                 "guardian_reachable", "active_queries", "queued_queries", "last_error"}
 

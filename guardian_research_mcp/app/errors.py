@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, TextContent
 
 KNOWN_CODES = frozenset({
     "invalid_argument", "identity_unresolved", "coverage_absent",
     "range_too_large", "response_too_large", "timeout", "busy",
-    "cursor_invalid", "source_unavailable",
+    "cursor_invalid", "source_unavailable", "not_found",
 })
 PUBLIC_MESSAGES = {
+    "not_found": "requested resource was not found",
     "invalid_argument": "request arguments are invalid",
     "identity_unresolved": "physical identity is unresolved for the requested time",
     "coverage_absent": "requested evidence coverage is absent",
@@ -23,7 +25,8 @@ PUBLIC_MESSAGES = {
 
 
 class GatewayError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, origin: str = "mcp"):
+        self.origin = origin
         self.code = code if code in KNOWN_CODES else "source_unavailable"
         super().__init__(PUBLIC_MESSAGES[self.code])
 
@@ -32,3 +35,9 @@ class GatewayError(Exception):
             {"error": {"code": self.code, "message": str(self)}},
             separators=(",", ":"),
         ))
+
+    def as_tool_result(self) -> CallToolResult:
+        """Preserve the domain error in both MCP representations, without secrets."""
+        payload = {"error": {"code": self.code, "message": str(self), "origin": self.origin}}
+        return CallToolResult(is_error=True, structured_content=payload,
+            content=[TextContent(type="text", text=json.dumps(payload, separators=(",", ":")))])
