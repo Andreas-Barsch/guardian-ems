@@ -21,10 +21,8 @@ sys.path.insert(0, str(APP))
 
 from errors import GatewayError
 from gateway import MAX_FULL_RESOLUTION, MAX_PARALLEL, MAX_QUEUE, QueryGate
-from guardian_client import (CORE_EVIDENCE_TRANSPORT_TIMEOUT_SECONDS,
-                             EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS,
-                             GuardianResearchClient, MAX_RESPONSE_BYTES)
-from server import build_app
+from guardian_client import GuardianResearchClient, MAX_RESPONSE_BYTES
+from server import VERSION, build_app
 from settings import Settings, load_settings
 
 
@@ -34,9 +32,8 @@ TOOL_NAMES = {
     "guardian_status", "get_stack_topology_at", "get_identity_epochs",
     "get_maintenance_events", "get_data_coverage", "query_module_history",
     "query_cell_history", "query_phase_history", "query_daily_diagnostics",
-    "query_diagnostic_evidence", "find_soc_crashes", "find_low_voltage_events",
-    "query_alarm_history", "query_timeseries", "build_evidence_package",
-    "build_soc_crash_core_evidence", "query_raw_evidence",
+    "query_diagnostic_evidence", "list_soc_crash_events", "find_low_voltage_events",
+    "query_alarm_history", "query_timeseries", "get_soc_crash_event",
 }
 
 
@@ -83,12 +80,7 @@ class GuardianStub:
         query = parse_qs(request.url.query.decode())
         if path == "status":
             return httpx2.Response(200, json={"research_schema_version": 1,
-                "read_only": True, "enabled": True,
-                "external_research_contract": {
-                    "sources": {"guardian.cell_history": {
-                        "read_only": True, "unbounded_access": False,
-                        "pagination": "signed_cursor",
-                    }}}})
+                "read_only": True, "enabled": True})
         if path == "topology":
             return httpx2.Response(200, json=envelope({"positions": [{
                 "position": 4, "physical_serial": "SERIAL-M4"}]}))
@@ -97,55 +89,19 @@ class GuardianStub:
             return httpx2.Response(200, json=envelope({"epochs": [{
                 "physical_serial": serial, "position": int(serial[-1]),
                 "identity_epoch_id": "EPOCH-" + serial}]}))
-        if path == "events/soc-crashes":
+        if path == "soc-crash-events":
             return httpx2.Response(200, json=envelope({"events": [{
-                "event_id": "SCE-M4", "physical_serial": "SERIAL-M4",
-                "detector_version": "guardian_soc_crash_v1"}]}))
-        if path == "evidence-package":
+                "event_id": "SCS-" + "a" * 64, "candidate_physical_serial": "SERIAL-M4",
+                "detector_version": "guardian_soc_crash_simple_v1"}]}))
+        if path == "soc-crash-events/" + "SCS-" + "a" * 64:
             return httpx2.Response(200, json=envelope({
-                "event": {"event_id": query["event_id"][0]}, "inferred": False,
-                "input_fingerprint": "sha256-test"}))
-        if path == "evidence-core":
-            return httpx2.Response(200, json=envelope({
-                "event_core": {"event_id": query["event_id"][0]},
-                "semantics_version": "research_soc_crash_core_evidence_v1",
-                "inferred": False, "input_fingerprint": "sha256-core-test"}))
+                "event": {"event_id": "SCS-" + "a" * 64,
+                          "causality": "not_determined"}}))
         if path == "cell-history":
             cell = int(query.get("cell_numbers", ["15"])[0].split(",")[0])
             return httpx2.Response(200, json=envelope({"points": [{
                 "cell_number": cell, "physical_serial": query["physical_serial"][0],
                 "value": 3271}], "point_count": 1}))
-        if path == "evidence/raw":
-            if query.get("source") == ["guardian.error"]:
-                return httpx2.Response(400, json={"error": {
-                    "code": "invalid_argument", "message": "bounded request rejected"}})
-            return httpx2.Response(200, json={
-                "research_schema_version": 1,
-                "data_source": "guardian.cell_history",
-                "evidence_class": "OBSERVED",
-                "authoritative": True,
-                "timestamp_range": {
-                    "from": query["from"][0], "to": query["to"][0]},
-                "resolution": "raw",
-                "quality": {"status": "complete", "confidence": None},
-                "truncated": True,
-                "next_cursor": "signed.cursor.exact",
-                "physical_access": {
-                    "read_mode": "block_index", "selected_ranges": 2,
-                    "selected_blocks": 2, "selected_bytes": 4096,
-                    "raw_bytes_read": 3072, "records_inspected": 17,
-                    "records_decoded": 5, "records_materialized": 2,
-                    "records_returned": 2,
-                },
-                "data": {"records": [{
-                    "timestamp": query["from"][0],
-                    "physical_serial": query["physical_serial"][0],
-                    "position_at_time": 6,
-                    "identity_epoch_id": "epoch-observed",
-                    "identity_resolved": True,
-                    "soc": None,
-                }]},
-            })
         if path == "coverage":
             return httpx2.Response(200, json=envelope({"datasets": [{
                 "dataset": name, "quality": "absent" if name == "soh" else "complete"
@@ -215,7 +171,7 @@ def test_manifest_and_runtime_defaults_allow_exact_ha_app_dns_without_wildcard(
         "localhost",
         "127.0.0.1",
     }
-    assert manifest["version"] == "0.8.1"
+    assert manifest["version"] == VERSION == "0.8.2"
     assert set(manifest["options"]["allowed_hosts"].split(",")) == expected
     assert "*" not in manifest["options"]["allowed_hosts"]
     options = tmp_path / "options.json"
@@ -239,6 +195,7 @@ def test_guardian_client_get_only_preserves_envelope_and_cursor():
     asyncio.run(run())
     request = stub.requests[0]
     assert request.method == "GET"
+    assert request.headers["User-Agent"] == "guardian-research-mcp/0.8.2"
     assert parse_qs(request.url.query.decode())["cursor"] == ["opaque"]
     assert parse_qs(request.url.query.decode())["cell_numbers"] == ["15"]
 
@@ -261,26 +218,6 @@ def test_error_mapping_payload_limit_and_no_backend_path():
         assert large.value.code == "response_too_large"
         assert "/share" not in str(known.value) + str(large.value)
     asyncio.run(run())
-
-
-def test_evidence_package_transport_allows_margin_above_guardian_deadline():
-    observed = {}
-    async def handler(request):
-        observed[request.url.path] = dict(request.extensions["timeout"])
-        return httpx2.Response(200, json=envelope({}))
-    client = GuardianResearchClient(settings(), transport=httpx2.MockTransport(handler))
-    async def run():
-        await client.get("status", {})
-        await client.get("evidence-package", {"event_id": "opaque"})
-        await client.get("evidence-core", {"event_id": "opaque"})
-    asyncio.run(run())
-    assert set(observed["/api/research/status"].values()) == {2}
-    assert set(observed["/api/research/evidence-package"].values()) == {
-        EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS}
-    assert EVIDENCE_PACKAGE_TRANSPORT_TIMEOUT_SECONDS == 20
-    assert set(observed["/api/research/evidence-core"].values()) == {
-        CORE_EVIDENCE_TRANSPORT_TIMEOUT_SECONDS}
-    assert CORE_EVIDENCE_TRANSPORT_TIMEOUT_SECONDS == 15
 
 
 def test_client_cancellation_closes_inflight_guardian_request():
@@ -370,7 +307,7 @@ def test_protocol_discovery_security_health_and_read_only_catalog():
             health = http.get(base + "/health", headers={
                 "Authorization": "Bearer " + TOKEN})
             assert health.status_code == 200
-            assert health.json()["version"] == "0.8.1"
+            assert health.json()["version"] == "0.8.2"
             assert set(health.json()) == {"service", "version", "transport",
                 "guardian_reachable", "active_queries", "queued_queries", "last_error"}
 
@@ -383,11 +320,6 @@ def test_protocol_discovery_security_health_and_read_only_catalog():
             status = await client.call_tool("guardian_status", {})
             assert status.is_error is False
             assert status.structured_content["read_only"] is True
-            assert status.structured_content["external_research_contract"] == {
-                "sources": {"guardian.cell_history": {
-                    "read_only": True, "unbounded_access": False,
-                    "pagination": "signed_cursor",
-                }}}
             unknown = await client.call_tool("write_guardian_config", {})
             assert unknown.is_error is True
         asyncio.run(protocol_client(base, check))
@@ -453,16 +385,12 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
                 ("query_phase_history", {"physical_serial": "SERIAL-M4", **common}),
                 ("query_daily_diagnostics", {"date": "2026-09-11"}),
                 ("query_diagnostic_evidence", {"date": "2026-09-11"}),
-                ("find_soc_crashes", {"physical_serial": "SERIAL-M4", **common}),
+                ("list_soc_crash_events", common),
                 ("find_low_voltage_events", {"physical_serial": "SERIAL-M4", **common}),
                 ("query_alarm_history", {"physical_serial": "SERIAL-M4", **common}),
                 ("query_timeseries", {"source": "guardian.cell_history", "metric": "soc",
                                       "physical_serial": "SERIAL-M4", **common}),
-                ("query_raw_evidence", {"source": "guardian.cell_history",
-                                        "physical_serial": "SERIAL-M4",
-                                        "fields": ["soc", "module_current"], **common}),
-                ("build_evidence_package", {"event_id": "SCE-M4"}),
-                ("build_soc_crash_core_evidence", {"event_id": "SCE-M4"}),
+                ("get_soc_crash_event", {"event_id": "SCS-" + "a" * 64}),
             ]
             for name, arguments in calls:
                 result = await client.call_tool(name, arguments)
@@ -471,102 +399,12 @@ def test_every_tool_maps_to_exact_get_only_research_endpoint():
     expected = {
         "status", "topology", "identity-epochs", "maintenance", "coverage",
         "module-history", "cell-history", "phases", "daily-diagnostics",
-        "diagnostic-evidence", "events/soc-crashes", "events/low-voltage",
-        "alarms", "timeseries", "evidence/raw", "evidence-package", "evidence-core",
+        "diagnostic-evidence", "soc-crash-events", "events/low-voltage",
+        "alarms", "timeseries", "soc-crash-events/" + "SCS-" + "a" * 64,
     }
     assert {request.url.path.removeprefix("/api/research/")
             for request in stub.requests} == expected
     assert {request.method for request in stub.requests} == {"GET"}
-    package_request = next(request for request in stub.requests
-                           if request.url.path.endswith("/evidence-package"))
-    package_query = parse_qs(package_request.url.query.decode())
-    assert package_query["before"] == ["P1D"]
-    assert package_query["after"] == ["PT30M"]
-
-
-def test_raw_evidence_maps_exactly_one_page_and_preserves_guardian_contract():
-    stub = GuardianStub()
-    app = build_app(settings(), client=client_for(stub))
-    with running_app(app) as base:
-        async def check(client):
-            result = await client.call_tool("query_raw_evidence", {
-                "source": "guardian.cell_history",
-                "physical_serial": "SERIAL-M6",
-                "timestamp_from": "2026-09-11T10:00:00Z",
-                "timestamp_to": "2026-09-11T10:40:00Z",
-                "fields": ["soc", "module_current", "lowest_cell"],
-                "cursor": "incoming.signed.cursor",
-            })
-            assert result.is_error is False
-            payload = result.structured_content
-            assert payload["evidence_class"] == "OBSERVED"
-            assert payload["next_cursor"] == "signed.cursor.exact"
-            assert payload["data"]["records"][0] == {
-                "timestamp": "2026-09-11T10:00:00Z",
-                "physical_serial": "SERIAL-M6",
-                "position_at_time": 6,
-                "identity_epoch_id": "epoch-observed",
-                "identity_resolved": True,
-                "soc": None,
-            }
-            assert payload["physical_access"] == {
-                "read_mode": "block_index", "selected_ranges": 2,
-                "selected_blocks": 2, "selected_bytes": 4096,
-                "raw_bytes_read": 3072, "records_inspected": 17,
-                "records_decoded": 5, "records_materialized": 2,
-                "records_returned": 2,
-            }
-        asyncio.run(protocol_client(base, check))
-
-    assert len(stub.requests) == 1
-    request = stub.requests[0]
-    assert request.method == "GET"
-    assert request.url.path == "/api/research/evidence/raw"
-    assert parse_qs(request.url.query.decode()) == {
-        "source": ["guardian.cell_history"],
-        "physical_serial": ["SERIAL-M6"],
-        "from": ["2026-09-11T10:00:00Z"],
-        "to": ["2026-09-11T10:40:00Z"],
-        "fields": ["soc,module_current,lowest_cell"],
-        "cursor": ["incoming.signed.cursor"],
-    }
-
-
-def test_raw_evidence_guardian_error_is_fatal_without_legacy_fallback():
-    stub = GuardianStub()
-    app = build_app(settings(), client=client_for(stub))
-    with running_app(app) as base:
-        async def check(client):
-            result = await client.call_tool("query_raw_evidence", {
-                "source": "guardian.error", "physical_serial": "SERIAL-M6",
-                "timestamp_from": "2026-09-11T10:00:00Z",
-                "timestamp_to": "2026-09-11T10:40:00Z",
-                "fields": ["soc"],
-            })
-            assert result.is_error is True
-            assert "invalid_argument" in result.content[0].text
-        asyncio.run(protocol_client(base, check))
-
-    assert len(stub.requests) == 1
-    assert stub.requests[0].url.path == "/api/research/evidence/raw"
-
-
-def test_raw_evidence_tool_schema_requires_bounds_identity_source_and_fields():
-    stub = GuardianStub()
-    app = build_app(settings(), client=client_for(stub))
-    with running_app(app) as base:
-        async def check(client):
-            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-            schema = tools["query_raw_evidence"].input_schema
-            assert set(schema["required"]) == {
-                "source", "physical_serial", "timestamp_from", "timestamp_to", "fields"}
-            assert schema["properties"]["fields"]["type"] == "array"
-            assert "cursor" not in schema["required"]
-            description = tools["query_raw_evidence"].description
-            assert "guardian_status" in description
-            assert "external_research_contract" in description
-            assert "signed cursor" in description
-        asyncio.run(protocol_client(base, check))
 
 
 def test_m4_m5_m6_evidence_chain_and_absent_coverage_use_only_mcp():
@@ -588,13 +426,12 @@ def test_m4_m5_m6_evidence_chain_and_absent_coverage_use_only_mcp():
                     "cell_numbers": [cell], "timestamp_from": "2026-09-11T00:00:00Z",
                     "timestamp_to": "2026-09-12T00:00:00Z"})
                 assert cells.structured_content["data"]["points"][0]["cell_number"] == cell
-            crashes = await client.call_tool("find_soc_crashes", {
-                "physical_serial": "SERIAL-M4",
+            crashes = await client.call_tool("list_soc_crash_events", {
                 "timestamp_from": "2026-09-11T00:00:00Z",
                 "timestamp_to": "2026-09-12T00:00:00Z"})
             event_id = crashes.structured_content["data"]["events"][0]["event_id"]
-            package = await client.call_tool("build_evidence_package", {"event_id": event_id})
-            assert package.structured_content["data"]["inferred"] is False
+            event = await client.call_tool("get_soc_crash_event", {"event_id": event_id})
+            assert event.structured_content["data"]["event"]["causality"] == "not_determined"
             coverage = await client.call_tool("get_data_coverage", {
                 "physical_serial": "SERIAL-M4", "datasets": ["soc", "soh"],
                 "timestamp_from": "2026-09-11T00:00:00Z",

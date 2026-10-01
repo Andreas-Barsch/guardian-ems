@@ -1,5 +1,14 @@
 # Guardian Research MCP Changelog
 
+## 0.8.2 – Persisted SOC crash event access (prepared, unpublished)
+
+- Removes `find_soc_crashes`, `build_evidence_package`, `query_raw_evidence` and `build_soc_crash_core_evidence` from the previous GitHub main source. Adds `list_soc_crash_events` and `get_soc_crash_event`, forwarding compact persisted Battery events without interpretation; these are not substitutes for raw-evidence or core-evidence retrieval. The target catalogue contains 15 read-only tools, compared with 17 in that source. Refresh cached client tool metadata after the coordinated update and verify the new catalogue.
+- The list tool accepts MCP arguments `timestamp_from` and `timestamp_to`, forwarded as Battery API parameters `from` and `to`; `max_records` remains bounded to 1..500 (default 100).
+- Requires a coordinated Battery 0.8.2 / MCP 0.8.2 update and client adaptation: old and new calls and results are not equivalent. Battery's legacy `/api/research/events/soc-crashes`, `/api/research/evidence-package` and `/api/research/evidence-core` return 404; replacements use `/api/research/soc-crash-events` and its event-ID route.
+- Battery uses configurable defaults X = 5 percentage points, Y = 300 seconds: fixed candidate start (prior drop excluded), immediate first-measurement recognition at drop > X within <= Y, one candidate cancelled before evaluation on role change. Initial ties select no module; the subsequent strict minimum has a null reference. Later ties alone start no candidate. No median or additional recognition criteria.
+- Historical equality events remain readable with unchanged IDs and payloads and are not reclassified; new creation and append require > X. Null references pass through unchanged. Event format and detector identifier remain unchanged.
+- Battery 0.8.1 already identifies another development line; the coordinated pair uses 0.8.2. Tunnel remains 0.8.1 and Diagnostic Engine remains 0.4.12. This version preparation changes no phase-1 behavior and claims no publication or production acceptance.
+
 ## 0.8.1 – Home Assistant Tunnel Host Compatibility
 
 - Adds the repository-qualified internal Home Assistant DNS name
