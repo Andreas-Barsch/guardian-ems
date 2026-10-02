@@ -15,6 +15,7 @@ LOG = logging.getLogger("guardian_research_mcp.audit")
 MAX_PARALLEL = 2
 MAX_FULL_RESOLUTION = 1
 MAX_QUEUE = 8
+QUEUE_TIMEOUT_SECONDS = 15.0
 
 
 class QueryGate:

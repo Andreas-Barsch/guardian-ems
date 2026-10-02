@@ -1,5 +1,21 @@
 # Guardian Research MCP Changelog
 
+## 0.8.4 – Coordinated Research time budget (locally prepared, unpublished)
+
+- Coordinates with Battery 0.8.6: HTTP default and maximum 75 s for Battery's
+  cooperative 60-s processing budget. Queue remains independently 15 s, with
+  unchanged capacity, concurrency and full-resolution limits; no retries.
+- Existing smaller environment/options overrides remain valid and must be checked
+  before installation. Cancellation closes the MCP transport, not Battery's
+  synchronous reader immediately. The outer Connector/Tunnel deadline is unknown.
+- Manifest, server/health/initialize and User-Agent identify 0.8.4. Tool names,
+  argument/result contracts, error forwarding and mixed historical event semantics
+  remain unchanged. Tunnel 0.8.1 and Diagnostic Engine 0.4.12 stay unchanged.
+- MCP-only delivery against rechecked GitHub main; no Battery branch merge.
+  Current Battery 0.8.5/MCP 0.8.3 images/options and current data must be available
+  for rollback before a separately approved installation. No publication or live
+  acceptance is claimed.
+
 ## 0.8.3 – Versioned SOC gap events and Research contract (locally prepared, unpublished)
 
 - Coordinates with Battery 0.8.4. Manifest, server/health/initialize version and
