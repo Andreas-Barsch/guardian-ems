@@ -1,3 +1,26 @@
+# Guardian Research MCP 0.8.4 / Battery 0.8.6 — local preparation
+
+Prepared locally, unpublished and not installed. HTTP default/maximum is 75 s
+for Battery's cooperative 60-s processing budget; the queue stays separately
+15 s with unchanged 8 queued / 2 active / 1 full-resolution limits. Smaller
+explicit GUARDIAN_MCP_GUARDIAN_TIMEOUT_SECONDS or options overrides remain valid
+(environment precedes options precedes default); check effective values before
+installation. The HA manifest still exposes no dedicated timeout option.
+No retries, new tools, changed data contracts or raised size/range limits.
+Cancellation closes MCP HTTP transport but does not immediately cancel Battery's
+synchronous reader. Outer Connector/Tunnel service timeout is unknown; no end-to-end
+success or hard Battery 60-s preemption is promised. Tunnel 0.8.1 and Diagnostic
+Engine 0.4.12 remain unchanged.
+
+Delivery is an MCP-only patch against rechecked GitHub main, never a wholesale
+Battery branch merge. Matching Battery 0.8.6 is delivered separately through its
+full clean-commit local build context. Before installation verify current paired
+Battery 0.8.5/MCP 0.8.3 image artifacts, options and current data/provenance for
+rollback. Do not restore older data over newer events. Publication, installation
+and full external pagination acceptance require separate authorization.
+
+## Historical preparation statements (retained)
+
 # Guardian Research MCP
 
 Version **0.8.3**, locally prepared and **unpublished**, is a provider-neutral,

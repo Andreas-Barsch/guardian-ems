@@ -29,7 +29,7 @@ class Settings:
     log_level: str = "INFO"
     bind_host: str = "0.0.0.0"
     port: int = 8098
-    guardian_timeout_seconds: float = 15.0
+    guardian_timeout_seconds: float = 75.0
 
     def validate(self) -> "Settings":
         split = urlsplit(self.guardian_base_url)
@@ -45,8 +45,8 @@ class Settings:
             raise ValueError("mcp_auth_token is required outside development mode")
         if not self.allowed_hosts or "*" in self.allowed_hosts or "*" in self.allowed_origins:
             raise ValueError("explicit non-wildcard allowed_hosts/origins are required")
-        if not 0 < self.guardian_timeout_seconds <= 15:
-            raise ValueError("guardian timeout exceeds Guardian hard deadline")
+        if not 0 < self.guardian_timeout_seconds <= 75:
+            raise ValueError("guardian_timeout_seconds must be greater than 0 and at most 75")
         if self.log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("invalid log level")
         return self
@@ -69,5 +69,5 @@ def load_settings(path: Path = OPTIONS_FILE) -> Settings:
         log_level=str(option("log_level", "INFO")).upper(),
         bind_host=str(option("bind_host", "0.0.0.0")),
         port=int(option("port", 8098)),
-        guardian_timeout_seconds=float(option("guardian_timeout_seconds", 15)),
+        guardian_timeout_seconds=float(option("guardian_timeout_seconds", 75)),
     ).validate()

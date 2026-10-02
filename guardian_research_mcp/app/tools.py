@@ -10,7 +10,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from errors import GatewayError
-from gateway import QueryGate, ServiceState, audit, request_id
+from gateway import QueryGate, ServiceState, audit, request_id, QUEUE_TIMEOUT_SECONDS
 from guardian_client import GuardianResearchClient
 
 Resolution = Literal["auto", "full", "display"]
@@ -39,7 +39,7 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
         try:
             async with gate.slot(
                 full_resolution=params.get("resolution") == "full",
-                timeout=client.settings.guardian_timeout_seconds,
+                timeout=QUEUE_TIMEOUT_SECONDS,
             ):
                 payload, byte_count = await client.get(endpoint, params)
             state.guardian_reachable = True
