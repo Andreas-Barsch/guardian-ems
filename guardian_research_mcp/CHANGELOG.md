@@ -1,5 +1,18 @@
 # Guardian Research MCP Changelog
 
+## 0.8.5 – Bounded manual history pages (prepared, not yet merged or installed)
+
+- Sends `paged=true` for module-history, cell-history and generic timeseries.
+  Describes explicit same-query continuation, including empty pages, and
+  page-scoped coverage. No automatic follow-ups, retries or new tools.
+- Requires the matching Battery history-page implementation from 23 October
+  2026, installed separately and before this MCP update. Battery 0.8.9 is not
+  a validated paging backend. GitHub main Battery is not changed by this release.
+- Manifest, runtime/health and User-Agent consistently identify 0.8.5.
+  Existing tunnel, authentication, allowlists, dependencies and budgets remain.
+- Isolated MCP test covers all three tool requests and manual continuation;
+  earlier paired local tests remain distinct from pending real HA acceptance.
+
 ## 0.8.4 – Coordinated Research time budget (locally prepared, unpublished)
 
 - Coordinates with Battery 0.8.6: HTTP default and maximum 75 s for Battery's

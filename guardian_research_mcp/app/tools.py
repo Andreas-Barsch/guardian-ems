@@ -31,6 +31,8 @@ READ_ONLY = ToolAnnotations(
 def register_tools(server: MCPServer, client: GuardianResearchClient,
                    gate: QueryGate, state: ServiceState) -> None:
     async def invoke(tool: str, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+        if endpoint in {"timeseries", "module-history", "cell-history"}:
+            params = {**params, "paged": "true"}
         call_id = request_id()
         started = time.monotonic()
         payload: dict | None = None
@@ -103,7 +105,7 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
                                    cursor: str | None = None,
                                    source: Source = "guardian.cell_history") -> dict[str, Any]:
         """Return module evidence: SOC %, voltage V, current A, temperature degC; no causality.
-        Source/metric combinations are validated by Battery; auto selects full up to 24h."""
+        Source/metric combinations are validated by Battery. Responses cover at most one hour; repeat the same query with next_cursor to continue, including empty pages. Coverage applies only to the returned page."""
         return await invoke("query_module_history", "module-history", {
             "physical_serial": physical_serial, "metric": metric,
             "from": timestamp_from, "to": timestamp_to, "resolution": resolution,
@@ -117,7 +119,7 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
                                  cursor: str | None = None) -> dict[str, Any]:
         """Return existing cell-history metrics, including supported module metrics.
         Units: SOC %, module voltage V, current A, temperature degC, cell voltage/deviation/spread mV.
-        Coverage describes source observations, independent of pagination/downsampling."""
+        Coverage describes source observations in the returned hour only. Continue manually with the same query and next_cursor, also for empty pages."""
         return await invoke("query_cell_history", "cell-history", {
             "physical_serial": physical_serial, "metric": metric,
             "cell_numbers": cell_numbers, "from": timestamp_from, "to": timestamp_to,
@@ -184,7 +186,7 @@ def register_tools(server: MCPServer, client: GuardianResearchClient,
                                resolution: Resolution = "auto", max_points: int = 6000,
                                cell_numbers: list[int] | None = None,
                                cursor: str | None = None) -> dict[str, Any]:
-        """Return a registered Research timeseries unchanged; position remains time-dependent."""
+        """Return one bounded time page; position remains time-dependent. Use next_cursor with the same query to continue, including empty pages; coverage is page-only."""
         return await invoke("query_timeseries", "timeseries", {
             "source": source, "metric": metric, "physical_serial": physical_serial,
             "from": timestamp_from, "to": timestamp_to, "resolution": resolution,
