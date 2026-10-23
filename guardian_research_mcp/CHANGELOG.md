@@ -1,5 +1,19 @@
 # Guardian Research MCP Changelog
 
+## 0.8.6 — Explicit historical read failures (prepared, unpublished)
+
+- Preserve safe typed errors for live-priority pauses, historical contention,
+  missing indexes/context/preparation, oversized records, cancellation, selected
+  product budget exhaustion and inconsistent persisted products. Unknown errors
+  and arbitrary backend text remain redacted; transport failures stay distinct.
+- Pair with Battery 0.9.2 for cooperative bounded measurement/phase/product reads.
+  Existing 0.8.5 tool names, paging, request parameters, timeouts and retries are
+  unchanged. This release creates no missing indexes or diagnostic products.
+- Manifest, server/health and User-Agent identify 0.8.6. Tunnel 0.8.1 and Engine
+  0.4.12 unchanged. No security, dependency, Battery-source or installation changes.
+- Based on the 0.8.5 contents of merged PR #4, GitHub main c4aebbe. Earlier
+  preparation notes below are historical; this candidate is not published.
+
 ## 0.8.5 – Bounded manual history pages (prepared, not yet merged or installed)
 
 - Sends `paged=true` for module-history, cell-history and generic timeseries.

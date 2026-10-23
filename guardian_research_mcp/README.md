@@ -1,3 +1,26 @@
+# Guardian Research MCP 0.8.6 — historical error reporting (prepared, unpublished)
+
+This narrow follow-up retains the published 0.8.5 tool/paging contract. It reports
+live-priority/busy, missing history index/context/preparation, oversized records,
+cancellation, selected product budget exhaustion and inconsistent persisted
+products using fixed safe messages instead of a generic API-unavailable error.
+Unknown backend text and secrets remain redacted. No automatic retry or backfill.
+
+The matching local Battery fix is 0.9.2. It permits bounded reads to pause and
+resume during collection; a missing derived product still requires separately
+prepared data and is never fabricated. Install Battery and MCP through their
+existing separate app identities after approval. Tunnel 0.8.1, Engine 0.4.12,
+credentials, allowlists, dependencies and request budgets stay unchanged.
+
+Publication base: GitHub main `c4aebbe281d9516111cb1ab6761e5707c34b4895`
+(merged PR #4), with the same MCP 0.8.5 contents as local
+`21798f08142d1aa6fa22272edcb6edcee250fcdd`. This follow-up changes only
+error mapping, its tests, version strings and documentation. No installation,
+merge or HA acceptance is implied. The preceding release preparation follows
+unchanged as historical context.
+
+---
+
 # Guardian Research MCP 0.8.5 — bounded manual history pages (prepared)
 
 The three tools `query_module_history`, `query_cell_history` and `query_timeseries`
