@@ -1,3 +1,39 @@
+# Guardian Research MCP 0.8.5 — bounded manual history pages (prepared)
+
+The three tools `query_module_history`, `query_cell_history` and `query_timeseries`
+now send `paged=true` to Battery. The matching Battery implementation returns at
+most one hour per response, retaining existing point/byte/time limits. Continue
+explicitly with the same arguments and `next_cursor`, including after empty pages.
+Coverage applies to `pagination.page_range`, not to the entire requested range.
+No automatic follow-up, retry, new tool, hardware request or timeout increase.
+
+Requires the matching locally prepared Battery history-page implementation from
+23 October 2026; deployed Battery 0.8.9 and the separate Battery line on GitHub
+main are not proof of support. Install the matching Battery first, then this MCP
+through the existing repository add-on `3195b09a_guardian_research_mcp`. Battery
+keeps its separate local installation path. Preserve options and a concrete
+return artifact for both components. A merge alone is not installation or live
+acceptance. Do not enable automatic MCP updates ahead of the paired Battery.
+
+This MCP-only change targets Andreas-Barsch/guardian-ems `main`, based on
+`d00466ac5e6f0ff0b32201a25bc4e03da019272e`. Battery code, the existing tunnel
+address/version, credentials, Host/Origin restrictions and dependencies are
+unchanged. No entire Battery branch is merged. Refresh tool descriptions in
+clients and interpret `next_cursor` and page-scoped coverage explicitly.
+
+Validation: the previous paired development check passed 6 Battery/UI tests,
+5 MCP budget tests and 1 real loopback MCP test with concurrent simulated
+six-module acquisition. Those results concern the matching local Battery source,
+not GitHub main's Battery. This release adds an isolated MCP contract test for
+all three paging tools, empty-page continuation and no implicit extra request,
+without importing Battery. Release check: 6 focused tests passed in 1.46 s
+(three paging tools, manifest/runtime version, User-Agent, protocol/security/health);
+Python syntax and diff checks passed. Existing productive-path/network test guard
+was enabled; protocol traffic used loopback only. No broad suite was repeated.
+Production tunnel/HA acceptance remains pending.
+
+## Historical preparation record (retained)
+
 # Guardian Research MCP 0.8.4 / Battery 0.8.6 — local preparation
 
 Prepared locally, unpublished and not installed. HTTP default/maximum is 75 s
