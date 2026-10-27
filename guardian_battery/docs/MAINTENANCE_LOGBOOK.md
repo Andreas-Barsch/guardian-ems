@@ -1,5 +1,51 @@
 # Guardian Battery Maintenance Logbook
 
+## Battery 0.8.3 – lokal vorbereitet, noch nicht veröffentlicht
+
+- Speichern sperrt Mehrfachklicks und Enter während der Übertragung und zeigt
+  Fortschritt sowie Erfolg/Fehler. Jeder bewusst neu geöffnete Erfassungsvorgang
+  bekommt eine UUID als `Idempotency-Key`; Wiederholungen desselben Vorgangs
+  behalten sie. Gleicher Inhalt mit neuer Kennung ist weiterhin zulässig.
+- `POST /api/maintenance/events` mit dieser Kennung speichert einmalig unter
+  dem bestehenden Transaktionslock. Kennung und Anfrageprüfsumme stehen in
+  `source` der ersten Revision. Ein Retry (auch nach Serverneustart) liefert den
+  aktuellen Eintrag mit HTTP 200 statt einer weiteren ID; Erstaufnahme liefert
+  201. Andere Eingaben mit derselben Kennung ergeben 409. MQTT wird nur beim
+  erstmaligen Erzeugen angestoßen, nicht beim Retry. Alte Clients ohne Header
+  bleiben kompatibel, besitzen jedoch keinen Retryschutz. Vorhandene Datensätze
+  werden nicht migriert oder automatisch dedupliziert.
+- **Eintrag löschen** fragt kurz nach und entfernt anschließend sämtliche
+  Revisionen genau dieser ID endgültig aus dem Maintenance-Log. Kein Storno,
+  kein archivierter Ersatz und kein wiederherstellbarer Datensatz. Der
+  Einzelaufruf `DELETE /api/maintenance/events/{id}` verlangt JSON mit
+  `expected_revision`; konkurrierende Änderungen ergeben 409. Sammlungslöschung
+  ist nicht vorhanden. „Auf Nicht aktiv setzen“ / „Aktivieren“ bleiben erhalten.
+- Das Löschen ist die explizite Ausnahme von der unten beschriebenen
+  append-only Speicherung: unter demselben stabilen Lock wird eine temporäre
+  Datei geschrieben, synchronisiert und atomar ersetzt. Die Bytes anderer
+  Einträge bleiben erhalten. Vor dem Ersetzen bleibt bei einem Fehler die
+  vollständige alte Datei erhalten; nach dem Ersetzen gilt die neue Datei.
+- Damit eine verspätete Wiederholung nach einer Löschung den Eintrag nicht
+  erneut erzeugt, enthält `maintenance_events.jsonl.retired-requests` nur den
+  SHA-256 der betreffenden Anfragekennung. Keine Ereignis-ID, Eingabedaten oder
+  Revisionen werden darin aufgehoben. Dieser technische Retryschutz ist kein
+  gelöschter Logbucheintrag und keine Wiederherstellungsmöglichkeit; er wird
+  vor dem Entfernen dauerhaft geschrieben. Eine solche Create-Wiederholung
+  liefert 404. Bei einer Datensicherung gehört die Datei zum selben Datenstand.
+- Positionshistorie und physische Modulzuordnungen bleiben beim Löschen
+  unverändert. Die Positions-API kennzeichnet einen fehlenden Herkunftseintrag
+  mit `maintenance_event_available: false`; die Moduloberfläche zeigt dafür
+  „Eintrag gelöscht“ ohne defekten Link. Historische Quellen-IDs werden nicht
+  umgedeutet und Positionsdaten nicht zurückgerollt.
+- Der laufende Diagnoseinput verwendet nur die jeweils aktuelle aktive
+  Ereignisrevision. Deaktivierung und Löschung werden beim nächsten regulären
+  Einlesen berücksichtigt. Bereits gespeicherte Diagnoseergebnisse oder
+  versendete MQTT-Nachrichten werden nicht rückwirkend verändert.
+- Die vorhandenen produktiven Duplikate bleiben unverändert. Eine Bereinigung
+  erfordert eine separate Auswahl und Freigabe. Diese lokale Änderung ist keine
+  Installation, neue Versionszuordnung oder Betriebsabnahme.
+
+
 ## Implementierungsstand
 
 Implementiert sind Maintenance-Datenmodell, append-only JSONL-Persistenz,
