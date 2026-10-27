@@ -200,7 +200,8 @@ class CellDiagnosticStore:
     def _load(self):
         try:
             if self.path.exists():
-                data = json.loads(self.path.read_text())
+                from diagnostic_startup_io import load
+                data = load(self.path)
 
                 sources = data.get("raw_history_sources", {})
                 if isinstance(sources, dict):
@@ -227,8 +228,10 @@ class CellDiagnosticStore:
             self.load_error = True
 
     def _rebuild_latest_positions(self):
+        from diagnostic_startup_io import checkpoint
         self._latest_by_position.clear()
         for value in self.iter_all_samples():
+            checkpoint()
             module = int(value["module"])
             current = self._latest_by_position.get(module)
             if current is None or float(value["timestamp"]) >= float(current["timestamp"]):
@@ -253,6 +256,8 @@ class CellDiagnosticStore:
         self.unknown_samples.clear()
         ordered = sorted(values, key=lambda item: float(item["timestamp"]))
         for value in ordered:
+            from diagnostic_startup_io import checkpoint
+            checkpoint()
             serial = value.get("module_serial")
             target = self.identity_samples[str(serial)] if serial else self.unknown_samples[int(value["module"])]
             target.append(dict(value))
@@ -336,6 +341,9 @@ class CellDiagnosticStore:
         }
 
     def persist_payload(self, payload):
+        from diagnostic_startup_io import active
+        if active():
+            return  # Never publish a partially initialized startup store.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, separators=(",", ":")))
@@ -419,6 +427,96 @@ class CellDiagnosticStore:
 
         return "NORMAL"
 
+    @staticmethod
+    def empty_current_statistics():
+        cell_count = 15
+        statistics_by_phase = {
+            phase: [
+                {
+                    "n": 0,
+                    "dev": [],
+                    "low": 0,
+                    "high": 0,
+                    "ranks": [],
+                }
+                for _ in range(cell_count)
+            ]
+            for phase in ALL_PHASES
+        }
+
+        return statistics_by_phase
+
+    def accumulate_current_statistics(self, statistics_by_phase, sample, options):
+        voltages = sample["voltages_mv"]
+
+        median_voltage = statistics.median(
+            voltages
+        )
+
+        lowest_voltage = min(voltages)
+        highest_voltage = max(voltages)
+
+        ordered = sorted(
+            set(voltages),
+            reverse=True,
+        )
+
+        ranks = {}
+        position = 1
+
+        for voltage in ordered:
+            count = voltages.count(voltage)
+
+            ranks[voltage] = (
+                position
+                + position
+                + count
+                - 1
+            ) / 2
+
+            position += count
+
+        for phase in self.phases(
+            sample,
+            options,
+        ):
+            for index, voltage in enumerate(
+                voltages
+            ):
+                entry = (
+                    statistics_by_phase[
+                        phase
+                    ][index]
+                )
+
+                entry["n"] += 1
+
+                entry["dev"].append(
+                    voltage
+                    - median_voltage
+                )
+
+                entry["ranks"].append(
+                    ranks[voltage]
+                )
+
+                entry["low"] += (
+                    voltage
+                    == lowest_voltage
+                )
+
+                entry["high"] += (
+                    voltage
+                    == highest_voltage
+                )
+
+
+    def current_condition_statistics(self, values, options):
+        statistics_by_phase = self.empty_current_statistics()
+        for sample in values:
+            self.accumulate_current_statistics(statistics_by_phase, sample, options)
+        return statistics_by_phase
+
     def analyse(
         self,
         module,
@@ -481,83 +579,7 @@ class CellDiagnosticStore:
         cell_count = 15
 
         started = profiler.start() if profiler else None
-        statistics_by_phase = {
-            phase: [
-                {
-                    "n": 0,
-                    "dev": [],
-                    "low": 0,
-                    "high": 0,
-                    "ranks": [],
-                }
-                for _ in range(cell_count)
-            ]
-            for phase in ALL_PHASES
-        }
-
-        for sample in values:
-            voltages = sample["voltages_mv"]
-
-            median_voltage = statistics.median(
-                voltages
-            )
-
-            lowest_voltage = min(voltages)
-            highest_voltage = max(voltages)
-
-            ordered = sorted(
-                set(voltages),
-                reverse=True,
-            )
-
-            ranks = {}
-            position = 1
-
-            for voltage in ordered:
-                count = voltages.count(voltage)
-
-                ranks[voltage] = (
-                    position
-                    + position
-                    + count
-                    - 1
-                ) / 2
-
-                position += count
-
-            for phase in self.phases(
-                sample,
-                options,
-            ):
-                for index, voltage in enumerate(
-                    voltages
-                ):
-                    entry = (
-                        statistics_by_phase[
-                            phase
-                        ][index]
-                    )
-
-                    entry["n"] += 1
-
-                    entry["dev"].append(
-                        voltage
-                        - median_voltage
-                    )
-
-                    entry["ranks"].append(
-                        ranks[voltage]
-                    )
-
-                    entry["low"] += (
-                        voltage
-                        == lowest_voltage
-                    )
-
-                    entry["high"] += (
-                        voltage
-                        == highest_voltage
-                    )
+        statistics_by_phase = self.current_condition_statistics(values, options)
 
         if profiler:
             profiler.finish("current_condition_statistics", started)

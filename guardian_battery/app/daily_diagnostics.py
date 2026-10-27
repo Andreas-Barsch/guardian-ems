@@ -4,6 +4,7 @@ Importing this module performs no I/O.  Callers explicitly supply every input
 and output path; this module never opens Guardian transports or runtime APIs.
 """
 from __future__ import annotations
+from work_scheduler import checkpoint as _work_checkpoint
 
 import fcntl
 import hashlib
@@ -51,6 +52,7 @@ class DailyDiagnosticSources:
     position_history_path: Path | str | None = None
     config_history_path: Path | str | None = None
     maintenance_history_path: Path | str | None = None
+    input_backend: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,12 @@ def _stat(path: Path) -> tuple[int, int, int | None]:
     return value.st_size, value.st_mtime_ns, getattr(value, "st_ino", None)
 
 
+def _cooperative_items(items):
+    for item in items:
+        _work_checkpoint()
+        yield item
+
+
 def _source_files(path: Path | str | None, day: GuardianDay | None = None,
                   discovered: Sequence[Path] | None = None) -> list[Path]:
     if path is None:
@@ -140,7 +148,7 @@ def _source_files(path: Path | str | None, day: GuardianDay | None = None,
             return [root]
         if not root.exists():
             return []
-        files = sorted(item for item in root.rglob("*.jsonl") if item.is_file())
+        files = sorted(item for item in _cooperative_items(root.rglob("*.jsonl")) if item.is_file())
     else:
         files = list(discovered)
     if day is None:
@@ -152,6 +160,7 @@ def _source_files(path: Path | str | None, day: GuardianDay | None = None,
     relevant_dates = {day.diagnostic_date, utc_start.isoformat(), utc_end.isoformat()}
     selected = []
     for item in files:
+        _work_checkpoint()
         try:
             file_date = date.fromisoformat(item.stem[:10]).isoformat()
         except ValueError:
@@ -173,8 +182,22 @@ def _slice_jsonl(name: str, path: Path | str | None, day: GuardianDay,
     totals = {"total": 0, "valid": 0, "invalid": 0, "outside": 0}
     start, end = day.start.timestamp(), day.end.timestamp()
     for source in files:
+        _work_checkpoint()
         before = _stat(source)
-        raw = source.read_bytes()
+        from work_scheduler import active, account
+        if active():
+            chunks = []
+            with source.open('rb') as handle:
+                while True:
+                    _work_checkpoint()
+                    chunk = handle.read(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    account(raw_read_bytes=len(chunk))
+            raw = b''.join(chunks)
+        else:
+            raw = source.read_bytes()
         after = _stat(source)
         if before != after:
             raise SourceChangedError(f"source changed during read: {source}")
@@ -182,6 +205,7 @@ def _slice_jsonl(name: str, path: Path | str | None, day: GuardianDay,
                        "outside": 0, "used": 0}
         file_used_timestamps = []
         for raw_line in raw.splitlines():
+            _work_checkpoint()
             if not raw_line.strip():
                 continue
             file_counts["total"] += 1
@@ -201,6 +225,7 @@ def _slice_jsonl(name: str, path: Path | str | None, day: GuardianDay,
             else:
                 file_counts["outside"] += 1
         for key in ("total", "valid", "invalid", "outside"):
+            _work_checkpoint()
             totals[key] += file_counts[key]
         provenance.append({
             "path": str(source), "logical_name": source.name,
@@ -240,6 +265,7 @@ def _history_projection(records: Sequence[Mapping[str, Any]], day: GuardianDay,
 def _position_resolver(records: Sequence[Mapping[str, Any]]) -> Callable[[str, str], Any] | None:
     snapshots = []
     for record in records:
+        _work_checkpoint()
         try:
             snapshots.append(PositionSnapshot.from_dict(dict(record)))
         except (TypeError, ValueError):
@@ -268,8 +294,16 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":"))
+            from work_scheduler import active, account
+            if active():
+                for chunk in json.JSONEncoder(ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":")).iterencode(payload):
+                    _work_checkpoint()
+                    handle.write(chunk)
+                    account(derived_write_bytes=len(chunk.encode('utf-8')))
+            else:
+                json.dump(payload, handle, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -290,6 +324,7 @@ def _output_lock(output_root: Path, timeout_seconds: float):
     with lock_path.open("a+") as handle:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         while True:
+            _work_checkpoint()
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
@@ -326,6 +361,7 @@ def _risk_history_records(path: Path | str | None, day: GuardianDay) -> tuple[Ma
     """Read the current and preceding 13 Guardian days for the daily job only."""
     records = []
     for offset in range(13, -1, -1):
+        _work_checkpoint()
         target = date.fromisoformat(day.diagnostic_date) - timedelta(days=offset)
         records.extend(_slice_jsonl("cell", path, guardian_day(target, day.timezone)).records)
     records.sort(key=lambda item: (_timestamp(item["timestamp"]),
@@ -335,6 +371,8 @@ def _risk_history_records(path: Path | str | None, day: GuardianDay) -> tuple[Ma
 
 def build_source_catalog(sources: DailyDiagnosticSources) -> dict[str, tuple[Path, ...]]:
     """Discover source filenames once without reading record contents."""
+    if sources.input_backend is not None:
+        return {}  # Explicit prepared windows; never global filename discovery.
     paths = {
         "rs485": sources.rs485_history_root,
         "cell": sources.cell_history_root,
@@ -355,26 +393,32 @@ def probe_daily_inputs(diagnostic_date: date | str, sources: DailyDiagnosticSour
     parameters = bms_parameters or EvidenceParameters(daily_timezone=timezone_name)
     if parameters.daily_timezone != timezone_name:
         raise ValueError("BMS daily timezone must match the Guardian day timezone")
-    catalog = source_catalog or {}
-    rs485 = _slice_jsonl("rs485", sources.rs485_history_root, day,
-                         discovered=catalog.get("rs485"))
-    cells = _slice_jsonl("cell", sources.cell_history_root, day,
-                         discovered=catalog.get("cell"))
-    positions = _slice_jsonl("position_history", sources.position_history_path, day,
-                             timestamp_field="effective_at",
-                             include_history_before_day=True,
-                             discovered=catalog.get("position_history"))
-    configs = _slice_jsonl("config_history", sources.config_history_path, day,
-                           include_history_before_day=True,
-                           discovered=catalog.get("config_history"))
-    maintenance = _slice_jsonl("maintenance_history", sources.maintenance_history_path, day,
-                               timestamp_field="occurred_at",
-                               discovered=catalog.get("maintenance_history"))
+    if sources.input_backend is not None:
+        slices, risk_records = sources.input_backend.read(day)
+        rs485, cells, positions, configs, maintenance = (
+            slices[name] for name in ('rs485', 'cell', 'position_history',
+                                     'config_history', 'maintenance_history'))
+    else:
+        catalog = source_catalog or {}
+        rs485 = _slice_jsonl("rs485", sources.rs485_history_root, day,
+                             discovered=catalog.get("rs485"))
+        cells = _slice_jsonl("cell", sources.cell_history_root, day,
+                             discovered=catalog.get("cell"))
+        positions = _slice_jsonl("position_history", sources.position_history_path, day,
+                                 timestamp_field="effective_at",
+                                 include_history_before_day=True,
+                                 discovered=catalog.get("position_history"))
+        configs = _slice_jsonl("config_history", sources.config_history_path, day,
+                               include_history_before_day=True,
+                               discovered=catalog.get("config_history"))
+        maintenance = _slice_jsonl("maintenance_history", sources.maintenance_history_path, day,
+                                   timestamp_field="occurred_at",
+                                   discovered=catalog.get("maintenance_history"))
+        risk_records = _risk_history_records(sources.cell_history_root, day)
     position_projection = tuple(_history_projection(
         positions.records, day, "effective_at"))
     config_projection = tuple(_history_projection(configs.records, day, "timestamp"))
     manifest = _component_manifest(parameters)
-    risk_records = _risk_history_records(sources.cell_history_root, day)
     semantic = {
         "timezone": timezone_name, "diagnostic_date": day.diagnostic_date,
         "daily_schema_version": DAILY_SCHEMA_VERSION,

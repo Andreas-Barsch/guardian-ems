@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from projection_repository import Unavailable
+from research_budget import ResearchQueryError
+
 import json
 from urllib.parse import parse_qs, urlsplit
 
 from maintenance_api import ApiResponse, error_json
+from maintenance_service import MaintenanceNotFoundError
 from position_history import (PositionHistoryConflictError, PositionHistoryError,
                               PositionHistoryValidationError, current_presence,
                               project_live_topology)
@@ -36,8 +40,23 @@ class PositionHistoryApi:
             return ApiResponse(409, error_json("conflict", str(exc), {"expected": exc.expected, "actual": exc.actual}))
         except PositionHistoryError:
             return ApiResponse(503, error_json("history_error", "Position history is unavailable"))
+        except (Unavailable, ResearchQueryError) as exc:
+            return ApiResponse(503, error_json(getattr(exc, 'code', 'history_preparation_required'), str(exc)))
         except Exception:
             return ApiResponse(500, error_json("internal_error", "Internal server error"))
+
+    def _snapshot_json(self, item, available_ids=None):
+        result = item.to_dict()
+        if available_ids is not None:
+            result["maintenance_event_available"] = item.maintenance_event_id in available_ids
+            return result
+        try:
+            self.service.maintenance_service.get(item.maintenance_event_id)
+        except MaintenanceNotFoundError:
+            result["maintenance_event_available"] = False
+        else:
+            result["maintenance_event_available"] = True
+        return result
 
     def _get(self, suffix: str, query: str) -> ApiResponse:
         raw = parse_qs(query, keep_blank_values=True)
@@ -45,7 +64,9 @@ class PositionHistoryApi:
         if len(values) != len(raw):
             raise PositionHistoryValidationError("query parameters must occur once")
         if not suffix:
-            return ApiResponse(200, {"snapshots": [item.to_dict() for item in self.service.list()],
+            available_ids = {event.maintenance_event_id for event in
+                             self.service.maintenance_service.list(include_archived=True)}
+            return ApiResponse(200, {"snapshots": [self._snapshot_json(item, available_ids) for item in self.service.list()],
                                      "serial_histories": self.service.serial_histories()})
         if suffix == "current":
             item = self.service.current()
@@ -58,7 +79,7 @@ class PositionHistoryApi:
             observed = {str(position): value["observed_serial"]
                         for position, value in presence.items()
                         if value["status"] == "present"}
-            return ApiResponse(200, {"snapshot": item.to_dict() if item else None,
+            return ApiResponse(200, {"snapshot": self._snapshot_json(item) if item else None,
                                      "documented": documented,
                                      "observed": observed,
                                      "presence": {str(k): v for k, v in presence.items()},

@@ -1,35 +1,379 @@
+## Vorbereitete Battery 0.9.11 — RS485-Identitätscheckpoint
+
+Noch nicht installiert. Betriebsmodus, einmaliger historischer Seed, Schreibschutz
+bei beschädigter Datei und Rückkehr auf 0.9.10 sind in
+[RS485_IDENTITY_CHECKPOINT.md](RS485_IDENTITY_CHECKPOINT.md) beschrieben.
+Keine erneute 100.000-Zeilen-Suche im normalen Legacy-Start. Der vorbereitete
+Modus behält den vorhandenen bestätigten Index. Keine Änderung an Erfassung,
+Recorder, Maintenance-/Positionshistorie, MCP, Tunnel, Engine oder SSD.
+
+## 0.9.10 — vorbereitet, nicht installiert
+
+- Ausschließlich HA-Anzeigemetadaten der drei bestehenden Hycube-SOC-Grenzen:
+  device_class battery, weiterhin % und state_class measurement.
+- Eindeutige Namen: Hycube SOC-Grenze Normalbetrieb / Passiv,
+  Hycube SOC-Grenze Passiv / Notstrom, Hycube SOC-Grenze Notstrom / Batterieschutz.
+- Bewusst vom Nutzer bestätigte Einordnung für die gemeinsame Darstellung mit
+  den sieben SOC-Sensoren im normalen HA-Verlauf. Diese Werte sind weiterhin
+  Policy-Schwellen, keine gemessenen Batterieladestände; andere HA-Ansichten und
+  Automationen können sie durch die Klassifizierung als Batteriesensoren behandeln.
+- Discovery-Themen, unique_ids, Zustandsthemen und vorhandene EntityIDs bleiben
+  erhalten. Keine Duplikate, Rohdatenänderung, zusätzlichen Abfragen oder neuen
+  Intervalle. Keine HA-Core-/Frontend-Änderung und keine Sonderdetailansicht.
+- Produktive Prüfung der gemeinsamen Darstellung steht bis zur ausdrücklichen
+  Installationsfreigabe aus; freie Intervall- und Quellenauswahl bleiben HA-seitig.
+
+Rückkehr: laufende 0.9.9 aus Commit 01078c84b5ef0a738cbc4341406465395107e29d.
+Vor einer Installation deren Image und Optionen sichern; das bisher dokumentierte
+Backup 22f4e3ad enthält 0.9.8 und ist kein 0.9.9-Image-Nachweis. Der 0.9.9-Quellkontext
+liegt im externen Paket guardian-battery-099-ready-20261025-01078c8 vor.
+Eine Rückkehr auf 0.9.9 veröffentlicht bei Start/Discovery wieder die bisherigen
+Namen und entfernt device_class aus den drei Grenz-Discovery-Payloads.
+Keine Sensoren löschen oder EntityIDs ändern; keine /share-Daten zurückspielen.
+Nach freigegebener Installation einmal die bestehenden EntityIDs/eindeutigen
+Grenznamen und alle zehn Reihen in einem normalen HA-Verlaufsdiagramm prüfen.
+MCP/Tunnel/Engine/SSD unverändert. Wiederherstellung nicht praktisch getestet.
+
+## 0.9.9 — Hycube als HA-Sensoren (vorbereitet, nicht installiert)
+
+Battery-only auf Basis der laufenden 0.9.8. Vor Installation deren Image und
+Optionen als Rückkehrstand sichern; bisheriges Backup 20b45766 enthält 0.9.7,
+nicht 0.9.8. Alte Quellen und /share-Rohdaten erhalten. Installation erst nach
+konkreter Freigabe, kein HA-Neustart und keine Recorder-Konfigurationsänderung.
+
+Neue MQTT-Discovery-IDs unter homeassistant/sensor/guardian_battery/<key>/config:
+- hycube_battery_capacity: Hycube Battery Capacity SOC, Prozent-Systemangabe;
+  keine Ah/kWh und kein behaupteter Median der Module.
+- hycube_boundary_normal_passive: Hycube Grenze Normalbetrieb / Passiv.
+- hycube_boundary_passive_emergency: Hycube Grenze Passiv / Notstrom.
+- hycube_boundary_emergency_protection: Hycube Grenze Notstrom / Batterieschutz.
+
+unique_id jeweils guardian_battery_<key>; HA vergibt die tatsächliche entity_id.
+Alle Einheiten %, state_class measurement. Nur der System-SOC hat device_class
+battery. Die Grenzen verwenden die schon validierten kumulativen Policy-Werte.
+Discovery folgt publish_discovery; keine versteckten/deaktivierten Entitäten.
+Zustände unter <prefix>/battery/sensor/<key>/state werden nicht retained gesendet.
+Battery-Verfügbarkeit UND getrennte System-/Policy-Verfügbarkeit müssen online
+sein. Nach Start/Reconnect sind beide Quellen bis zur frischen Beobachtung offline.
+Ungültige Werte/Abfragefehler melden die betroffene Quelle sofort offline.
+HA expire_after beträgt aufgerundet drei konfigurierte Erfassungsintervalle plus
+HTTP-Timeout: bei 20 s / 300 s und 0,8 s Timeout 61 s / 901 s. Das ist eine
+Anzeige-Frischegrenze, keine neue SOC-Erkennungsregel. Stillstand ohne neue
+Nachrichten läuft dadurch ebenfalls ab. MQTT-Fehler verändern keine Erfassungs-
+oder Wiederholungsintervalle. Keine weiteren Gerätezugriffe und kein Rohdatenreplay.
+
+HA-Verlauf beginnt ab Veröffentlichung, soweit Recorder diese Sensoren aufzeichnet.
+Keine alten Guardian-Werte importieren. Der Rückkehrweg ist das vor dem Update
+zu sichernde 0.9.8-Add-on/Image mit Optionen; keine alten /share-Daten zurückspielen.
+Eine Rückkehr entfernt neue retained Discovery-Einträge nicht automatisch;
+die Sensoren werden ohne frische Nachrichten unavailable. Wiederherstellung
+nicht getestet. MCP/Tunnel/Engine/SSD bleiben unverändert.
+
+## 0.9.6 — gezielte SOC-Leseindexvorbereitung (lokal vorbereitet)
+
+Installiert bleibt bis zur neuen Installationsfreigabe Battery 0.9.5. Der minimale
+Updateumfang ist ausschließlich Battery; MCP 0.8.6, Tunnel 0.8.1, Engine 0.4.12,
+Optionen und Rohdaten bleiben erhalten. Vor Update 0.9.5-Image/Optionen und
+Quellkontext sichern. Kein HA-Neustart, keine Phasen-/Diagnoseneuberechnung.
+
+Die bereits freigegebene Vorbereitung betrifft Modul 1, 20.10.2026 20:30 bis
+25.10.2026 19:30 Europe/Berlin, also 20.10.18:30Z bis 25.10.18:30Z.
+Nach Installation über den vorhandenen geschützten `api/history-preparation`
+sequentielle Aufträge (bestehende 48h-Grenze) mit
+`components: ["cell_index", "hycube_source_index", "policy_index"]`,
+`modules: [1]`, `shared_day_artifacts: true`, `selected_sources_only: true`:
+
+1. 20.10.18:30Z bis 22.10.18:30Z.
+2. 22.10.18:30Z bis 24.10.18:30Z.
+3. 24.10.18:30Z bis 25.10.18:30Z.
+
+Gemeinsame Tagesindizes enthalten alle aufgezeichneten Kanäle. Überschneidende
+Tagesindizes werden validiert und wiederverwendet. Nur einen Auftrag gleichzeitig
+starten; kompakter Auftragsstatus begleitet die Arbeit. `complete` bedeutet
+abgearbeiteten Auftrag, nicht vollständige Historie. Offene Tage heißen
+`writer_owned`; ausschließlich bestehende Writer dürfen dort nachziehen.
+
+Policy-Leser benötigen einen belegten Vorgänger aus dem ersten ausgewählten oder
+dem unmittelbar vorherigen Kontexttag. Ohne solchen Nachweis bleibt der alte,
+begrenzte Kontextweg zuständig; ein fehlender Index führt weiterhin zu expliziter
+Nichtverfügbarkeit. Kein frei erfundener Anfangswert und keine Übernahme aktueller
+Policy als historische Wahrheit. Indizierte Policy-Abfragen lesen höchstens 256
+gewählte Records / 256 KiB, Einzelrecord höchstens 64 KiB; unindexierter Kontext
+bleibt unverändert auf insgesamt 64 KiB begrenzt. Seitencursor und manuelle
+Stundenabschnitte bleiben unverändert.
+
+Anschließend genau das gemeldete SOC-Fenster einmal manuell laden und die wirklich
+angezeigte Seite mit Punktzahl, Zeitspanne sowie Quellen-/Phasenlücken berichten.
+Bei `history_busy` keine automatische Wiederholung oder zusätzliche Prüfschleife.
+Ein Teilverlauf ist keine vollständige Historien- oder Balancing-Abnahme.
+
+## 0.9.5 — manuelle SOC-Abfragen bei fehlenden Teilindizes (vorbereitet)
+
+Lokaler Kandidat; noch nicht installiert oder abgenommen. Battery-only-Update
+mit erhaltenem 0.9.4-Image, Optionen und Quellkontext. Keine Änderung an MCP,
+Tunnel, Engine, SSD oder Rohdaten. Keine Indexvorbereitung durch HTTP-Anfragen.
+Nicht verfügbare Quellen/Zeitabschnitte erscheinen ausdrücklich in
+`unavailable_intervals` und in der UI; keine Behauptung vollständiger Historie.
+Dies repariert keine fehlenden Indizes und berechnet keine Phasen neu.
+
+Gezielte Abnahme nach Installationsfreigabe: SOC, Modul 1, 21.10.2026 10:07 bis
+24.10.2026 10:07 Europe/Berlin (08:07Z bis 08:07Z), sowie 24.10.2026 20:18 bis
+25.10.2026 19:18 (18:18Z bis 18:18Z; Zeitumstellung). Bestehende manuelle
+Stundenseiten bleiben erhalten. Erste Seite und gezielte nächste Seite prüfen;
+kein automatisches Durchladen. Sichtbare Messwerte, nicht lesbare Teilbestände
+und weiterhin fehlende Policy-/Phasenbelege getrennt dokumentieren. Ein HTTP 200
+mit Leselücken ist ausdrücklich kein Beleg einer vollständig reparierten Historie.
+
+## 0.9.4 — gezielte Wiederfreigabe vorhandener Phasen (vorbereitet)
+
+Nur nach Installationsfreigabe: vorhandenes lokales Battery-Add-on aktualisieren;
+0.9.3-Image/Optionen und Quellkontext als Rückkehrstand erhalten. Keine Änderung
+an MCP 0.8.6, Tunnel 0.8.1, Engine 0.4.12 oder 20/20/60.
+Für den geschlossenen 22.10.2026 einmal über den vorhandenen Ingress-Endpunkt
+`api/history-preparation` die Komponente `canonical_index` mit explizitem Fenster,
+Modul 6 und `shared_day_artifacts:true` beauftragen. Der bestehende Worker und
+seine globale Sperre bleiben zuständig. Kein `canonical_bootstrap_from`, kein
+allgemeiner Rebuild und kein Zurückspielen alter Rohdaten.
+Das vorhandene gzip bleibt bytegleich und weiterhin unvollständig gekennzeichnet;
+der vorherige SQLite-Index bleibt im Auftrags-Staging als
+`previous.window.sqlite` erhalten. Konfigurationskompatibilität erfordert einen
+unveränderten SHA-256-Präfix sowie ausschließlich spätere Ergänzungen.
+Danach genau ein begrenzter MCP-Phasenabruf im belegten Erfassungszeitraum.
+Abrufbarkeit, erkannte Ladephasen und Balancing-Beurteilbarkeit getrennt berichten.
+
+## Nachtrag: expliziter lokaler Add-on-Einstieg (21.10.2026, unveröffentlicht)
+
+Der nach abf6dcd vorbereitete Kandidat ergänzt den vorhandenen Supervisor-
+Build-/Updateweg um ausdrücklich angelegte Steuerdateien unter `/share/guardian_battery`.
+`guardian-prepared-migration-request.json` führt ausschließlich ausdrücklich budgetierte (1–1.000.000) wiederanlaufbare
+Offline-Schritte aus und beendet den Prozess ohne Erfassung. Der getrennte
+`guardian-prepared-activation.json` verwendet den vorhandenen Quell-/Versions-/
+Layoutnachweis. Widersprüchliche oder ungültige Steuerdateien brechen vor jeder
+Erfassung ab. Ohne Steuerdateien bleibt der bisherige Startpfad erhalten.
+Bei Bindungsroot `/` müssen Migrationszustand, Layout und Derived-Stores ausdrücklich
+auf persistente Pfade unter `/share` gelegt werden (`state_directory` im Plan).
+Ein normales Update allein migriert oder aktiviert nichts. Ablauf, Dateiverträge,
+Rückkehr und verbleibende Prüfgates stehen in `P0_PREPARED_CANDIDATE.md`, Abschnitt
+„Local add-on entrypoint extension“. Keine Installation oder HA-Abnahme behauptet;
+frühere Abschnitte bleiben historische Nachweise.
+
+# P0-Releasevorbereitung 21.10.2026 — Battery 0.9.0, unveröffentlicht
+
+0.9.0 bezeichnet den vollständigen vorbereiteten, migrationspflichtigen
+Anwendungspfad. 0.8.9 bleibt unten als Zwischenstand dokumentiert. Manifest,
+Laufzeit und versiegelter Build müssen dieselbe neue Kennung tragen; bestehende
+Images/Buildmarker sind nicht umzudeklarieren. MCP 0.8.4, Tunnel 0.8.1 und Engine
+0.4.12 bleiben unverändert. Der normale Containerstart kennt jetzt den getrennten
+Aktivierungsnachweis `/data/guardian-prepared-activation.json`; ohne ihn bleibt
+der Legacyweg, mit fehlerhaftem Nachweis folgt ein harter Startfehler. Keine
+solche Datei wird durch Migration angelegt. Keine Installation oder Aktivierung durch diesen
+Versionsschritt. Der konkrete Offline-Pfad und offene Rückkehr-/HA-Gates stehen
+in [P0_PREPARED_CANDIDATE.md](P0_PREPARED_CANDIDATE.md).
+
+---
+
+# Lokale Architekturfortsetzung 21.10.2026 — Battery 0.8.9
+
+Vollständiger vorbereiteter Pfad, Offline-Migration und separate Freigabegates:
+[P0_PREPARED_CANDIDATE.md](P0_PREPARED_CANDIDATE.md).
+Standardstart bleibt Legacy. Kein produktiver Migrationsaufruf, kein neuer
+Installationsnachweis und keine Veränderung von Raw-/Ereignisdaten durch diesen
+Arbeitsstand. Vor einer Installation sind passender sauberer Quellcommit,
+versiegelter vollständiger Build, reale Inventur, Datenerhalt/Rückkehr und
+separate Freigabe erforderlich. MCP/Tunnel/Engine unverändert.
+Alle folgenden Datumsstände und Abnahmen bleiben historisch erhalten.
+
+---
+
+# Lokaler Folgeentwurf Battery 0.8.9 — 20.10.2026
+
+Installierter, separat freigegebener Stand bleibt 0.8.8 / 02d5e1e1ad9a9e9bc8644b70c25389448ecdb575.
+Der lokale 0.8.9-Fix entfernt die belegten vollständigen Aggregate-Kopier- und
+Projektionsarbeiten aus dem Collector; siehe [P0_LIVE_SNAPSHOTS.md](P0_LIVE_SNAPSHOTS.md).
+Kein weiterer Build oder Deployment durch diese Dokumentation. Erst einen
+vollständigen geprüften Folgecommit mit passendem BUILD_VERSION/Quellmarker
+bereitstellen und den konkreten Installationsschritt separat freigeben lassen.
+Rohdaten und Optionen erhalten, niemals ältere /share-Daten zurückspielen.
+MCP/Tunnel/Engine unverändert. History-Pilot erst bei tragfähigem Live-Takt;
+keine Gesamt-P0-Abnahme aus lokalen Tests ableiten.
+Die folgenden Abschnitte sind historische Stände und bleiben erhalten.
+
+---
+
+# Lokaler Startpfad-Folgekandidat – Battery 0.8.8
+
+Unveröffentlicht, noch nicht installiert. Ausgangsstand 0.8.7 / 7cec2be ist
+installiert; dessen Diagnose-Startvollscan verzögert die Live-Erfassung.
+Die lokale Korrektur und ihre Grenzen stehen in
+[P0_DIAGNOSTIC_STARTUP.md](P0_DIAGNOSTIC_STARTUP.md).
+MCP 0.8.4, Tunnel 0.8.1, Engine 0.4.12 und Optionen bleiben unverändert.
+Vollständigen sauberen Folgecommit, BUILD_VERSION 0.8.8 und passenden
+Quellmarker gemeinsam paketieren; kein Overlay. Aktuelle Raw-/Ereignisdaten
+behalten, keine ältere `/share`-Sicherung zurückspielen. Der vorhandene
+0.8.6-Image-Rückkehrnachweis ist getrennt von der neuen HA-Abnahme zu behandeln.
+Für die anschließende Ursachenmessung die festen Stufenzeiten im normalen
+`/api/rs485/status` mit derselben Zyklus-ID vergleichen; keine Debugoption
+setzen und keine zusätzlichen Hardwarepolls auslösen. Vorläufer202dece wird
+durch den separat geprüften Folgecommit/Build ersetzt, Version bleibt0.8.8.
+Historische Abschnitte folgen unverändert.
+
+---
+
+# Lokaler P0-Kandidat 19.10.2026 – Battery 0.8.7
+
+Basis d1d6d3609080d613c6c42822bea865b1358843a0. Isolierter lokaler
+Sicherungskandidat auf `codex/battery-p0-history-087`; Commit-ID und abschließender
+Git-Status stehen im externen Abschlussvermerk. Kein Build, Deployment oder
+HA-Abnahmenachweis.
+MCP 0.8.4, Tunnel 0.8.1 und Diagnostic Engine 0.4.12 bleiben unverändert.
+Die am 19.10. über Supervisor beobachtete Battery meldete 0.8.6 / started;
+eine Versionszeichenkette allein bestätigt keinen Quellcommit.
+
+Verbindliche P0-Lesegrenzen, Indexvoraussetzungen und Abnahmegates:
+[P0_HISTORY_PERFORMANCE.md](P0_HISTORY_PERFORMANCE.md).
+Lokaler Nachtrag: Der ausgewählte Vorbereitungseinstieg und sein exakter
+Pilotumfang sind in [P0_SELECTED_HISTORY_PREPARATION.md](P0_SELECTED_HISTORY_PREPARATION.md)
+beschrieben. Keine produktive Ausführung erfolgt; nicht die alten pauschalen
+Rebuild-POSTs als Ersatz auslösen. Checkpoints benötigen passende geschlossene
+Quellen und einen validierten kanonischen Vorgänger; gesperrte Schritte erweitern
+den freigegebenen Umfang nicht.
+Vor Installation vollständigen Kontext aus dem geprüften sauberen Commit mit
+BUILD_VERSION 0.8.7 und passendem Quellmarker bereitstellen. Kein App-Overlay,
+keine Raw-/Ereignismigration, kein historischer Ereignisimport und keine SSD-Aktion.
+Die frühere konkrete 0.8.6-Freigabe ist keine Freigabe dieses neuen Kandidaten.
+HA-Core-SSH hat keine Python-Laufzeit; keine zusätzliche Laufzeit dort installieren.
+Der bisherige Git-/Installations-/Dashboardzustand und aktuelle Rückkehrartefakte
+sind getrennt zu prüfen. Folgende Abschnitte bleiben historische Dokumentation.
+
+---
+
+# Guardian EMS – lokale Releasevorbereitung Battery 0.8.6 / MCP 0.8.4
+
+## Lokale Vorbereitung 02.10.2026: Research-Zeitbudget
+
+Noch nicht installiert: Battery 60 s kooperatives Verarbeitungsbudget, MCP 75 s
+HTTP-Default/Maximum, Queue separat 15 s. Lokal vorbereitet: Battery 0.8.6 /
+MCP 0.8.4. Vor Produktmaßnahmen ist ein gemeinsam freigegebener Buildstand nötig.
+Tunnel und Diagnostic Engine unverändert, Diagnose-App gestoppt/geschützt lassen.
+Vorhandene Timeout-Overrides prüfen; keine Erfolgszusage für die unbekannte äußere
+Connectorfrist. [Budgetkette und konkrete Abnahmegrenzen](RESEARCH_READER_IO.md).
+Battery weiterhin als vollständigen Kontext aus dem noch freizugebenden sauberen
+Releasecommit paketieren; BUILD_VERSION 0.8.6 und genau dessen Quellmarker.
+MCP nur mit begrenztem MCP-Patch gegen erneut geprüftes GitHub-main bereitstellen;
+kein Gesamtbranch-Merge. Noch kein Kontext, Image oder veröffentlichter Stand.
+Vor Installation aktuelles Rückkehrpaket Battery 0.8.5/MCP 0.8.3 mit beiden
+Images, Optionen und aktuellen Daten verifizieren. Die belegte ältere Sicherung
+mit Battery 0.8.4 ersetzt es nicht; Wiederherstellbarkeit nicht abgenommen.
+Niemals ältere Daten über neuere Ereignisse/Herkunftsnachweise zurückspielen.
+Die folgenden Installations- und Prüfstände bleiben historische Belege.
+
+## Historische Vorbereitung vom 1. Oktober 2026
+
+
+Stand 01.10.2026: Battery 0.8.5 vorbereitet; die Installation wurde gesondert
+freigegeben, ihr Abschluss ist hier noch nicht behauptet. Ausgangslage:
+local_guardian_battery 0.8.4 / Quellcommit fd2e708, Research-MCP 0.8.3 laufend.
+Die 70 historischen Ereignisse wurden separat freigegeben importiert und über
+MCP abgenommen. Ereignisse und Herkunftsnachweise unverändert erhalten.
+
+Nur Battery benötigt einen vollständigen neuen Buildkontext aus dem sauberen
+Releasecommit, BUILD_VERSION 0.8.5 und passenden Quellmarker. Vorher aktuelle
+0.8.4-Rückkehrsicherung mit Image/Optionen und Daten prüfen. MCP, Tunnel 0.8.1,
+Engine 0.4.12, gap=5/window=300 und zweite gestoppte Battery unverändert.
+Kein Gesamtbranch-Merge, kein App-Overlay, keine SSD-/Migrationsaktionen.
+Abnahme: RESEARCH_READER_IO.md; drei Problemfenster und vollständige Pagination
+extern über MCP, anschließend regulären Messbetrieb anhand vorhandener Logs prüfen.
+
+## Historischer Runbook-Stand vor dieser Vorbereitung
+
 # Guardian EMS – Environment Runbook
+
+## Aktuelle lokale Vorbereitung: Battery 0.8.4 / Research-MCP 0.8.3
+
+Stand 01.10.2026: unveröffentlicht, nicht installiert. Funktionsstand `3b3f3a4`
+bleibt unverändert; nur Versionskennungen, Dokumentation und direkte Tests werden
+vorbereitet. Tunnel 0.8.1 und Diagnostic Engine 0.4.12 bleiben unverändert. Die
+folgenden älteren Abschnitte beschreiben ihre damaligen Regeln und Abnahmen.
+
+- Battery verwendet weiterhin `local_guardian_battery` und den belegten vollständigen
+  lokalen Buildkontext. Erst nach separater Freigabe aus dem sauberen finalen
+  Releasecommit paketieren; neuer Quellmarker, Manifest/Laufzeit/BUILD_VERSION 0.8.4.
+  Bestehende App-Identität, Optionen und `/share` erhalten; kein Overlay und keine
+  Änderung der zweiten gestoppten Repository-Battery.
+- MCP bleibt `3195b09a_guardian_research_mcp`. Später ausschließlich enger MCP-Stand
+  auf erneut geprüftem GitHub-main, kein Gesamtbranch-Merge. Aktuelle GitHub-main-
+  Doku zu vier entfernten Alttools und MCP-Argumenten timestamp_from/timestamp_to
+  erhalten. Gepaarte lokale Battery/MCP-Vertragstests benötigen passenden Battery-
+  Code; isolierte MCP-Veröffentlichung separat prüfen. Keine neue Build-Infrastruktur.
+- Wirksame SOC-Werte später ausdrücklich prüfen: `soc_crash_gap_pp=5.0` und
+  `soc_crash_window_seconds=300`. Alter `soc_crash_drop_pp` wird optional akzeptiert,
+  nicht verwendet/umgedeutet und mit Startwarnung gemeldet. Neuer Default nur bei
+  fehlendem Gap-Schlüssel; individuelle alte Werte bewusst prüfen.
+- Erkennung: aktueller Abstand zum aktuellen Zweitminimum >= X innerhalb <= Y seit
+  festem Kandidatenbeginn; Startmessung darf bestätigen. Rollenwechsel zuerst,
+  initial eindeutiges Minimum nur Ausgangsrolle, gemeinsame neue Minima warten
+  auf Eindeutigkeit, keine Modulnummernauswahl. Späterer Gleichstand mit bisherigem
+  Schwächsten/Referenzwechsel verlängert die Frist nicht. Einmodulgruppen pausieren
+  ohne Reset; kein erneutes Ereignis ohne Rollenwechsel. Kein zusätzlicher Eigenabfall
+  oder Median. Details: [aktueller SOC-Vertrag](SOC_CRASH_SIMPLE.md).
+- Schema 2 / `guardian_soc_gap_v1` mit Abstand und allen Zweitminimum-Referenzen;
+  alte Schema-1-Eigenabfallereignisse einschließlich Gleichheit unverändert lesbar.
+  Eventliste `guardian_soc_events_v2`, Einzelabruf jeweilige Detektorkennung;
+  generischer Research-Envelope bleibt Schema 1. Clients nicht nach einem einzigen
+  Schemafeld pauschal umstellen; Alt/Neu ausdrücklich unterscheiden.
+- Vor Installation neuer aktueller Rückkehrnachweis: tatsächliche Battery-/MCP-
+  Images, Optionen und vollständige `/share`-Daten, Archivinhalt und Prüfsummen.
+  Ein alter 0.8.2-Backupnachweis oder vorhandener 0.8.3-Quellkontext ist kein aktuelles
+  0.8.3-Imagebackup. Verfügbarkeit und Restorefähigkeit getrennt benennen.
+  Alte Leser überspringen Schema 2; neue Datenbytes erhalten, passende Altoptionen
+  sichern, keinen alten Snapshot automatisch über seitdem gesammelte Daten legen.
+- Spätere Abnahme: Version/Quellcommit aus Battery-Startlog, MCP-Version/Imageherkunft,
+  Status und aktualisierten 15-Tool-Katalog prüfen. Kleines festes UTC-Datenfenster
+  für SOC/Strom/Zellspannung und Coverage einzeln/kombiniert unter normaler Last;
+  Einheiten, PWR-/Cell-Zeitbezug, Randlücken, Laufzeiten und Fehlerursprung prüfen.
+  Keine zusätzlichen Batterie-/RS485-Polls oder produktiven Testereignisse. Status
+  allein belegt keine Version, frische Messung oder Schema-2-Einzelausgabe.
+- Bekannte Startaufbereitung kann Messaufnahme verzögern; dokumentierte ca. elf
+  Minuten sind keine zugesagte Dauer. Auf regulären Abschluss und vorhandene neue
+  Messzyklen warten. Keine Timeout-/Collectoränderung Teil dieser Vorbereitung.
+- 70 historische Treffer bleiben vorläufiger externer Dry-run; spätere Übernahme
+  benötigt eigenen Auftrag mit Quellhashes, Zeitraum, identischem Detektor/X/Y,
+  Herkunftsmanifest und Deduplikationsprüfung. Andere IDs verhindern keine
+  semantische Alt/Neu-Doppelzählung; nach Detektorversion auswerten. Keine automatische
+  SOC-Befüllung beim Start, kein produktiver Import aktiviert.
+
+Keine Veröffentlichung, Build-, Backup-, Installations- oder Rückkehraktion ist
+mit diesem dokumentierten Plan ausgeführt oder freigegeben.
+
+
+## Lokale Maintenance-Korrektur: Battery 0.8.3
+
+Vorgesehene Zuordnung: Battery 0.8.3, Research-MCP 0.8.2, Tunnel 0.8.1,
+Diagnostic Engine 0.4.12. Nur Battery wird mit dem bestehenden lokalen Add-on-
+Updateweg aktualisiert. Vorher den tatsächlich installierten 0.8.2-Build,
+App-Einstellungen und aktuelle `/share`-Daten sichern; alte 0.8.1-Archive sind
+kein Nachweis eines 0.8.2-Rückkehrstands. Vollständigen, aus einem sauberen Commit
+exportierten Kontext mit dessen Quellmarker verwenden; `BUILD_VERSION=0.8.3`.
+Der bekannte Startbackfill kann die Messaufnahme verzögern. Abschluss erst nach
+passender Laufzeit-/Quellmeldung und neuen regulären Messzyklen bestätigen.
+Maintenance-Oberfläche ausschließlich lesend prüfen; keine echten Einträge zum
+Testen anlegen oder löschen. Installation und Sicherungsbelege werden außerhalb
+des Repositorys dokumentiert. Historische Abnahmen unten bleiben unverändert.
+
 
 Stand: 2026-09-14
 
-## Guardian Battery 0.8.1 – SOC Crash Evidence v2 Acceptance Build
+## Battery / Research-MCP 0.8.2 – vorbereitet, unveröffentlicht (2026-09-24)
 
-- `0.8.1` is an acceptance-build identifier, not yet a final release decision.
-- Before copying source to the local HA development app, run
-  `python3 guardian_battery/tools/prepare_build_context.py <new-directory-path>`
-  from a clean Git checkout. The tool archives exactly `HEAD` (not working-tree
-  files), writes that revision to `.guardian-source-commit` in the temporary
-  context, and refuses dirty repositories or an existing destination. Transfer
-  and install only that generated context; never edit the installed app tree.
-- The Dockerfile requires the generated provenance file, validates a full
-  lowercase commit SHA, combines it with Supervisor's `BUILD_VERSION`, and
-  writes immutable read-only `/app/build-info.json`. A direct repository build
-  without the prepared context fails visibly because the provenance file is
-  absent. The runtime does not require or inspect `.git`.
-- Runtime identity is loaded only from the immutable build file and logged as
-  Guardian Battery `0.8.1`, `source_commit=<actual archived HEAD>`, and Research
-  semantics `research_soc_crash_evidence_v2`. Missing, malformed, or
-  version-mismatched provenance refuses startup visibly; a manually maintained
-  Git hash in Python source is forbidden.
-- The acceptance build changes no detector, Evidence Package content, coverage,
-  identity, peer, BMS, diagnostic, MQTT, RS485 or Hycube behavior beyond the
-  already validated source commit.
-- Never run the repository and local Guardian Battery apps concurrently. If the
-  existing custom repository cannot safely serve a branch with its production
-  repository identity, stop the production Battery before starting the local
-  acceptance app and preserve all existing options explicitly.
-- Guardian Research MCP and Guardian MCP Tunnel remain `0.8.1`; their tokens,
-  allowlists and security boundaries remain unchanged.
+- Bestätigte Zuordnung: Battery 0.8.2, Research-MCP 0.8.2, Tunnel unverändert 0.8.1, Diagnostic Engine unverändert 0.4.12. Battery 0.8.1 bezeichnet bereits die andere Entwicklungslinie; deshalb 0.8.2.
+- Für ein späteres Update Battery und MCP abstimmen und bestehende Clients anpassen: `find_soc_crashes` / `build_evidence_package` werden durch `list_soc_crash_events` / `get_soc_crash_event` ersetzt. Die alten API-Routen `/api/research/events/soc-crashes`, `/api/research/evidence-package` und `/api/research/evidence-core` liefern 404; neu sind `/api/research/soc-crash-events` und dessen Event-ID-Route. Es besteht keine Aufruf- oder Ergebnisgleichheit.
+- Die [bestätigten Fach- und Persistenzregeln](SOC_CRASH_SIMPLE.md) gelten unverändert: konfigurierbar X = 5 Prozentpunkte, Y = 300 Sekunden; fester Kandidatenstart ohne vorherigen Abfall, sofortige Erkennung bei > X innerhalb einschließlich Y, Ende des alten Kandidaten vor Auswertung beim Rollenwechsel. Initialer Gleichstand startet nichts, anschließendes striktes Minimum mit Nullreferenz; späterer Gleichstand allein startet keinen Kandidaten. Keine Medianbedingung oder zusätzlichen Kriterien.
+- Kompakte persistierte Ereignisse bleiben erhalten. Historische Gleichheitsereignisse bleiben mit unveränderten Bytes und IDs lesbar; neue Erzeugung und Anhängen verlangen > X. Lesen ist keine nachträgliche Anerkennung nach den neuen Regeln. Ereignisformat und Detektorkennung bleiben gleich.
+- Dies ist nur lokale Versionsvorbereitung, keine Veröffentlichung, Installation oder Betriebsabnahme. Die folgenden historischen Abnahmen und Versionsstände bleiben historische Belege und gelten nicht als Abnahme von 0.8.2.
+
+## Ergänzung: interne Buildherkunft für Battery 0.8.2 (unveröffentlicht)
+
+Der [Packaging- und Laufzeitvertrag](BUILD_PROVENANCE.md) verlangt einen vollständigen Buildkontext aus dem späteren sauberen Release-Commit. Der Packaging-Schritt erzeugt dessen Quellmarker; keinen alten 0.8.1-Marker übernehmen. Buildversion und Laufzeitversion müssen übereinstimmen. Fehlende oder ungültige Buildmetadaten verhindern den Start vor Diensten und Messwerterfassung. Die Herkunft wird im Startlog ausgegeben; API-/MCP-Vertrag und SOC-Fachregeln bleiben unverändert. Diese Ergänzung ist keine Build-, Installations- oder Betriebsabnahme.
 
 ## Guardian MCP Tunnel 0.8.1 – HA Green Production Acceptance
 
@@ -65,32 +409,13 @@ Stand: 2026-09-14
 
 ## Guardian Battery 0.8.0 – Research API Integration
 
-### SOC Crash Evidence Builder
-
-The SOC Crash Evidence Builder provides reproducible evidence around a detected SOC crash. It does not determine causality.
-
-`GET /api/research/evidence-package?event_id=...` reuses the deterministic SOC
-crash event ID and returns the bounded `research_soc_crash_evidence_v2` contract.
-The default range is `P1D` before and `PT30M` after the event. Identity and stack
-peers are resolved at event time. Missing optional stores remain explicitly
-partial or unavailable; no request-path rebuild or write is performed. See
-`docs/SOC_CRASH_EVIDENCE_BUILDER.md` for the schema and provenance rules.
-
-`GET /api/research/evidence-core?event_id=...` is the additive, fixed-resource
-SOC-crash entry point with semantics `research_soc_crash_core_evidence_v1`.
-Target data is limited to PT10M before through PT30M after the event; historical
-peers are limited to PT5M before/after. The endpoint retains the normal
-10-second Research deadline and 2-MiB response gate, accepts no expandable time
-window, and emits no causal or `INFERRED` claim. See
-`docs/SOC_CRASH_CORE_EVIDENCE.md` for its full contract.
-
 ### Konfiguration und spätere getrennte Abnahme
 
 - Guardian Battery und Guardian Research MCP verwenden für den internen Maschinenkanal denselben geheimen Wert, aber unterschiedliche Optionsnamen: Guardian `guardian_research_api_token`, MCP `guardian_api_token`. Ein leerer Guardian-Wert deaktiviert diesen Zugang.
 - Der separate `mcp_auth_token` authentifiziert spätere MCP-Clients und darf nicht mit dem internen Guardian-API-Token gleichgesetzt werden. `development_auth_mode` bleibt produktiv `false`.
 - Der Maschinenkanal erlaubt ausschließlich `GET /api/research/*`. POST bleibt 405; PUT, PATCH und DELETE sind nicht Teil des Research-Vertrags. Alle Nicht-Research-Routen behalten den bestehenden Ingress-Schutz.
 - Das MCP-Add-on besitzt standardmäßig keinen veröffentlichten Host-Port und keine `/share`-/`/config`-Mounts. Öffentliche Exposition, externe AI, HA-Adapter und Phase D sind nicht Bestandteil dieses Releases.
-- Nach einem späteren separaten Deployment Versionen, `/health`, Auth-, Host-/Origin-Schutz, `initialize`, exakt 16 read-only Tools und kontrolliertes Guardian-Down/Recovery-Verhalten abnehmen. Keine reale Batterie-Evidence für einen reinen Transporttest abfragen.
+- Nach einem späteren separaten Deployment Versionen, `/health`, Auth-, Host-/Origin-Schutz, `initialize`, exakt 15 read-only Tools und kontrolliertes Guardian-Down/Recovery-Verhalten abnehmen. Keine reale Batterie-Evidence für einen reinen Transporttest abfragen.
 - Guardian/Add-on: `0.8.0`; Guardian Research MCP: `0.8.0`; Diagnostic Engine unverändert `0.4.12`; Canonical Semantics unverändert `guardian_canonical_phase_v2`.
 - Diese Release-Vorbereitung führt kein Deployment, keinen Neustart, keine Tokenkonfiguration und keinen produktiven `/share`- oder `/config`-Zugriff aus.
 
@@ -1207,33 +1532,59 @@ Tatsächlich verifiziert sind im Projekt unter anderem:
 
 ### Meta-Regel
 Wenn das Runbook gerade zur Vermeidung wiederholter Umgebungsfehler eingeführt wurde, ist es vor jedem vorgeschlagenen technischen Befehl verbindlich anzuwenden. Ein neuer Befehl darf keine dort dokumentierte Annahme erneut einführen.
-# RS485 History Block Index
 
-Die Dateien `rs485_history/YYYY-MM-DD.jsonl` bleiben die authoritative,
-append-only Raw Evidence. Die zugehörigen `.idx`-Sidecars sind ausschließlich
-DERIVED, vollständig rebuildbar und dürfen verworfen werden. Ein Sidecar bindet
-sich über Dateiname, Device/Inode, Größe, `mtime_ns`, bestätigtes Byteende sowie
-Head-/Tail-Fingerprints an den bestätigten Raw-Präfix.
 
-Jeder Block enthält Bytebereich, minimale/maximale Recordzeit, Recordanzahl und
-einen ADR→physische-Seriennummer-Checkpoint unmittelbar vor seinem ersten
-Record. Der Checkpoint entsteht ausschließlich aus gültigen historischen
-0x93-Responses; aktuelle Topologie oder eine ADR→Position-Formel werden nicht
-verwendet. Timestamp-Minimum/-Maximum je Block erhält die Korrektheit bei
-late/out-of-order Records. Der Writer garantiert Append-only-Persistenz, aber
-keine globale monotone Timestamp-Reihenfolge.
+## Battery 0.9.7 lokal vorbereitet: kooperativer Mehrtagesverlauf (2026-10-25)
 
-Der asynchrone RS485-Indexworker erweitert Indizes in begrenzten Blöcken und
-beeinflusst weder Acquisition noch Raw-Persistenz. Vollständige JSONL-Zeilen
-werden bestätigt; eine partielle letzte Zeile bleibt im offenen Suffix. Bereits
-bestätigte Blöcke werden bei normalem Append nicht neu aufgebaut. Der
-Research-Request schreibt und rebuildet niemals einen Index.
+Der Stundenabruf bleibt serverseitig begrenzt. Die Oberfläche führt nach einem
+expliziten Start seriell weitere Zeitseiten aus, jeweils mit einer Sekunde Pause.
+„Laden abbrechen“ beendet den Auftrag; bei Fehlern erfolgt keine automatische
+Wiederholung. „Laden fortsetzen“ setzt denselben Auftrag am nicht verbrauchten
+Cursor fort. Bei geänderter Auswahl beginnt ein neuer Auftrag. Vorhandene
+Teilstände bleiben bei Fehlern sichtbar, werden aber als unvollständig bezeichnet.
 
-Der Core Reader liest überlappende Blocks plus höchstens 2 MiB offenen Suffix
-und projiziert 0x92, 0x44 sowie Low-/Under-Voltage einschließlich relevanter
-0x47-Felder weiterhin in einem Scan. Kleine Quellen bis 2 MiB dürfen bei
-fehlendem/ungültigem Index bounded vollständig gelesen werden. Für größere
-Quellen wird die RS485-Evidence als `unavailable` geliefert; es erfolgt kein
-stiller Full-Day-Fallback und ein echter Deadline-Timeout bleibt weiterhin ein
-Timeout. Zielwert auf HA Green: `rs485_core_context` deutlich unter einer bis
-wenigen Sekunden und Core typisch unter fünf Sekunden.
+Die vollständige gewählte Zeitachse ist von Anfang an sichtbar. Eine vollständige
+Abarbeitung beweist keine lückenlose Messhistorie; nicht verfügbare Quellen und
+Diagnoseüberlagerungen bleiben gekennzeichnet. Keine zusätzliche Ausdünnung der
+Messwerte. Die begrenzte Browserhaltung stoppt bei 200.000 Punkte-Einträgen,
+50.000 Kontext-Einträgen oder 2.200 Seiten mit Hinweis auf eine kleinere Auswahl.
+
+Für eine spätere, gesondert freizugebende Installation ist als Abnahme genau der
+gewählte Mehrtagesverlauf zu prüfen: Ende der Cursorfolge, vollständige Zeitachse,
+Fortschritts-/Abbruchanzeige und sichtbare Lücken. Die erfolgreiche erste Stunde
+unter 0.9.6 ist ausdrücklich kein Nachweis dafür. Keine Installation dieses
+vorbereiteten UI-Standes erfolgt. Installationskandidat Battery 0.9.7; der
+laufende Stand bleibt 0.9.6 aus 58d2817c10d2ec84e846e8ffe95bce6fd1712c4b.
+Vor einer freigegebenen Installation muss dieser laufende Stand samt Image und
+Optionen gesichert werden; ein 0.9.6-Imagebackup ist bisher nicht nachgewiesen.
+Eine Rückkehr darf keine alten /share-Messdaten zurückspielen.
+
+
+## Battery 0.9.8 vorbereitet — gezielte Historien-Zulassung (2026-10-25)
+
+Beobachtung unter 0.9.7: Der einmalige Mehrtagesabruf wurde sofort mit
+„Another historical job is running; submit again manually“ abgewiesen.
+Nachfolgende Statusabfragen: ausgewählte Indexvorbereitung abgeschlossen;
+Hycube-Backfill completed; Canonical-Worker aktiv, kein Rebuild angefordert;
+Display-Worker aktiv, letzter Fehler „source changed; explicit bounded rebuild
+required“; Diagnosestart blocked mit „ValueError: resume publication exceeds
+budget“, 528112 Checkpoints und 47839310 gelesenen Bytes. Das ist kein Beleg
+für einen dauerhaft verwaisten Semaphore-Besitz: der Startup-Kontext gibt die
+Lease beim Verlassen auch im Fehlerfall frei. Der Besitzer zum vergangenen
+Fehlerzeitpunkt wurde im alten Stand nicht protokolliert und bleibt unbekannt.
+
+Konkreter Fehler im Zugangsweg: HistoryApi verwendete den sofort abweisenden
+historical_slot statt measurement_slot. Auch die spätere Serialisierung konnte
+unabhängig kollidieren. 0.9.8 verwendet in beiden Abschnitten kooperatives Warten
+innerhalb derselben absoluten Request-Grenze von 60 Sekunden. Vorhandene
+Live-Checkpoints und Leserankündigung an den Startup-Worker bleiben erhalten.
+Keine pauschale Entsperrung, keine Wiederholung der Abfrage, keine Erhöhung von
+Parallelität, Dateilesebudgets oder Laufzeitgrenze.
+
+15 gezielte synthetische Prüfungen bestanden; Protokoll im externen Releasepaket.
+Keine breite Suite und keine neue produktive SOC-Abfrage in der Vorbereitung.
+Erst nach konkreter Freigabe installieren und den vollständigen SOC-Zeitraum
+für alle sechs Module einmal laden. Bei Timeout/Abbruch erreichten Teilstand
+und Fehler berichten; keine zusätzliche Prüfschleife. Vorher laufendes 0.9.7
+sichern. Rückkehrsicherung 5c4cfaa8 von 0.9.6 erhalten. Kein Zurückspielen alter
+/share-Rohdaten. Historische Diagnose-/Display-Probleme sind gesondert offen.

@@ -93,6 +93,7 @@ def test_slow_response_write_is_measured_as_wall_not_cpu(monkeypatch):
     class Writer:
         def write(self, raw): time.sleep(.03); self.raw = raw
     handler = Handler.__new__(Handler); handler.wfile = Writer()
+    handler._history_disconnected = lambda: False
     handler.send_response = lambda _code: None
     handler.send_header = lambda *_args: None
     handler.end_headers = lambda: None

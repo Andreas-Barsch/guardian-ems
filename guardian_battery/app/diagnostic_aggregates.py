@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -47,6 +49,24 @@ def _histogram_median(histogram):
     return sum(values) / len(values)
 
 
+
+def _state_locked(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+    return locked
+
+
+class _PersistencePayload(dict):
+    """In-process receipt; generation metadata is never serialized to disk."""
+
+    def __init__(self, values, owner, generation):
+        super().__init__(values)
+        self.owner = owner
+        self.generation = generation
+
+
 class DiagnosticAggregateStore:
     """Persist bounded daily/phase/cell aggregates without touching raw data."""
 
@@ -56,7 +76,7 @@ class DiagnosticAggregateStore:
         self.retention_days = max(30, int(retention_days))
         self.records = {}
         self.backfill_sources = {}
-        self._dirty = False
+        self._init_generation()
         self._load()
 
     @classmethod
@@ -67,14 +87,50 @@ class DiagnosticAggregateStore:
         instance.retention_days = max(30, int(retention_days))
         instance.records = {}
         instance.backfill_sources = {}
-        instance._dirty = False
+        instance._init_generation()
         return instance
+
+    def _init_generation(self):
+        self._state_lock = threading.RLock()
+        self._generation = 0
+        self._acknowledged_generation = 0
+        self._receipt_owner = object()
+
+    @property
+    def _dirty(self):
+        with self._state_lock:
+            return self._generation > self._acknowledged_generation
+
+    @_dirty.setter
+    def _dirty(self, changed):
+        # Existing startup/backfill assignments remain explicit mutations.
+        with self._state_lock:
+            if changed:
+                self._generation += 1
+            else:
+                self._acknowledged_generation = self._generation
+
+    @_state_locked
+    def acknowledge_persistence(self, payload):
+        """Acknowledge only this store's captured, successfully written state.
+
+        Call after persistence, never on enqueue. An older completion cannot
+        clear mutations made while its write was in progress.
+        """
+        if (not isinstance(payload, _PersistencePayload)
+                or payload.owner is not self._receipt_owner
+                or not 0 <= payload.generation <= self._generation):
+            return False
+        self._acknowledged_generation = max(
+            self._acknowledged_generation, payload.generation)
+        return True
 
     def _load(self):
         try:
             if not self.path.exists():
                 return
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            from diagnostic_startup_io import load
+            value = load(self.path)
             if value.get("schema_version") != AGGREGATE_SCHEMA_VERSION:
                 return
             records = value.get("records", {})
@@ -95,6 +151,7 @@ class DiagnosticAggregateStore:
     def _key(identity, cell, day, phase, current_config_id):
         return "|".join((identity, str(cell), day, phase, current_config_id))
 
+    @_state_locked
     def add(self, sample, options):
         if len(sample.voltages_mv) != 15:
             return False
@@ -128,6 +185,11 @@ class DiagnosticAggregateStore:
                     self.records[key] = record
                 if timestamp <= float(record.get("last_timestamp", -1)):
                     continue
+                # Published records are immutable to readers. Copy only the
+                # changed cell/phase and its histogram, never the whole history.
+                record = dict(record)
+                record["deviation_histogram"] = dict(record["deviation_histogram"])
+                self.records[key] = record
                 deviation = round(float(voltage - median), 1)
                 histogram = record["deviation_histogram"]
                 histogram[str(deviation)] = int(histogram.get(str(deviation), 0)) + 1
@@ -144,10 +206,15 @@ class DiagnosticAggregateStore:
         return changed
 
     def _prune(self, latest_day):
+        incremental = getattr(self.records, "prune_records", None)
+        if incremental is not None:
+            incremental(latest_day, self.retention_days)
+            return
         cutoff = datetime.fromisoformat(latest_day).date() - timedelta(days=self.retention_days - 1)
         self.records = {key: value for key, value in self.records.items()
                         if datetime.fromisoformat(value["day"]).date() >= cutoff}
 
+    @_state_locked
     def prune_through(self, latest_day: str) -> None:
         before = len(self.records)
         self._prune(latest_day)
@@ -155,23 +222,31 @@ class DiagnosticAggregateStore:
             self._dirty = True
 
     def save(self):
+        from diagnostic_startup_io import active, checkpoint
+        if active():
+            checkpoint()
+            return False  # Keep original caches until a complete handover.
         if not self._dirty:
             return False
         payload = self.persistence_payload()
-        self.persist_payload(payload)
-        self._dirty = False
+        if not self.persist_payload(payload):
+            return False
+        self.acknowledge_persistence(payload)
         return True
 
+    @_state_locked
     def persistence_payload(self):
         if not self._dirty:
             return None
-        return {
+        return _PersistencePayload({
             "schema_version": AGGREGATE_SCHEMA_VERSION,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "retention_days": self.retention_days,
-            "backfill_sources": copy.deepcopy(self.backfill_sources),
-            "records": copy.deepcopy(self.records),
-        }
+            # Membership is frozen; add/merge/mark replace entries rather
+            # than mutating any record already handed to a worker.
+            "backfill_sources": dict(self.backfill_sources),
+            "records": dict(self.records),
+        }, self._receipt_owner, self._generation)
 
     def persist_payload(self, payload):
         if payload is None:
@@ -204,6 +279,7 @@ class DiagnosticAggregateStore:
                 return False
         return True
 
+    @_state_locked
     def mark_source_complete(self, path: Path, signature: dict, current_config_id: str,
                              record_keys: set[str], statistics: dict) -> None:
         coverage = {
@@ -213,7 +289,7 @@ class DiagnosticAggregateStore:
             if key in record_keys
         }
         self.backfill_sources[self._source_key(path, current_config_id)] = {
-            "signature": signature,
+            "signature": copy.deepcopy(signature),
             "config_id": current_config_id,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "days": sorted({self.records[key]["day"] for key in record_keys
@@ -223,24 +299,36 @@ class DiagnosticAggregateStore:
         }
         self._dirty = True
 
+    @_state_locked
     def merge_backfill_records(self, records: dict) -> int:
         """Use one raw day as canonical input without double-counting partial state."""
         changed = 0
         for key, value in records.items():
             if self.records.get(key) != value:
-                self.records[key] = value
+                self.records[key] = copy.deepcopy(value)
                 changed += 1
         if changed:
             self._dirty = True
         return changed
 
-    def for_identity(self, module, serial):
+    def records_for_identity(self, module, serial):
+        """Freeze membership of immutable records; no histogram evaluation."""
+        indexed = getattr(self.records, "records_for_identity", None)
+        if indexed is not None:
+            return tuple(indexed(module, serial))
         identity = serial or f"UNKNOWN-POSITION-{int(module)}"
+        return tuple(record for record in self.records.values()
+                     if (record.get("physical_module_serial") or
+                         f"UNKNOWN-POSITION-{record.get('module_position')}") == identity)
+
+    def for_identity(self, module, serial):
+        return self.project_records(self.records_for_identity(module, serial))
+
+    @staticmethod
+    def project_records(records):
+        """Existing diagnostic projection, also used off-thread on a snapshot."""
         result = []
-        for record in self.records.values():
-            expected = record.get("physical_module_serial") or f"UNKNOWN-POSITION-{record.get('module_position')}"
-            if expected != identity:
-                continue
+        for record in records:
             count = int(record["sample_count"])
             result.append({
                 **{key: value for key, value in record.items()

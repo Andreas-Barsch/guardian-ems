@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import secrets
 import threading
@@ -52,7 +51,7 @@ from config_history import ConfigHistory
 from phase_engine import PhaseEngine
 from version import GUARDIAN_VERSION, DIAGNOSTIC_ENGINE_VERSION
 from research_api import API_ROUTE as RESEARCH_API_ROUTE, GuardianResearchApi, ResearchPaths
-from soc_crash_v2 import SocCrashV2Policy
+from soc_crash_events import DEFAULT_SOC_CRASH_EVENTS
 
 OPTIONS_FILE = Path('/data/options.json')
 CONFIG_HISTORY_FILE = Path('/share/guardian_battery/config_history.jsonl')
@@ -68,7 +67,6 @@ _HISTORY_TIMING = HistoryRequestTimingState()
 _POSITION_HISTORY_API = None
 _DIAGNOSTICS_API = None
 _RESEARCH_API = None
-_RESEARCH_IDENTITY_SNAPSHOT = None
 _MAINTENANCE_LIVE_PUBLISHER = None
 _RS485_STATUS_PROVIDER = None
 _HYCUBE_PROJECTION_PROVIDER = None
@@ -84,6 +82,7 @@ _DISPLAY_PROJECTION_STARTUP = {
     "startup_error_message": None,
     "started_at": None,
 }
+_HISTORY_PREPARATION = None
 _CANONICAL_PHASE_PROVIDER = None
 _CANONICAL_PHASE_REBUILD_ACTION = None
 _AUTOMATIC_POSITION_LOCK = threading.Lock()
@@ -196,8 +195,38 @@ def _public_history_timing(value):
         "response_write_seconds": (stages.get("response_write") or {}).get("wall_seconds")}}
 
 
+# Fixed scalar projection: no raw samples, identity maps or per-module profiles.
+_PUBLIC_TIMING_STAGES = (
+    "pwr_request", "pwr_processing", "stat_info", "stat_request", "info_requests_total",
+    "bat_request", "bat_requests_total", "identity_resolution", "cell_history_write",
+    "cell_cycle", "cell_store_add", "aggregate_store_add",
+    "cell_persistence_payload_build", "aggregate_persistence_payload_build",
+    "persistence_submit", "maintenance_refresh", "analysis_snapshot_build",
+    "analysis_submit", "result_adoption", "mqtt_projection", "derived_mqtt_submit",
+    "topology_position", "remaining_other")
+_PUBLIC_TIMING_FIELDS = (
+    "cycle_id", "cell_generation", "state", "cycle_started_at", "cell_started_at",
+    "cycle_duration_seconds", "effective_poll_interval_seconds",
+    "effective_cell_sampling_interval_seconds", "cell_deadline_lateness_seconds",
+    "skipped_cell_slots", "cell_stack_sample_spread_seconds",
+    "acquisition_duration_seconds", "acquisition_finished_at",
+    "cell_post_processing_duration_seconds", "post_processing_finished_at",
+    "cell_total_main_thread_duration_seconds", "cell_total_main_thread_thread_cpu_seconds",
+    "cell_remaining_other_duration_seconds", "cell_remaining_other_status")
+
+
+def _public_timing_record(record):
+    keys = _PUBLIC_TIMING_FIELDS + tuple(
+        stage + suffix for stage in _PUBLIC_TIMING_STAGES
+        for suffix in ("_duration_seconds", "_thread_cpu_seconds", "_status"))
+    return {key: record[key] for key in keys if key in record
+            and (record[key] is None or isinstance(record[key], (int, float))
+                 or record[key] in ("running", "completed", "failed", "executed",
+                                    "not_executed"))}
+
+
 def _public_collector_timing(value):
-    """Expose operational health normally; detailed profiling only in debug mode."""
+    """Expose bounded stage timings; verbose profiles remain debug-only."""
     if _technical_debug_enabled() or not isinstance(value, dict):
         return value
     result = {key: value.get(key) for key in (
@@ -218,6 +247,17 @@ def _public_collector_timing(value):
     result["last_completed_cell_cycle"] = {
         key: cell.get(key) for key in ("cycle_id", "cell_generation", "state",
             "cell_total_main_thread_duration_seconds", "effective_cell_sampling_interval_seconds")}
+    # Preserve legacy health fields, then add only already-collected scalars.
+    result["last_completed_cycle"].update(_public_timing_record(cycle))
+    result["last_completed_cell_cycle"].update(_public_timing_record(cell))
+    result["current_cycle"] = _public_timing_record(value.get("current_cycle") or {})
+    snapshot = cell.get("analysis_snapshot") or {}
+    result["last_completed_cell_cycle"]["analysis_snapshot"] = {
+        key: snapshot[key]
+        for stage in ("total", "identity", "sample_projection", "aggregate_projection",
+                      "maintenance", "options_config", "other")
+        for key in (stage + "_seconds", stage + "_thread_cpu_seconds")
+        if key in snapshot and isinstance(snapshot[key], (int, float))}
     return result
 
 
@@ -238,6 +278,12 @@ def start_display_projection_traced(projection_factory, worker_factory):
     except Exception as exc:
         record_display_projection_startup_error(exc)
         raise
+
+
+def configure_history_preparation(worker):
+    """Attach only the process-coordinated explicit preparation worker."""
+    global _HISTORY_PREPARATION
+    _HISTORY_PREPARATION = worker
 
 
 def configure_canonical_phase(provider, rebuild_action):
@@ -347,29 +393,13 @@ def _get_research_api():
                     display_history=DEFAULT_DISPLAY_HISTORY_DIR,
                     config_history=CONFIG_HISTORY_FILE,
                     rs485_history=DEFAULT_RS485_HISTORY_DIR,
-                ), defer_identity=True, soc_crash_v2_policy=_soc_crash_v2_policy())
-                if _RESEARCH_IDENTITY_SNAPSHOT is not None:
-                    snapshots, signature = _RESEARCH_IDENTITY_SNAPSHOT
-                    _RESEARCH_API.install_identity_snapshot(snapshots, signature)
+                    soc_crash_events=DEFAULT_SOC_CRASH_EVENTS,
+                ))
                 LOG.info("Guardian Research API initialisiert (read-only)")
     return _RESEARCH_API
 
 
-def install_research_identity_snapshot(snapshots, source_signature):
-    """Publish one already-loaded immutable identity view without request-path I/O."""
-    global _RESEARCH_IDENTITY_SNAPSHOT
-    with _MAINTENANCE_API_LOCK:
-        if (_RESEARCH_IDENTITY_SNAPSHOT is not None
-                and _RESEARCH_IDENTITY_SNAPSHOT[1] == source_signature):
-            return False
-        value = (tuple(snapshots), source_signature)
-        _RESEARCH_IDENTITY_SNAPSHOT = value
-        if _RESEARCH_API is not None:
-            _RESEARCH_API.install_identity_snapshot(*value)
-        return True
-
-
-def record_stable_observed_positions() -> bool:
+def record_stable_observed_positions(*, position_service=None, maintenance_service=None, clock=None) -> bool:
     """Append one documentary snapshot after BMS identity changed stably.
 
     The generated system event is persisted but deliberately not emitted as a
@@ -378,7 +408,7 @@ def record_stable_observed_positions() -> bool:
     with _AUTOMATIC_POSITION_LOCK:
         if not history_observation_ready():
             return False
-        position_service = _get_position_history_api().service
+        position_service = (_get_position_history_api().service if position_service is None else position_service)
         current = position_service.current()
         changes = stable_observed_changes(current.positions if current else None)
         if not changes:
@@ -395,8 +425,8 @@ def record_stable_observed_positions() -> bool:
         removed = {str(position) for position, serial in changes.items() if serial is None}
         semantics = classify_stack_change(current.positions if current else None, positions,
                                           confirmed_empty_positions=removed)
-        now = datetime.now(timezone.utc)
-        event = _get_maintenance_api().service.create(
+        now = clock() if clock is not None else datetime.now(timezone.utc)
+        event = (maintenance_service if maintenance_service is not None else _get_maintenance_api().service).create(
             occurred_at=now, category=semantics["category"],
             title=semantics["title"],
             affected_system="Pylontech Stack",
@@ -415,7 +445,7 @@ def record_stable_observed_positions() -> bool:
         return True
 
 DEFAULTS = {
- 'serial_port':'auto','baudrate':115200,'poll_interval_seconds':10,'module_count':6,'command':'pwr','command_timeout_seconds':5,
+ 'serial_port':'auto','baudrate':115200,'poll_interval_seconds':20,'module_count':6,'command':'pwr','command_timeout_seconds':5,
  'mqtt_topic_prefix':'guardian','publish_discovery':True,'warning_cell_delta_mv':30,'critical_cell_delta_mv':80,
  'warning_soc_deviation_pct':10,'critical_soc_deviation_pct':30,'missing_module_is_critical':True,'raw_log':False,'detailed_log':True,
  'trend_window_minutes':60,'trend_min_change_mv':10,'incident_hold_minutes':30,'cell_diagnostics_enabled':True,
@@ -441,14 +471,12 @@ DEFAULTS = {
  'cell_diag_aggregate_retention_days':730,'cell_diag_capacity_boundary_fraction':0.9,
  'cell_diag_capacity_max_crossing_mad_fraction':0.05,'cell_diag_curve_grid_points':21,
  'cell_diag_curve_max_rms_mad_mv':5,
- 'hycube_evidence_enabled':False,'hycube_base_url':'','hycube_interval_seconds':5,
+ 'hycube_evidence_enabled':False,'hycube_base_url':'','hycube_interval_seconds':20,
  'hycube_timeout_seconds':0.8,
- 'reference_capacity_ah':'',
 }
 
 # group, label, unit, min, max, step, consequence, level
 META = {
- 'reference_capacity_ah':('Anlage','SOC Crash v2 · Referenzkapazität','Ah',None,None,None,'Explizite Modul-Referenzkapazität für die elektrische Plausibilisierung. Leer deaktiviert SOC_CRASH; es wird keine Nennkapazität angenommen.','normal'),
  'module_count':('Anlage','Installierte Batteriemodule','Module',1,6,1,'Ändert die Soll-Topologie. Nur Module 1 bis zur eingestellten Anzahl werden erwartet; höhere Modulnummern dürfen keine Missing-/Unavailable-Warnung erzeugen.','normal'),
  'poll_interval_seconds':('Anlage','BMS-Abfrageintervall','s',5,3600,1,'Kleinere Werte erhöhen Aktualität und serielle Last; größere Werte verzögern Status-, Alarm- und Trendreaktionen.','normal'),
  'warning_cell_delta_mv':('Bewertungsgrenzen','Stack-Warnschwelle Zellspreizung','mV',1,1000,1,'Niedrigere Werte erzeugen früher Warnungen aus der allgemeinen Zellspreizung; höhere Werte machen diese Bewertung toleranter.','normal'),
@@ -539,18 +567,6 @@ def _read_options():
     data=json.loads(OPTIONS_FILE.read_text(encoding='utf-8'))
     return {**DEFAULTS, **data}
 
-
-def _soc_crash_v2_policy():
-    raw = _read_options().get("reference_capacity_ah", "")
-    if raw in (None, ""):
-        return SocCrashV2Policy(reference_capacity_ah=None)
-    try: capacity = float(raw)
-    except (TypeError, ValueError): capacity = None
-    if capacity is None or not math.isfinite(capacity) or capacity <= 0:
-        LOG.warning("SOC Crash v2 reference_capacity_ah is invalid; classification disabled")
-        capacity = None
-    return SocCrashV2Policy(reference_capacity_ah=capacity)
-
 def _last_record():
     if not CONFIG_HISTORY_FILE.exists(): return {}
     try:
@@ -589,13 +605,6 @@ def validate(cfg):
             data_row_url(cfg.get('hycube_base_url',''))
         except (TypeError, ValueError):
             errors.append('Hycube lokale Basisadresse: ungültig oder nicht lokal.')
-    capacity = cfg.get('reference_capacity_ah', '')
-    if capacity not in (None, ''):
-        try: parsed_capacity = float(capacity)
-        except (TypeError, ValueError): parsed_capacity = None
-        if (parsed_capacity is None or not math.isfinite(parsed_capacity)
-                or parsed_capacity <= 0):
-            errors.append('SOC Crash v2 Referenzkapazität: muss leer oder endlich und >0 Ah sein.')
     return errors
 
 def _config_html(maintenance_path='maintenance', timeline_path='timeline', history_path='history',
@@ -626,6 +635,54 @@ load().catch(e=>document.getElementById('status').textContent='Fehler: '+e);</sc
     return page.replace('__HEADER__', header)
 
 class Handler(BaseHTTPRequestHandler):
+    def _candidate_unbound(self, method):
+        server = getattr(self, 'server', None)
+        if getattr(server, 'history_composition', None) is None:
+            return False
+        if self._is_research_api():
+            return False  # The bound Research API owns its explicit reader gates.
+        application = getattr(server, 'prepared_application', None)
+        if application is not None and application.collector is not None:
+            if self._is_maintenance_api() or self._is_position_history_api():
+                return False
+            if application.collector.config_service is not None:
+                if self.path.rstrip('/').endswith('/api/config') or (method == 'GET' and self._is_configuration_ui()):
+                    return False
+        if method == 'GET' and (self._is_history_api() or self._is_history_ui()):
+            return False
+        if method == 'GET' and self.path.rstrip('/').endswith('/api/history-preparation'):
+            application = getattr(server, 'prepared_application', None)
+            if application is not None:
+                self._send(200, {'application':application.readiness(),
+                    'preparation':application.preparation.status(), 'background_error':application.failure})
+                return True
+        self._send(503, error_json('application_binding_required',
+            'This route is not yet bound in the local application candidate; no legacy fallback'))
+        return True
+
+    def _config_operations(self):
+        application = getattr(getattr(self, 'server', None), 'prepared_application', None)
+        if application is not None:
+            service = application.collector.config_service
+            return service.read_options, service.last_record, service.api
+        return _read_options, _last_record, _api
+
+    def _history_api(self):
+        composition = getattr(getattr(self, 'server', None), 'history_composition', None)
+        return composition.history if composition is not None else _get_history_api()
+
+    def _research_api(self):
+        composition = getattr(getattr(self, 'server', None), 'history_composition', None)
+        return composition.research if composition is not None else _get_research_api()
+
+    def _maintenance_api(self):
+        application = getattr(getattr(self, 'server', None), 'prepared_application', None)
+        return application.collector.maintenance_api if application is not None and application.collector is not None else _get_maintenance_api()
+
+    def _position_api(self):
+        application = getattr(getattr(self, 'server', None), 'prepared_application', None)
+        return application.collector.position_api if application is not None and application.collector is not None else _get_position_history_api()
+
     def _ingress_allowed(self):
         return self.client_address[0] == '172.30.32.2'
     def _research_machine_allowed(self):
@@ -640,21 +697,109 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header('Content-Type',ctype+'; charset=utf-8'); self.send_header('Content-Length',str(len(raw)))
         for key,value in (headers or {}).items(): self.send_header(key,value)
         self.end_headers(); self.wfile.write(raw)
-    def _send_history(self,response):
+    def _history_disconnected(self):
+        # Peek without consuming bytes; ingress must propagate the client close.
+        import select
+        import socket
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
+
+    def _scheduled_history_request(self, api):
+        """Local opt-in: one admission covers query, encoding and transfer."""
+        import time
+        from research_api import QUERY_TIMEOUT_SECONDS
+        from research_budget import ResearchQueryError
+        from work_scheduler import WorkCancelled, AdmissionError
+        from maintenance_api import ApiResponse
+        deadline = time.monotonic() + QUERY_TIMEOUT_SECONDS
+        sending = False
+        transferred = False
+        def disconnected():
+            return not transferred and self._history_disconnected()
+        def run():
+            nonlocal sending, transferred
+            response = api.handle('GET', self.path,
+                cancelled=disconnected, deadline=deadline)
+            if disconnected(): raise WorkCancelled('client disconnected')
+            if time.monotonic() >= deadline:
+                raise ResearchQueryError('timeout', 'history request timed out', 503)
+            sending = True
+            self.connection.settimeout(max(.001, deadline-time.monotonic()))
+            try:
+                self._send_history(response)
+                transferred = True
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                raise WorkCancelled('client disconnected') from exc
+            except TimeoutError as exc:
+                raise WorkCancelled('transfer timed out') from exc
+        try:
+            api.scheduler.execute('manual_http_history', run, lane='read',
+                cancelled=disconnected, deadline=deadline)
+        except (WorkCancelled, AdmissionError, ResearchQueryError) as exc:
+            # An aborted peer must never receive a second/error response,
+            # including cancellation before admission or while queued.
+            if sending or disconnected():
+                self.close_connection = True
+                return
+            code = ('timeout' if time.monotonic() >= deadline else
+                    getattr(exc, 'code', 'cancelled' if isinstance(exc, WorkCancelled) else 'scheduler_full'))
+            try:
+                self._send_history(ApiResponse(503,error_json(code,str(exc))))
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, WorkCancelled):
+                self.close_connection = True
+
+    def _send_history(self,response, *, deadline=None):
+        composition = getattr(getattr(self, "server", None), "history_composition", None)
+        timing = (composition.history.timing_state if composition is not None else None) or _HISTORY_TIMING
         failed = response.status >= 400
         try:
-            with _HISTORY_TIMING.stage('serialization'):
-                raw=json.dumps(response.body,ensure_ascii=False).encode()
-            _HISTORY_TIMING.counts(response_bytes=len(raw))
+            from research_budget import check_budget, cancellation_scope, query_budget, ResearchQueryError
+            from history_live_priority import measurement_slot
+            from work_scheduler import active, WorkCancelled
+            from maintenance_api import ApiResponse
+            with timing.stage('serialization'):
+                try:
+                    if response.status < 400:
+                        if deadline is None:
+                            from research_api import QUERY_TIMEOUT_SECONDS
+                            import time
+                            deadline = time.monotonic() + QUERY_TIMEOUT_SECONDS
+                        with cancellation_scope(self._history_disconnected), query_budget(deadline), measurement_slot():
+                            import io
+                            output=io.BytesIO(); since_check=0
+                            check_budget()
+                            for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(response.body):
+                                encoded=chunk.encode(); output.write(encoded); since_check+=len(encoded)
+                                if since_check>=65536:
+                                    check_budget(); since_check=0
+                            raw=output.getvalue()
+                            check_budget()
+                    else:
+                        raw=json.dumps(response.body,ensure_ascii=False).encode()
+                except (ResearchQueryError, WorkCancelled) as exc:
+                    if isinstance(exc,WorkCancelled) and self._history_disconnected(): raise
+                    failed=True
+                    code = 'timeout' if isinstance(exc, WorkCancelled) and str(exc) == 'deadline exceeded' else getattr(exc,'code','cancelled')
+                    response=ApiResponse(getattr(exc,'status',503),error_json(code,str(exc)))
+                    raw=json.dumps(response.body,ensure_ascii=False).encode()
+            timing.counts(response_bytes=len(raw))
             self.send_response(response.status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(raw)))
             for key,value in response.headers.items(): self.send_header(key,value)
             self.end_headers()
-            with _HISTORY_TIMING.stage('response_write'):
-                self.wfile.write(raw)
+            with timing.stage('response_write'):
+                if active() and response.status < 400:
+                    for offset in range(0,len(raw),65536):
+                        check_budget()
+                        self.wfile.write(raw[offset:offset+65536])
+                else:
+                    self.wfile.write(raw)
         except Exception as exc:
-            _HISTORY_TIMING.complete(failed=True,error=exc)
+            timing.complete(failed=True,error=exc)
             raise
-        _HISTORY_TIMING.complete(failed=failed,
+        timing.complete(failed=failed,
                                  error=response.body.get('error',{}).get('code') if failed else None)
     def _is_maintenance_api(self):
         return API_ROUTE in self.path.split('?',1)[0]
@@ -691,6 +836,10 @@ class Handler(BaseHTTPRequestHandler):
         response = _get_diagnostics_api().handle(method, self.path)
         self._send(response.status, response.body, headers=response.headers)
     def _maintenance_request(self,method):
+        api = self._maintenance_api()
+        if method == 'GET' and getattr(api, 'scheduler', None) is not None:
+            self._scheduled_history_request(api)
+            return
         try: length=int(self.headers.get('Content-Length','0'))
         except ValueError:
             self._send(400,error_json('invalid_request','Content-Length must be an integer')); return
@@ -700,16 +849,20 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection=True
             self._send(413,error_json('request_too_large',f'Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes')); return
         body=self.rfile.read(length) if length else b''
-        response=_get_maintenance_api().handle(method,self.path,dict(self.headers.items()),body)
+        response=api.handle(method,self.path,dict(self.headers.items()),body)
         self._send(response.status,response.body,headers=response.headers)
     def do_GET(self):
         if self._is_research_api() and self._research_machine_allowed():
-            response=_get_research_api().handle('GET',self.path)
+            response=self._research_api().handle('GET',self.path)
             self._send(response.status,response.body,headers=response.headers); return
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._candidate_unbound('GET'): return
         if self._is_research_api():
-            response=_get_research_api().handle('GET',self.path)
+            response=self._research_api().handle('GET',self.path)
             self._send(response.status,response.body,headers=response.headers); return
+        if self.path.rstrip('/').endswith('/api/history-preparation'):
+            self._send(200, _HISTORY_PREPARATION.status() if _HISTORY_PREPARATION else
+                       {'state': 'disabled'}); return
         if self._is_diagnostics_api(): self._diagnostics_request('GET'); return
         if self.path.rstrip('/').endswith('/api/hycube-projection/status'):
             payload = (_HYCUBE_PROJECTION_PROVIDER() if _HYCUBE_PROJECTION_PROVIDER else
@@ -730,8 +883,16 @@ class Handler(BaseHTTPRequestHandler):
                        {"enabled": False, "state": "disabled"})
             self._send(200, payload); return
         if self._is_history_api():
-            response=_get_history_api().handle('GET',self.path)
-            self._send_history(response); return
+            api = self._history_api()
+            if getattr(api, 'scheduler', None) is None:
+                from research_api import QUERY_TIMEOUT_SECONDS
+                import time
+                deadline = time.monotonic() + QUERY_TIMEOUT_SECONDS
+                response=api.handle('GET',self.path, cancelled=self._history_disconnected, deadline=deadline)
+                self._send_history(response, deadline=deadline)
+            else:
+                self._scheduled_history_request(api)
+            return
         if self.path.rstrip('/').endswith('/api/rs485/status'):
             payload = (_RS485_STATUS_PROVIDER() if _RS485_STATUS_PROVIDER else
                        {"status": {"state": "disabled"}, "management": {}, "history": {}})
@@ -745,7 +906,11 @@ class Handler(BaseHTTPRequestHandler):
                           if key != "raw_frame"} for adr, item in payload.get("management", {}).items()}
             self._send(200, {**payload, "management": management}); return
         if self._is_position_history_api():
-            response=_get_position_history_api().handle('GET',self.path,dict(self.headers.items()))
+            api = self._position_api()
+            if getattr(api, 'scheduler', None) is not None:
+                self._scheduled_history_request(api)
+                return
+            response=api.handle('GET',self.path,dict(self.headers.items()))
             self._send(response.status,response.body,headers=response.headers); return
         if self._is_timeline_api():
             response=_get_timeline_api().handle('GET',self.path)
@@ -762,19 +927,34 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_configuration_ui():
             base=self._ingress_base(); self._send(200,_config_html((base+'/maintenance') or '/maintenance',(base+'/timeline') or '/timeline',(base+'/history') or '/history',(base+'/module-information') or '/module-information'),'text/html'); return
         if self.path.rstrip('/').endswith('/api/config'):
-            rec=_last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
-            self._send(200,{'current':_read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
+            read_options, last_record, api = self._config_operations()
+            rec=last_record(); meta={k:{'group':v[0],'label':v[1],'unit':v[2],'min':v[3],'max':v[4],'step':v[5],'consequence':v[6],'level':v[7]} for k,v in META.items()}
+            self._send(200,{'current':read_options(),'defaults':DEFAULTS,'meta':meta,'groups':GROUP_ORDER,'order':list(META),'config_id':rec.get('config_id'),'guardian_version':rec.get('guardian_version',GUARDIAN_VERSION),'engine_version':rec.get('diagnostic_engine_version',DIAGNOSTIC_ENGINE_VERSION)}); return
         if self._is_diagnostics_ui():
             base=self._ingress_base(); self._send(200,render_guardian_diagnostics_html(api_path=(base+'/api/diagnostics') or '/api/diagnostics',modules_path=(base+'/module-information') or '/module-information'),'text/html'); return
         base=self._ingress_base(); self._send(200,render_maintenance_html(configuration_path=(base+'/configuration') or '/configuration',timeline_path=(base+'/timeline') or '/timeline',history_path=(base+'/history') or '/history',modules_path=(base+'/module-information') or '/module-information'),'text/html')
     def do_POST(self):
         if self._is_research_api() and self._research_machine_allowed():
-            response=_get_research_api().handle('POST',self.path)
+            response=self._research_api().handle('POST',self.path)
             self._send(response.status,response.body,headers=response.headers); return
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._candidate_unbound('POST'): return
         if self._is_research_api():
-            response=_get_research_api().handle('POST',self.path)
+            response=self._research_api().handle('POST',self.path)
             self._send(response.status,response.body,headers=response.headers); return
+        if self.path.rstrip('/').endswith('/api/history-preparation'):
+            if _HISTORY_PREPARATION is None:
+                self._send(503, {'error': 'history preparation unavailable'}); return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 4096:
+                    self._send(413, {'error': 'bounded request body required'}); return
+                request = json.loads(self.rfile.read(length))
+                result = (_HISTORY_PREPARATION.cancel() if request == {'cancel': True}
+                          else _HISTORY_PREPARATION.submit(request))
+            except (ValueError, TypeError, KeyError, AttributeError):
+                self._send(400, {'error': 'invalid or conflicting preparation request'}); return
+            self._send(202, result); return
         if self._is_diagnostics_api(): self._diagnostics_request('POST'); return
         if self.path.rstrip('/').endswith('/api/hycube-projection/backfill'):
             if _HYCUBE_BACKFILL_ACTION is None:
@@ -803,23 +983,24 @@ class Handler(BaseHTTPRequestHandler):
             try: length=int(self.headers.get('Content-Length','0'))
             except ValueError: self._send(400,error_json('invalid_request','Content-Length must be an integer')); return
             body=self.rfile.read(length) if length else b''
-            response=_get_position_history_api().handle('POST',self.path,dict(self.headers.items()),body)
+            response=self._position_api().handle('POST',self.path,dict(self.headers.items()),body)
             self._send(response.status,response.body,headers=response.headers); return
         if self._is_maintenance_api(): self._maintenance_request('POST'); return
         if not self.path.rstrip('/').endswith('/api/config'): self._send(404,{'error':'not found'}); return
+        read_options, last_record, api = self._config_operations()
         try:
             n=int(self.headers.get('Content-Length','0')); proposed=json.loads(self.rfile.read(n) or b'{}')
-            cfg={**_read_options(),**{k:proposed[k] for k in DEFAULTS if k in proposed}}
+            cfg={**read_options(),**{k:proposed[k] for k in DEFAULTS if k in proposed}}
             errors=validate(cfg)
             if errors: self._send(400,{'errors':errors}); return
-            if cfg==_read_options(): self._send(200,{'changed':False}); return
-            validated=_api('POST','/addons/self/options/validate',cfg)
+            if cfg==read_options(): self._send(200,{'changed':False}); return
+            validated=api('POST','/addons/self/options/validate',cfg)
             data=validated.get('data',validated)
             if data.get('valid') is not True: self._send(400,{'errors':[data.get('message','Supervisor-Validierung fehlgeschlagen')]}); return
-            saved=_api('POST','/addons/self/options',{'options':cfg})
+            saved=api('POST','/addons/self/options',{'options':cfg})
             if isinstance(saved,dict) and saved.get('result') not in (None,'ok'):
                 self._send(502,{'error':saved.get('message','Supervisor hat die Konfiguration nicht übernommen.')}); return
-            info=_api('GET','/addons/self/info')
+            info=api('GET','/addons/self/info')
             info_data=info.get('data',info) if isinstance(info,dict) else {}
             stored=info_data.get('options') if isinstance(info_data,dict) else None
             if stored is not None and stored != cfg:
@@ -827,28 +1008,47 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200,{'changed':True})
             def restart():
                 time.sleep(1.0)
-                try:_api('POST','/addons/self/restart',{})
+                try:api('POST','/addons/self/restart',{})
                 except Exception: pass
             threading.Thread(target=restart,daemon=True).start()
         except Exception as exc: self._send(500,{'error':str(exc)})
     def do_PATCH(self):
+        if self._reject_research_write(): return
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._candidate_unbound('PATCH'): return
         if self._is_diagnostics_api(): self._diagnostics_request('PATCH'); return
         if self._is_maintenance_api(): self._maintenance_request('PATCH'); return
         self._send(404,{'error':'not found'})
     def do_PUT(self):
+        if self._reject_research_write(): return
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._candidate_unbound('PUT'): return
         if self._is_diagnostics_api(): self._diagnostics_request('PUT'); return
         if self._is_maintenance_api(): self._maintenance_request('PUT'); return
         self._send(404,{'error':'not found'})
     def do_DELETE(self):
+        if self._reject_research_write(): return
         if not self._ingress_allowed(): self._send(403,{'error':'Ingress only'}); return
+        if self._candidate_unbound('DELETE'): return
         if self._is_diagnostics_api(): self._diagnostics_request('DELETE'); return
         if self._is_maintenance_api(): self._maintenance_request('DELETE'); return
         self._send(404,{'error':'not found'})
 
-def start_config_server(port=8099, maintenance_live_publisher=None, bind_host="0.0.0.0"):
-    configure_maintenance_live_publisher(maintenance_live_publisher)
+    def _reject_research_write(self):
+        if not self._is_research_api():
+            return False
+        if not (self._research_machine_allowed() or self._ingress_allowed()):
+            self._send(403, {'error': 'Ingress only'})
+        else:
+            self._send(405, {'error': 'Research API is read-only'}, headers={'Allow': 'GET'})
+        return True
+
+
+def start_config_server(port=8099, maintenance_live_publisher=None, bind_host="0.0.0.0", *, history_composition=None, application=None):
+    if history_composition is None:
+        configure_maintenance_live_publisher(maintenance_live_publisher)
     server=ThreadingHTTPServer((bind_host,port),Handler)
+    server.history_composition = history_composition
+    server.prepared_application = application
     threading.Thread(target=server.serve_forever,daemon=True,name='guardian-config-ui').start()
     return server

@@ -1,4 +1,402 @@
+## 0.9.11 — lokal vorbereitet, nicht installiert
+
+- Der aktive Legacy-Start lädt die letzte belegte RS485-Adresse/Seriennummer
+  direkt aus einem kleinen atomaren Checkpoint, statt bis zu 100.000 Rohzeilen
+  zu durchsuchen. Der vorbereitete Betriebsmodus behält seinen bestehenden
+  bestätigten Katalogzugriff; er öffnet keinen konkurrierenden Checkpoint.
+- Gültige passiv empfangene, zugeordnete 0x93-Antworten aktualisieren Anzeige und
+  Checkpoint. Originalzeit, Rohframe-Prüfsumme und Herkunft bleiben erhalten.
+  Geladene Identität ist historisch, niemals automatisch live bestätigt.
+- Adress-/Seriennummernwechsel invalidieren die verdrängte Zuordnung. Anzeige
+  nennt Beobachtungszeit, Quelle und gegebenenfalls vorherige Adresse/Seriennummer.
+  Managementframes erfinden keine Identität und erneuern deren Zeit nicht.
+- Unveränderte Wiederholungen werden im RAM sofort, auf Datenträger höchstens
+  alle 300 Sekunden fortgeschrieben. Zuordnungswechsel sofort speichern.
+  Atomarer Dateiersatz mit letzter validierter Vorgängerkopie; beschädigte
+  Checkpoints werden weder teilweise übernommen noch automatisch überschrieben.
+- Explizite, begrenzte Ein-Datei-Migration für vorhandene 0x93-Belege; keine
+  automatische Rohsuche beim Start. Stackposition bleibt zeitabhängige Projektion
+  der Positionshistorie. Keine neue Geräteabfrage, kein veränderter Erfassungstakt.
+- MCP, Tunnel, Engine, Recorder, Maintenance-/Positionshistorie und SSD unverändert.
+  Installationsfreigabe und produktive Abnahme stehen aus.
+
+## 0.9.10 — vorbereitet, nicht installiert
+
+- Ausschließlich HA-Anzeigemetadaten der drei bestehenden Hycube-SOC-Grenzen:
+  device_class battery, weiterhin % und state_class measurement.
+- Eindeutige Namen: Hycube SOC-Grenze Normalbetrieb / Passiv,
+  Hycube SOC-Grenze Passiv / Notstrom, Hycube SOC-Grenze Notstrom / Batterieschutz.
+- Bewusst vom Nutzer bestätigte Einordnung für die gemeinsame Darstellung mit
+  den sieben SOC-Sensoren im normalen HA-Verlauf. Diese Werte sind weiterhin
+  Policy-Schwellen, keine gemessenen Batterieladestände; andere HA-Ansichten und
+  Automationen können sie durch die Klassifizierung als Batteriesensoren behandeln.
+- Discovery-Themen, unique_ids, Zustandsthemen und vorhandene EntityIDs bleiben
+  erhalten. Keine Duplikate, Rohdatenänderung, zusätzlichen Abfragen oder neuen
+  Intervalle. Keine HA-Core-/Frontend-Änderung und keine Sonderdetailansicht.
+- Produktive Prüfung der gemeinsamen Darstellung steht bis zur ausdrücklichen
+  Installationsfreigabe aus; freie Intervall- und Quellenauswahl bleiben HA-seitig.
+
+## 0.9.9 — vorbereitet, unveröffentlicht
+
+- Vier native HA-MQTT-Sensoren: Hycube Battery Capacity SOC (%) und die drei
+  Bereichsgrenzen Normalbetrieb/Passiv, Passiv/Notstrom, Notstrom/Batterieschutz.
+- Ausschließlich bestehende System-/Policy-Beobachtungen weiterreichen; keine
+  weiteren HTTP-Abfragen, kein höherer Erfassungstakt, kein Recorder-Backfill.
+- Getrennte Quellenverfügbarkeit; ungültige Beobachtungen/Erfassungsfehler melden
+  unavailable. Nicht-retained Zustände und HA expire_after verhindern dauerhaft
+  aktuelle Anzeige alter Werte. Neustart/Reconnect wartet auf neue Beobachtungen.
+- MQTT-Fehler bleiben von Erfassung und Speicherung isoliert. Andere Komponenten,
+  vorhandene Modulsensoren und Historienabrufe bleiben unverändert.
+- Noch nicht installiert oder produktiv abgenommen.
+
+## 0.9.8 — Kooperativer UI-Historienzugang (vorbereitet, unveröffentlicht)
+
+- Der installierte UI-Standardpfad nutzt wie die vorhandenen lesenden
+  Research-Messabfragen den kooperativen Messleseplatz. Ein belegter Platz führt
+  zum begrenzten Warten statt zum sofortigen `history_busy` beim Start.
+- Live-Erfassung und Rohschreiber behalten Vorrang; ein diagnostischer
+  Startauftrag gibt seinen Platz am bestehenden Checkpoint an wartende Leser ab.
+  Keine Arbeit wird verworfen, keine Sperre deaktiviert, kein Auftrag neu gestartet.
+- Lesen und Antwortserialisierung teilen dieselbe absolute 60-Sekunden-Grenze.
+  Abbruch und Zeitüberschreitung lösen belegte Kapazität wieder. Die UI bleibt
+  bei einem echten Fehler stehen; keine zusätzlichen automatischen Retries.
+- Messdaten, Index-/Dateigrenzen, Diagnose- und Phasenregeln bleiben unverändert.
+  `resume publication exceeds budget` und ungültige Display-Produkte werden
+  durch diese Änderung nicht repariert. Keine erfolgreiche Gesamtfensterabnahme
+  behauptet. MCP, Tunnel, Engine und SSD unverändert.
+
+## 0.9.7 — Mehrtagesverlauf (lokal vorbereitet, unveröffentlicht)
+
+- Ein expliziter Ladeauftrag führt die vorhandenen begrenzten Zeitseiten
+  nacheinander zusammen: höchstens eine Anfrage gleichzeitig, eine Sekunde
+  Pause zwischen erfolgreichen Seiten, keine automatischen Fehlerwiederholungen.
+- Die Zeitachse zeigt von Anfang an das gesamte ausgewählte UTC-Fenster mit
+  bestehender lokaler Zeitdarstellung einschließlich Zeitumstellung. Fortschritt,
+  Abbruch und manuelles Fortsetzen ersetzen Stundenklicken als Standard.
+- Messpunkte und Extrema bleiben erhalten; keine zusätzliche Glättung oder
+  Aggregation. Seiten- und bestehende Evidenzgrenzen unterbrechen Linien.
+  Nicht geladene Bereiche bleiben leer. Ein Teilstand heißt nie „AKTUELL“.
+- Browsergrenzen: 200.000 gespeicherte Messpunkt-Einträge (einschließlich
+  paralleler Projektionen), 50.000 Kontext-Einträge, 2.200 Seiten. Bei Erreichen
+  bleibt der Teilstand sichtbar und die Auswahl muss verkleinert werden.
+- Server-, Live-Prioritäts- und Lesebudgets, MCP, Datenhaltung und Erfassungsraten
+  unverändert. Diagnoseüberlagerungen werden nicht neu berechnet. Keine weitere
+  Installation oder erfolgreiche Mehrtagesabnahme behauptet. Battery 0.9.7;
+  MCP 0.8.6, Tunnel 0.8.1 und Diagnostic Engine 0.4.12 unverändert.
+
+## 0.9.6 — Selected SOC source index preparation (prepared, unpublished)
+
+- Explicit `selected_sources_only: true` scopes cell preparation to the source
+  days used by the reader, including its UTC/local date envelope. Existing
+  fully covered valid indexes are reused byte-for-byte; partial valid prefixes
+  are extended. Replaced sidecars remain in the job staging as `previous.idx`.
+- `hycube_source_index` chooses the same closed-day source as the SOC reader:
+  a valid complete projection, otherwise the authoritative Raw fallback. It
+  does not rebuild projections, infer completeness or rewrite measurements.
+- `policy_index` prepares offset references to original valid observations.
+  The reader selects the predecessor and in-window changes without reading the
+  accumulated policy history. Missing/unproved context remains unavailable.
+- Current days are writer-owned. The existing policy writer alone extends its
+  index at existing appends, at most one 256-record / 256-KiB unit plus one
+  bounded record. No extra device polls. A backlog remains unavailable until
+  caught up; no competing preparation writer is introduced.
+- Battery-only candidate. MCP, Tunnel, Engine, diagnostic/phase rules and Raw
+  retention unchanged. No installation or successful full-window acceptance
+  claimed. Existing request concurrency protection remains in force.
+
+## 0.9.5 — Manual SOC read availability (prepared, unpublished)
+
+- Unavailable legacy policy or Hycube indexes no longer discard readable module
+  SOC. Missing context is explicitly reported, never replaced by current policy
+  or fabricated historical values. The 64-KiB policy guard remains enforced.
+- Unavailable raw fallback days leave readable display days intact. Explicit
+  unread intervals break curves; they mean unavailable indexed access, not proof
+  that measurements were never recorded. Entire unavailable manual pages retain
+  manual continuation to subsequent pages.
+- The UI displays restricted availability and affected sources/ranges. Existing
+  hourly manual pagination remains unchanged; no automatic requests or scans.
+- Cancellation, timeout and oversized-record failures still fail the request.
+  No raw writes, index rebuild, new battery polls or increased read limits.
+- Battery-only candidate. MCP 0.8.6, Tunnel 0.8.1 and Engine 0.4.12 unchanged.
+  Missing indexes are not repaired by this change; policy and phase completeness
+  are not asserted. Installation and the reported manual UI cases remain pending.
+
+## 0.9.4 — Existing historical phase access repair (prepared, unpublished)
+
+- Explicit `canonical_index` preparation republishes only the disposable window
+  index of an existing closed-day phase artifact. It preserves the original gzip,
+  phase facts, incomplete flag, raw data and previous index; no predecessor
+  reconstruction, full-history bootstrap or new phase classification.
+- Historical config compatibility verifies the SHA-256 of the original bounded
+  prefix. Appended records must be strictly later than the requested time range;
+  repair requires them later than the whole source day. Retroactive changes,
+  changed prefixes and missing hashes remain blocked.
+- Four targeted synthetic regressions passed. This is not deployment evidence.
+- Battery only: MCP 0.8.6, Tunnel 0.8.1, Engine 0.4.12 unchanged. Historical gaps
+  and incomplete products remain explicit; phase access alone proves no balancing
+  success. Installation and one bounded external phase acceptance are pending.
+
+## 0.9.3 — Bounded index catch-up (prepared, unpublished)
+
+- Resume the existing cell-history index by at most one 256-record block per
+  append while behind. Preserve partial-block progress and resume after restart;
+  authoritative raw records and their format remain unchanged.
+- For a closed selected window, leave an adjacent open cell-history day explicitly
+  `writer_owned`. Prepare the closed days without claiming the open index is
+  available. Explicitly selected open days remain blocked.
+- Two new regressions failed before correction; both and three directly relevant
+  existing protection cases passed afterward (5 passed in 0.61 s). No repeat suite.
+  Version-only preparation does not constitute a new test run or HA acceptance.
+- Battery-only local candidate: MCP 0.8.6, Tunnel 0.8.1, Engine 0.4.12 and saved
+  20/20/60 intervals unchanged. No deployment, historical job or raw-data rewrite.
+
+## 0.9.2 — Bounded historical reads during collection (prepared, unpublished)
+
+- Existing bounded measurement and canonical-phase reads pause for live work
+  within their request budget instead of failing immediately. Raw acquisition
+  and persistence retain priority; no automatic retries or source rebuilds.
+- Read only the selected persisted daily products through the existing bounded
+  reader. Missing, inconsistent or over-budget products remain explicit failures.
+- Pair with MCP 0.8.6 for explicit safe history error codes; MCP 0.8.5 paging
+  remains unchanged. Tunnel 0.8.1, Engine 0.4.12 and saved 20/20/60 options unchanged.
+- Local evidence: prior 50 Battery + 15 MCP targeted cases, then one additional
+  existing-product regression. No repeat of those suites and no new HA acceptance.
+
+## 0.9.1 – Local manual-history update (23 October 2026)
+
+- Added durable matched diagnostic checkpoints and resumable, bounded repair of
+  missing/invalid shared diagnostic state; valid published products stay available
+  until replacement completes. Warm restarts read only unconfirmed raw tails.
+- Ordered worker shutdown retains final pending persistence and reports timeouts
+  or write failures. Collection intervals, diagnostic formulas and APIs unchanged.
+- Additional local validation: 90 earlier focused cases plus 16 targeted gap cases;
+  the latter replace two obsolete blocking expectations. No HA acceptance implied.
+
+- PWR and Hycube defaults 20 seconds; cells remain 60. Existing saved options
+  require explicit update; defaults do not overwrite them.
+- Manual UI and opt-in Research time pages, bounded index reads, explicit cursor
+  continuation and missing signal metadata. No automatic history migration.
+- Existing MCP 0.8.4 can retain non-paged calls; new paging tools require the
+  separately published MCP 0.8.5. Tunnel and Engine unchanged.
+- Local installation authorized separately; this entry does not claim a completed
+  deployment. Development validation and limitations: docs/DEVELOPMENT_2026-10-23.md.
+
+## 0.9.0 — P0-Anwendungskandidat, lokal vorbereitet und unveröffentlicht (21.10.2026)
+
+- Expliziter Offline-Migrationsauftrag und separater Aktivierungsnachweis unter
+  `/share` ermöglichen den vorhandenen lokalen Add-on-Startweg ohne Docker-Shell.
+  Ungültige oder widersprüchliche Aufträge brechen vor Erfassung ab; keine stille Migration.
+- Eigene Kennung für den vollständigen vorbereiteten P0-Anwendungspfad mit
+  expliziter Offline-Migration der abgeleiteten Stores und versiegeltem Start.
+  Die 0.8.9-Abschnitte darunter bleiben historische Zwischenstände.
+- Einzelne gültige Messpunkte bleiben auch in getrennten Segmenten sichtbar,
+  sowohl in Einzel- als auch Kombinationsdiagrammen. Keine Verbindung über
+  Lücken und keine ergänzten Messwerte.
+- Begrenzte gemeinsame History-Lesepläne, inkrementelle Publikationen,
+  manuelles Laden und ursprüngliche Diagnosemethodik; tatsächliche Anschlüsse
+  für Collector, RS485/Hycube, Daily, Config, Position und Maintenance.
+- Lokale dichte Lastprobe deckte einen Live-Stillstand bei massenhafter
+  Speicherfreigabe auf. Zellrisiko-Zwischendaten werden jetzt je Identität
+  materialisiert und in kleinen Schritten freigegeben; Formeln und vollständige
+  Ergebniswerte bleiben unverändert und werden gegen das Original geprüft.
+- Tatsächlicher Containerstart wählt den vorbereiteten Pfad nur mit explizitem,
+  quellcommit-/versions-/layoutgebundenem Aktivierungsnachweis; ungültiger
+  Nachweis bricht vor Transportstart ab. Migration aktiviert nichts automatisch.
+- Kein automatischer Wechsel vom Legacy-Start; Originaldaten/Erkennungsregeln
+  bleiben erhalten. Keine Installation, UTC-Writer-Aktivierung oder HA-Abnahme.
+- MCP 0.8.4, Tunnel 0.8.1 und Engine 0.4.12 unverändert. Endgültige Quellbindung,
+  Migration, Lastnachweise und Rückkehrgates: `docs/P0_PREPARED_CANDIDATE.md`.
+
+## 0.8.9 — lokale Architekturfortsetzung (21.10.2026), unveröffentlicht
+
+- Ergänzt den explizit vorbereiteten Anwendungspfad mit begrenzten bestätigten
+  Quellen, inkrementellen Projektionen, ursprünglicher Diagnosemethodik und
+  manuellem History-Zugriff sowie tatsächlichen Collector-/Service-Anschlüssen.
+- Explizite Offline-Vorbereitung und gebundene Startprüfung; keine implizite
+  Migration im Reader. Wiederanlaufbare Hycube-Publikation und bestehende
+  Maintenance-Löschfunktion mit Retired-Request-Nachweis.
+- Anders als der frühere 20.10.-Teilstand verwendet dieser vorbereitete Pfad neue
+  abgeleitete Stores und erfordert eine explizite Migration. Originaldateien und
+  fachliche Formeln bleiben erhalten; kein automatischer Wechsel vom Legacy-Start.
+- Battery bleibt 0.8.9; MCP 0.8.4, Tunnel 0.8.1, Engine 0.4.12 unverändert.
+  Keine Installation/UTC-Writer-Aktivierung oder HA-Abnahme. Grenzen und Verfahren:
+  `docs/P0_PREPARED_CANDIDATE.md`. Frühere Angaben unten sind historische Teilstände.
+
+## 0.8.9 — lokal vorbereitet, unveröffentlicht (20.10.2026)
+
+- Behebt zwei auf HA unter 0.8.8 gemessene P0-Engpässe im Erfassungsthread:
+  vollständige tiefe Aggregate-Kopien und erneute Histogrammprojektion vor jeder
+  Analyse. Geänderte Cell-/Phasenrecords werden nun vor Änderung kopiert;
+  Speicherabbilder frieren nur die Mitgliedschaft unveränderlicher Records ein.
+  Die unveränderte Analyseprojektion erfolgt im bestehenden Analyseworker.
+- Raw-Dateien, Ereignisse, Diagnoseformeln, Retention, Phasen, Messrhythmus und
+  Konfiguration bleiben unverändert. Kein neues Schema und keine Migration.
+- MCP 0.8.4, Tunnel 0.8.1 und Diagnostic Engine 0.4.12 unverändert.
+- Noch nicht installiert oder auf HA abgenommen. Der bestehende 0.8.8-Startaufbau
+  ist abgeschlossen, reguläre Live-Zyklen verletzen aber weiterhin den Zieltakt.
+  History-Pilot und Gesamt-P0-Abnahme bleiben offen. Details:
+  `docs/P0_LIVE_SNAPSHOTS.md`.
+
+## 0.8.8 – priorisierter Live-Start (lokaler Kandidat, unveröffentlicht)
+
+- Normale lesende Statusausgabe ergänzt um feste skalare Verarbeitungsschrittzeiten
+  aus bereits vorhandener Instrumentierung; keine Debugumschaltung, neuen Polls
+  oder Historyreads. Kommunikation und abgeleitete Vorbereitung unterscheidbar.
+- PWR-/Raw-Erfassung wartet nicht mehr auf historische Diagnose-Rebuilds.
+  Bestehende Diagnoseberechnung, SOC-Regeln, Phasenregeln und Engine bleiben
+  unverändert. Kein zusätzlicher Batterieaufruf und keine Konfigurationsabschaltung.
+- Ein privater Startup-Worker rekonstruiert die bestehenden Diagnose-Stores nur
+  in freien Live-Zeitfenstern. Begrenzte JSON-Schritte, ein diskbegrenzter
+  Abgleich und kooperative SQL-/Zeilenprüfpunkte ersetzen den ungeschützten
+  Startvollscan. Raw-Rückstau und die tatsächliche Poll-Frist haben Vorrang.
+- Vollständige Übernahme erst nach Replay der zwischenzeitlichen Live-Messungen.
+  Bis dahin keine Veröffentlichung/Persistenz unvollständiger Diagnosen.
+  Budget-, Quellen- und Identitätsfehler werden als technischer Startup-Status
+  ausgewiesen; bestehende Diagnose-Dateien und aktuelle Rohdaten bleiben erhalten.
+- MCP 0.8.4, Tunnel 0.8.1 und Diagnostic Engine 0.4.12 unverändert.
+  Details, harte Arbeitsgrenzen und Abnahmegrenzen: `docs/P0_DIAGNOSTIC_STARTUP.md`.
+  Dieser Folge-Kandidat ist noch nicht installiert; keine vollständige P0-Abnahme.
+
+## Lokaler P0-Nachtrag – expliziter Quellenanfang-Bootstrap (unveröffentlicht)
+
+- Optionaler, ausdrücklich begrenzter Canonical-Präfixaufbau ab nachgewiesenem
+  Anfang des gespeicherten Quellenbestands; kein Neustart an der Abfragegrenze.
+- Begrenzte Metadateninventur, feste Revisionen, Live-Vorrang und Wiederaufnahme;
+  bestehende Phasen- und Unknown-Semantik unverändert. Keine produktive Ausführung.
+- Details und Grenzen: `docs/P0_SELECTED_HISTORY_PREPARATION.md`.
+
 # Guardian Battery Changelog
+
+## 0.8.7 – P0-Zeitverlauf (lokaler Kandidat, unveröffentlicht)
+
+- Historie lädt ausschließlich nach „Zeitfenster laden“. Auswahl, URL-Restore,
+  Reload, Navigation und Resize lösen keinen Abruf aus. Abbruch und veraltete
+  Antworten dürfen einen neueren Datenstand nicht überschreiben; Fehler erhalten
+  das bisherige Diagramm.
+- Gemeinsame RS485-Abfrage für ausgewählte Module/Messgrößen; datums- und
+  blockbegrenzte Quellen mit Identitäts-Checkpoints. Fehlende/veraltete Indizes
+  führen bei überschrittenem kleinen Kontext zu einem ausdrücklichen Status,
+  nicht zu einer vollständigen interaktiven Reanalyse.
+- Disposable SQLite-Fensterindizes für Display- und kanonische Phasenprojektionen;
+  verifizierte Append-Provenienz erhält unveränderte Abschnitte offener Tage.
+  Begrenzte Raw-/Phasen-Tails; keine Änderung fachlicher Phasenregeln.
+- Chronologische, identitäts- und quellgetrennte Serien, explizite Lücken und
+  Konflikte. Downsampling erhält SOC-Sprünge, Extrema und Freigabewechsel;
+  abgeleitete Punkte bleiben als solche gekennzeichnet.
+- Historische UI-/Projektionsarbeit und Research-Zeitreihen teilen einen Slot
+  ohne Warteschlange. Live-Zyklus, Raw-Rückstau und nächste Erfassungsfrist haben
+  Vorrang; auch Serialisierung und Clientabbruch werden kooperativ geprüft.
+- Explizite ausgewählte History-Vorbereitung über geschützten Ingress: persistierte
+  Aufträge, blockweise Indexierung, inkrementelle Display-Arbeitsdateien und
+  kanonische Fortsetzung aus validiertem Vorgänger. Live-Vorrang, Abbruch und
+  Wiederaufnahme; offene/ungültige Quellen werden ausdrücklich gesperrt.
+  Kein automatischer Rebuild aus einem History-Request. Details und Pilotumfang:
+  `docs/P0_SELECTED_HISTORY_PREPARATION.md`.
+- SOC-Crash-Detektor, persistierte Ereignisse, Diagnosegrenzen, PWR-/RS485-Abfragen
+  unverändert. Research-MCP 0.8.4, Tunnel 0.8.1, Diagnostic Engine 0.4.12 unverändert.
+- Keine Installation oder HA-Abnahme. Indexbestand, reale Live-Timing-Budgets,
+  Speicher/I/O und identische 24-h-Vorher-/Nachher-Abfrage bleiben Releasegates.
+  Details und Einschränkungen: [P0-Prüfvertrag](docs/P0_HISTORY_PERFORMANCE.md).
+
+## 0.8.6 – Research-Zeitbudget (lokal vorbereitet, unveröffentlicht)
+
+- Gemeinsames kooperatives 60-s-Budget ab Research-Slotannahme durch Identität,
+  Reader, Lesesperren, Projektion und Antwortgrößenprüfung. Keine harte
+  Präemption einzelner blockierender Operationen; HTTP-Ausgabe liegt außerhalb.
+- Alarmleser bindet die Bytegrenze an die geöffnete Datei; vorzeitiges Dateiende
+  wird als Fehler statt als vollständige Teilantwort behandelt.
+- Korrigiert die Zählung abgewiesener Vollauflösungsanfragen und gibt Slots auch
+  bei Fehlern der Größenprüfung/Auditführung frei.
+- Partner Research-MCP 0.8.4: HTTP-Default/Maximum 75 s, Queue weiterhin 15 s.
+  Vorhandene kleinere Overrides bleiben wirksam und sind vor Installation zu prüfen.
+- SOC-/Gap-Regeln, Ereignisse und Herkunftsnachweise, Datenverträge, Pagination,
+  Antwort-/Bereichsgrenzen und Parallelität unverändert. Keine neuen Jobs/Retry.
+  Tunnel 0.8.1 und Diagnostic Engine 0.4.12 unverändert.
+- Lokale Tests sind keine Betriebsabnahme. Äußere Connectorfrist unbekannt;
+  aktueller gemeinsamer Rückkehrstand 0.8.5/0.8.3 samt Daten vor Installation nötig.
+
+## 0.8.5 – Research-Reader I/O (vorbereitet, unveröffentlicht)
+
+- Liest historische Messzeilen mit einem begrenzten 256-KiB-Puffer und zählt
+  gelesene Bytes statt einer Dateipositionsabfrage pro Zeile. Reduziert den
+  nachgewiesenen I/O-Aufwand unter konkurrierender Python-Last.
+- Messwerte, Zeit-/Identitätsbezüge, Index-Fallback, Pagination und Deadline
+  bleiben unverändert; kein Downsampling, keine neuen Jobs oder Indexschreibungen.
+- SOC-Abstandsregel, gespeicherte Ereignisse und Herkunftsnachweise unverändert.
+  Research-MCP bleibt 0.8.3, Tunnel 0.8.1, Diagnostic Engine 0.4.12.
+- 74 gezielte Battery-Tests, 28 MCP-Tests und 10 zusätzliche Grenzfalltests
+  bestanden vor Versionsvorbereitung. Externe Abnahme der drei zuvor
+  gescheiterten Fenster und vollständiger Pagination nach Installation offen.
+- Lokaler Leistungsnachweis ist keine vollständige Ursachenerklärung oder
+  Betriebsabnahme. Große Bereiche und Snapshotgrenzen siehe RESEARCH_READER_IO.md.
+
+## 0.8.4 – SOC-Abstandsregel und Research-Abdeckung (lokal vorbereitet, unveröffentlicht)
+
+- Paketiert den lokal gesicherten Funktionsstand `3b3f3a4`; diese Versionsvorbereitung
+  ändert keine Erkennungs-, Speicher- oder Coverage-Logik. Battery 0.8.3 bleibt der
+  gesonderte Maintenance-Stand. Keine Veröffentlichung oder Betriebsabnahme.
+- Bestätigte konfigurierbare Startwerte: `soc_crash_gap_pp=5.0` Prozentpunkte und
+  `soc_crash_window_seconds=300`. Aktueller Abstand zum jeweils aktuellen
+  Zweitminimum >= X innerhalb einschließlich Y seit festem Kandidatenbeginn;
+  Bestätigung sofort, auch in der Startmessung, ohne zusätzlichen Eigenabfall.
+- Ein Kandidat; Rollenwechsel zuerst. Eindeutiges Anfangsminimum setzt nur die
+  Ausgangsrolle. Initiale oder neue gemeinsame Minima warten auf Eindeutigkeit;
+  keine Modulnummernauswahl. Spätere Gleichstände mit dem bisherigen Schwächsten
+  und Referenzwechsel setzen die Frist nicht zurück. Weniger als zwei beobachtete
+  Module setzen den Vergleich ohne Replay-Reset/Fristverlängerung aus. Kein erneutes
+  Ereignis nach Bestätigung/Ablauf ohne Rollenwechsel; keine Medianbedingung.
+- Neue kompakte Ereignisse: Schema 2 / `guardian_soc_gap_v1`, `observed_gap_pp`,
+  alle gleichstehenden Zweitminimum-Referenzen und getrennte vorherige schwächste
+  Rolle. Historische Schema-1-Eigenabfallereignisse einschließlich Gleichheit mit X
+  bleiben mit unveränderten Bytes, IDs und Bedeutung lesbar. Listen tragen
+  `guardian_soc_events_v2`, Einzelabrufe die gespeicherte Detektorkennung.
+- Der optionale alte Schlüssel `soc_crash_drop_pp` wird nicht verwendet oder
+  umgedeutet; seine Anwesenheit erzeugt eine Startwarnung. Fehlt der neue Schlüssel,
+  gilt dessen bestätigter Default 5. Individuelle Altwerte bewusst prüfen.
+- Korrigiert Research-Coverage: gemeinsamer Scan, Randlücken ohne Extrapolation,
+  unabhängig von Pagination, Einheiten und ursprünglicher PWR-/Cell-Zeitbezug;
+  Policy-Gültigkeitsintervalle und unbekannte zeitliche Wartungsabdeckung erhalten.
+  Begrenzter Offline-Replay standardmäßig schreibfrei; Inventur ohne Schreibmodus.
+- Abgestimmtes Zielpaar Battery 0.8.4 / Research-MCP 0.8.3. Die bisherigen lesenden
+  Event-Endpunkte bleiben; Clients müssen Schema 1/2 und Fehler-/Metrikverträge
+  unterscheiden. Die schon mit Phase 1 entfallenen SOC-/Evidence-Zugänge kehren
+  nicht zurück; kein Aufruf-/Ergebnisersatz für alte Evidence-Pakete.
+- Battery bleibt beim vorhandenen lokalen Paketweg. Nur der spätere enge MCP-Stand
+  wird auf separat geprüftem GitHub-main vorbereitet; kein Gesamtbranch-Merge und
+  kein Überschreiben der anderen Battery-Linie. Tunnel 0.8.1 / Engine 0.4.12 bleiben.
+- Vor Installation aktueller Image-/Options-/Share-Rückkehrnachweis erforderlich.
+  Alte Battery-Leser überspringen Schema 2: Bytes bleiben zu schützen, neue Events
+  wären darüber nicht abrufbar. Keine automatische Datenrücksetzung oder Migration.
+  Die 70 vorläufigen historischen Abstandstreffer bleiben ein getrennter Bericht;
+  keine automatische Befüllung und keine semantische Deduplikation alter/neuer IDs.
+
+
+## 0.8.3 – Maintenance-Speichern und gezieltes Löschen (lokal vorbereitet, unveröffentlicht)
+
+- Sperrt wiederholtes Absenden während des Speicherns. Eine persistente
+  Anfragekennung verhindert doppelte Einträge bei wiederholter Übertragung;
+  neue bewusste Vorgänge mit gleichem Inhalt bleiben möglich. Klare Rückmeldung
+  beim Speichern; kein erneutes MQTT-Publizieren bei Create-Retries.
+- Ergänzt „Eintrag löschen“ mit Bestätigung: alle Revisionen genau dieser ID
+  werden endgültig entfernt. „Auf Nicht aktiv setzen“ und „Aktivieren“ bleiben.
+- Erhält dokumentierte Modulpositionen und kennzeichnet einen gelöschten
+  Maintenance-Beleg in deren Anzeige. Keine automatische Duplikatbereinigung.
+- Der Diagnoseinput verwendet nur aktuelle aktive Maintenance-Revisionen.
+  Keine Änderung an Diagnosefachregeln, SOC-Erkennung, Collector-Timing oder
+  Hycube-Oberfläche.
+- Battery 0.8.3 bleibt kompatibel mit Research-MCP 0.8.2; Tunnel 0.8.1 und
+  Diagnostic Engine 0.4.12 bleiben unverändert. Herkunft und Betriebsprüfung
+  einer lokalen Installation werden separat dokumentiert; kein GitHub-Release.
+
+
+## 0.8.2 – Einfache SOC-Crash-Erkennung (vorbereitet, unveröffentlicht)
+
+- Ergänzt interne Buildherkunft: Packaging aus einem sauberen festen Commit, Prüfung der Build-/Laufzeitversion und versiegelte `build-info.json`. Startlog enthält die Quellrevision; ungültige Herkunft verhindert den Start vor Diensten und Messwerterfassung. Kein neues API-Feld und keine Änderung der SOC-Regeln. Details: [Build-Provenienz](docs/BUILD_PROVENANCE.md).
+- Konfigurierbare Startwerte X = 5 Prozentpunkte und Y = 300 Sekunden. Ein Kandidat beginnt beim strikten Wechsel zum schwächsten Modul mit festem Start-SOC und Messzeitpunkt; vorheriger Abfall zählt nicht. Erkennung sofort bei der ersten Messung mit weiterem Abfall > X und vergangener Messzeit <= Y. Keine Medianbedingung oder zusätzlichen Erkennungskriterien.
+- Nur ein Kandidat: Ein Rollenwechsel beendet den alten vor seiner Auswertung. Initialer Gleichstand wählt kein Modul; das anschließende strikte Minimum beginnt mit Nullreferenz. Ein späterer Gleichstand allein startet keinen Kandidaten.
+- Kompakte persistierte Ereignisse, lesbar über `/api/research/soc-crash-events` und dessen Event-ID-Route. Historische Gleichheitsereignisse (>= X) bleiben mit unveränderten Bytes und IDs lesbar; neue Erzeugung und Anhängen verlangen > X. Historische Ereignisse werden nicht als nach der neuen Regel erkannt dargestellt. Ereignisformat und Detektorkennung bleiben unverändert.
+- Alte API-Zugänge `/api/research/events/soc-crashes`, `/api/research/evidence-package` und `/api/research/evidence-core` entfallen (404). MCP ersetzt `find_soc_crashes` und `build_evidence_package` durch `list_soc_crash_events` und `get_soc_crash_event`. Keine Aufruf- oder Ergebnisgleichheit: Battery-/MCP-Update auf 0.8.2 abstimmen und bestehende Clients anpassen.
+- Battery 0.8.1 bezeichnet bereits die andere Entwicklungslinie; deshalb 0.8.2. Tunnel bleibt 0.8.1, Diagnostic Engine bleibt 0.4.12. Diese Versionsvorbereitung ändert keine Phase-1-Funktion und behauptet weder Veröffentlichung noch Betriebsabnahme.
 
 ## 0.8.0 – Guardian Research API Integration
 

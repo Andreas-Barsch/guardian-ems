@@ -1,6 +1,8 @@
 """Derived, rebuildable Hycube history projection with raw provenance."""
 from __future__ import annotations
 
+from history_append_receipt import before_append, after_append
+import resume_publication as resume
 import json
 import os
 import re
@@ -108,7 +110,12 @@ class HycubeProjectionStore:
 
     def __init__(self, directory=DEFAULT_HYCUBE_PROJECTION_DIR, *,
                  flush_records=FLUSH_RECORDS, flush_seconds=FLUSH_SECONDS,
-                 monotonic=time.monotonic):
+                 monotonic=time.monotonic, append_backend=None, inventory_path=None,
+                 publication_fault=None):
+        self.append_backend = append_backend
+        self.inventory_path = None if inventory_path is None else Path(inventory_path)
+        if append_backend is not None and self.inventory_path is None:
+            raise ValueError('confirmed projection writer requires explicitly prepared inventory')
         self.directory = Path(directory)
         self.flush_records = max(1, int(flush_records))
         self.flush_seconds = max(0.0, float(flush_seconds))
@@ -121,9 +128,32 @@ class HycubeProjectionStore:
                         "records_written": 0, "last_success": None,
                         "write_failures": 0, "gap_skips": 0,
                         "last_error": None, "last_flush_at": None}
+        if append_backend is None:
+            for intent in sorted(self.directory.glob("*.resume-publication.json")):
+                resume.recover(intent)
         self._storage = self._inventory()
+        self._publication = None
+        if append_backend is not None:
+            from projection_publication import ProjectionPublication
+            self._publication = ProjectionPublication(append_backend, self.directory,
+                self.inventory_path, fault=publication_fault)
+            if self._publication.recover():
+                self._storage = self._inventory()
+                self._status.update(state="recovered", last_error=None)
 
     def _inventory(self):
+        if self.inventory_path is not None:
+            from projection_repository import Unavailable
+            if not self.inventory_path.is_file() or self.inventory_path.stat().st_size>4096:
+                raise Unavailable('projection inventory requires explicit preparation')
+            value=json.loads(self.inventory_path.read_text(encoding='utf-8'))
+            keys={'projection_days','projection_bytes','complete_days','open_days','invalid_days'}
+            if (value.get('directory') != str(self.directory.resolve()) or not value.get('origin')
+                    or set(value.get('counts',{}))!=keys
+                    or any(type(v) is not int or v<0 for v in value['counts'].values())):
+                raise Unavailable('prepared projection inventory contract mismatch')
+            self._inventory_origin=value['origin']
+            return value['counts']
         result = {"projection_days": 0, "projection_bytes": 0,
                   "complete_days": 0, "open_days": 0, "invalid_days": 0}
         if not self.directory.exists():
@@ -161,6 +191,10 @@ class HycubeProjectionStore:
             self._status["gap_skips"] += 1
             return False
         try:
+            if self._publication is not None and self._publication.recover():
+                self._storage = self._inventory()
+                self._pending.clear(); self._pending_day = None
+                self._status.update(state="recovered", last_error=None)
             day = _day(raw_record["received_at"])
             if self._pending_day is not None and self._pending_day != day:
                 self._flush_locked()
@@ -210,12 +244,25 @@ class HycubeProjectionStore:
             self._storage = self._inventory()
 
     def _flush_locked(self):
+        if self._publication is not None and self._publication.recover():
+            self._storage = self._inventory()
+            self._pending.clear(); self._pending_day = None
+            self._status.update(state="recovered", last_error=None)
         if not self._pending:
             self._last_flush = self.monotonic()
             return
         day = self._pending_day
         path = self.projection_path(day); path.parent.mkdir(parents=True, exist_ok=True)
+        intent = self.directory / (day + ".resume-publication.json")
+        if self._publication is None:
+            resume.recover(intent)
         metadata = load_projection_metadata(self.directory, day) or {}
+        confirmed = int(metadata.get("confirmed_raw_end_offset", 0))
+        self._pending = [(item, receipt) for item, receipt in self._pending
+                         if receipt.end_offset > confirmed]
+        if not self._pending:
+            self._pending_day = None
+            return
         old_size = path.stat().st_size if path.exists() else 0
         old_status = metadata.get("status")
         expected_offset = int(metadata.get("projection_end_offset", 0))
@@ -224,9 +271,6 @@ class HycubeProjectionStore:
         projected = [item for item, _receipt in self._pending if item is not None]
         lines = [json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
                  for item in projected]
-        with path.open("a", encoding="utf-8") as handle:
-            handle.writelines(lines)
-            handle.flush()  # Derived data: deliberately no per-flush fsync.
         first = metadata.get("first_timestamp")
         if first is None and projected:
             first = projected[0]["received_at"]
@@ -247,7 +291,7 @@ class HycubeProjectionStore:
             "raw_filename": last_receipt.path.name,
             "raw_size": raw_stat.st_size, "raw_mtime_ns": raw_stat.st_mtime_ns,
             "confirmed_raw_end_offset": last_receipt.end_offset,
-            "projection_end_offset": path.stat().st_size,
+            "projection_end_offset": old_size + sum(len(line.encode("utf-8")) for line in lines),
             "projection_record_count": count,
             "last_projection_source_raw_end_offset": last_projection_offset,
             "trailing_skipped_records": trailing_skipped,
@@ -255,7 +299,22 @@ class HycubeProjectionStore:
             "last_timestamp": (projected[-1]["received_at"] if projected
                                else metadata.get("last_timestamp")),
         }
-        _write_json_atomic(self.metadata_path(day), next_metadata)
+        next_storage = dict(self._storage)
+        if old_size == 0 and old_status is None:
+            next_storage["projection_days"] += 1
+        next_storage["projection_bytes"] += next_metadata["projection_end_offset"] - old_size
+        if old_status in {"open", "complete"}:
+            next_storage[f"{old_status}_days"] = max(0, next_storage[f"{old_status}_days"] - 1)
+        next_storage["open_days"] += 1
+        if self._publication is not None:
+            self._publication.publish(day, b"".join(line.encode("utf-8") for line in lines),
+                old_size, next_metadata, {'directory':str(self.directory.resolve()),
+                    'origin':self._inventory_origin, 'counts':next_storage})
+        else:
+            generation = before_append(path)
+            resume.publish(intent, [resume.append(path, "".join(lines).encode()),
+                resume.replace(self.metadata_path(day), resume.encoded(next_metadata))])
+            after_append(path, generation)
         if count // DEFAULT_BLOCK_RECORDS > old_count // DEFAULT_BLOCK_RECORDS:
             try:
                 extend_open_index(path, timestamp_field="received_at", iso_timestamp=True,
@@ -267,14 +326,7 @@ class HycubeProjectionStore:
                             records_written=self._status["records_written"] + len(projected),
                             last_error=None, last_flush_at=time.time(),
                             last_success=time.time())
-        new_size = path.stat().st_size
-        if old_size == 0 and old_status is None:
-            self._storage["projection_days"] += 1
-        self._storage["projection_bytes"] += new_size - old_size
-        if old_status in {"open", "complete"}:
-            self._storage[f"{old_status}_days"] = max(
-                0, self._storage[f"{old_status}_days"] - 1)
-        self._storage["open_days"] += 1
+        self._storage = next_storage
         self._pending.clear(); self._pending_day = None
         self._last_flush = self.monotonic()
 
@@ -488,6 +540,8 @@ class HycubeProjectionBackfill:
         historical = day < current_day
         final_projection_path = self.projection_directory / f"{day}.jsonl"
         final_metadata_path = self.projection_directory / f"{day}.meta.json"
+        intent = self.projection_directory / (day + ".backfill.resume-publication.json")
+        resume.recover(intent)
         if historical and projection_plan(raw_path, self.projection_directory)["mode"] == "projection":
             try:
                 selected_ranges(final_projection_path, float("-inf"), float("inf"),
@@ -536,9 +590,7 @@ class HycubeProjectionBackfill:
                 last_projection_offset = last_offset; trailing_skipped = 0
                 lines.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
                 first = first or received; last = received; written += 1
-        if lines:
-            with projection_path.open("a", encoding="utf-8") as handle:
-                handle.writelines(lines); handle.flush()
+        payload = "".join(lines).encode()
         final_raw_stat = raw_path.stat()
         caught_up = last_offset == final_raw_stat.st_size
         status = "complete" if caught_up and day < current_day else "open"
@@ -546,14 +598,17 @@ class HycubeProjectionBackfill:
             "raw_filename": raw_path.name, "raw_size": final_raw_stat.st_size,
             "raw_mtime_ns": final_raw_stat.st_mtime_ns,
             "confirmed_raw_end_offset": last_offset,
-            "projection_end_offset": projection_path.stat().st_size if projection_path.exists() else 0,
+            "projection_end_offset": projection_offset + len(payload),
             "projection_record_count": record_count + written,
             "last_projection_source_raw_end_offset": last_projection_offset,
             "trailing_skipped_records": trailing_skipped,
             "first_timestamp": first, "last_timestamp": last,
             "raw_records_considered": processed, "projection_records_written": written,
             "parse_errors": 0, "skipped_records": processed - written}
-        _write_json_atomic(metadata_path, next_metadata)
+        generation = before_append(projection_path)
+        resume.publish(intent, [resume.append(projection_path, payload),
+            resume.replace(metadata_path, resume.encoded(next_metadata))])
+        after_append(projection_path, generation)
         if status == "complete" and historical:
             os.replace(projection_path, final_projection_path)
             os.replace(metadata_path, final_metadata_path)

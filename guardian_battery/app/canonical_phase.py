@@ -5,6 +5,13 @@ from acquisition and can be rebuilt or discarded at any time.
 """
 from __future__ import annotations
 
+from research_budget import ResearchQueryError, check_budget
+
+from history_append_receipt import signature as append_signature, matches_prefix
+from canonical_window_store import publish as publish_window, read as read_window, checkpoint as window_checkpoint
+from history_live_priority import historical_slot
+import sqlite3
+import resume_publication as resume
 import gzip
 import copy
 import hashlib
@@ -40,18 +47,30 @@ class IdentityEpochResolver:
         if position_history_path is not None:
             try:self.snapshots=sorted(PositionHistoryLog(position_history_path).read_all(),
                 key=lambda item:(item.effective_at,item.created_at,item.position_history_id))
+            except ResearchQueryError:raise
             except Exception:self.snapshots=[]
     def resolve(self, record, timestamp):
+        identity,serial,_ = self.resolve_with_checkpoint(record,timestamp)
+        return identity,serial
+
+    def resolve_with_checkpoint(self,record,timestamp,checkpoint=None):
+        """Same occupancy rules with explicit bounded caller-supplied snapshots.
+
+        A caller resuming at a later day must supply its exact prior checkpoint;
+        absence of such a checkpoint is not permission to guess an origin.
+        """
         serial=record.get("module_serial")
         if not serial:
-            return f"unresolved-position-{int(record['module'])}",None
-        present=False;start="observed";seen=False
+            return f"unresolved-position-{int(record['module'])}",None,checkpoint
+        state=dict(checkpoint or {'present':False,'start':'observed','seen':False,'cursor':None})
         for snapshot in self.snapshots:
+            key=(snapshot.effective_at,snapshot.created_at,snapshot.position_history_id)
             if _epoch(snapshot.effective_at)>timestamp:break
+            if state['cursor'] is not None and key<=tuple(state['cursor']):continue
             occupied=serial in snapshot.positions.values()
-            if occupied and not present and seen:start=snapshot.effective_at
-            present=occupied;seen=True
-        return f"{serial}@{start}",serial
+            if occupied and not state['present'] and state['seen']:state['start']=snapshot.effective_at
+            state.update(present=occupied,seen=True,cursor=key)
+        return f"{serial}@{state['start']}",serial,state
 
 
 def _epoch(value):
@@ -91,7 +110,9 @@ def _atomic_gzip(path, value):
 def _signature(path):
     path = Path(path); digest = hashlib.sha256()
     with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024): digest.update(chunk)
+        while chunk := handle.read(1024 * 1024):
+            check_budget()
+            digest.update(chunk)
     stat = path.stat()
     return {"filename": path.name, "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns, "sha256": digest.hexdigest()}
@@ -100,7 +121,8 @@ def _signature(path):
 class CanonicalPhaseMachine:
     """Streaming state machine with a JSON-safe exact continuation state."""
 
-    def __init__(self, identity_epoch_id, physical_serial=None, *, parameters=None):
+    def __init__(self, identity_epoch_id, physical_serial=None, *, parameters=None, timestamp_sequence_factory=None):
+        self.timestamp_sequence_factory = timestamp_sequence_factory
         self.identity_epoch_id = str(identity_epoch_id)
         self.physical_serial = physical_serial
         self.parameters = {**DEFAULT_PARAMETERS, **(parameters or {})}
@@ -140,6 +162,9 @@ class CanonicalPhaseMachine:
                 "canonical_sample_count": 0, "count_timestamps": [],
                 "config_id": config_id, "module_position": position}
 
+    def _counts(self, values=()):
+        return list(values) if self.timestamp_sequence_factory is None else self.timestamp_sequence_factory(values)
+
     def _diagnostic(self, timestamp, phases, config_id, position):
         key = "+".join(phases)
         current = self.pending_diagnostic
@@ -150,6 +175,7 @@ class CanonicalPhaseMachine:
             current = None
         if current is None:
             current = self._interval(timestamp, key, phases, config_id, position)
+            current["count_timestamps"] = self._counts()
             self.pending_diagnostic = current
         current["canonical_sample_count"] += 1
         current["count_timestamps"].append(_epoch(timestamp))
@@ -164,7 +190,7 @@ class CanonicalPhaseMachine:
         if current: current["canonical_to"] = timestamp
         item = self._interval(timestamp, phase, phases, config_id, position)
         item["canonical_sample_count"] = 1
-        item["count_timestamps"] = [_epoch(timestamp)]
+        item["count_timestamps"] = self._counts([_epoch(timestamp)])
         self.visual_segments.append(item)
         self._reduce_visual()
 
@@ -184,8 +210,9 @@ class CanonicalPhaseMachine:
                     merged["canonical_to"] = right["canonical_to"]
                     merged["canonical_sample_count"] = sum(
                         item["canonical_sample_count"] for item in (left, middle, right))
-                    merged["count_timestamps"] = [value for item in
-                        (left, middle, right) for value in item["count_timestamps"]]
+                    merged["count_timestamps"] = self._counts()
+                    for item in (left, middle, right):
+                        merged["count_timestamps"].extend(item["count_timestamps"])
                     self.visual_segments[index:index+3] = [merged]
                     changed = True
                     break
@@ -278,13 +305,13 @@ class CanonicalPhaseMachine:
             "relative_endpoint_state": self.endpoint_state}
 
     @classmethod
-    def restore(cls, value, *, parameters=None):
+    def restore(cls, value, *, parameters=None, timestamp_sequence_factory=None):
         if (value.get("schema_version") != SCHEMA_VERSION or
                 value.get("semantics_version") != SEMANTICS_VERSION or
                 value.get("algorithm_version") != ALGORITHM_VERSION):
             raise CanonicalPhaseError("invalid canonical phase checkpoint")
         machine = cls(value["identity_epoch_id"], value.get("physical_serial"),
-                      parameters=parameters)
+                      parameters=parameters, timestamp_sequence_factory=timestamp_sequence_factory)
         visual = value["visual_state"]
         machine.axis_previous = visual["axis_previous"]
         machine.stable_axis = visual["stable_axis"]
@@ -337,8 +364,11 @@ class CanonicalPhaseStore:
 
     def __init__(self, directory): self.directory = Path(directory)
     def path(self, day): return self.directory / f"{day}.json.gz"
-    def write_day(self, day, artifact): _atomic_gzip(self.path(day), artifact)
+    def write_day(self, day, artifact):
+        _atomic_gzip(self.path(day), artifact)
+        publish_window(self.path(day),artifact)
     def read_day(self, day):
+        check_budget()
         try:
             with gzip.open(self.path(day), "rt", encoding="utf-8") as handle: value=json.load(handle)
         except (OSError, json.JSONDecodeError) as exc:
@@ -375,6 +405,8 @@ class CanonicalPhaseProjection:
     def update_current(self, day=None):
         """Consume only the append tail of today's authoritative cell file."""
         day=day or datetime.fromtimestamp(self.clock(),timezone.utc).date().isoformat()
+        intent = self._current_state_path().with_suffix(".publication.json")
+        resume.recover(intent)
         source=self.cell_directory/f"{day}.jsonl"
         if not source.is_file(): return {"day":day,"samples":0,"bytes":0,"available":False}
         state={"schema_version":SCHEMA_VERSION,"semantics_version":SEMANTICS_VERSION,
@@ -385,8 +417,17 @@ class CanonicalPhaseProjection:
             if (loaded.get("schema_version")==SCHEMA_VERSION and loaded.get("day")==day and
                     loaded.get("semantics_version")==SEMANTICS_VERSION and
                     loaded.get("algorithm_version")==ALGORITHM_VERSION and
-                    int(loaded.get("offset",0))<=source.stat().st_size): state=loaded
-        except (FileNotFoundError,json.JSONDecodeError,OSError,TypeError,ValueError): pass
+                    int(loaded.get("offset",0))<=source.stat().st_size and
+                    matches_prefix(source, loaded.get("source_signature", {}))):
+                state=loaded
+            elif loaded.get("day") == day:
+                raise CanonicalPhaseError("phase checkpoint/source changed; explicit bounded day rebuild required")
+        except FileNotFoundError:
+            if self.store.path(day).exists():
+                raise CanonicalPhaseError("missing phase checkpoint; explicit bounded day rebuild required")
+        except CanonicalPhaseError: raise
+        except (json.JSONDecodeError,OSError,TypeError,ValueError) as exc:
+            raise CanonicalPhaseError("invalid phase checkpoint; explicit bounded day rebuild required") from exc
         machines={key:CanonicalPhaseMachine.restore(value)
                   for key,value in state["machines"].items()}
         if not machines and state["offset"]==0:
@@ -403,8 +444,10 @@ class CanonicalPhaseProjection:
         old_offset=int(state["offset"])
         with source.open("rb") as handle:
             handle.seek(old_offset)
-            while True:
-                offset=handle.tell();raw=handle.readline()
+            for _ in range(256):
+                check_budget()
+                offset=handle.tell();raw=handle.readline(65537)
+                if len(raw)>65536: raise CanonicalPhaseError("source_record_too_large")
                 if not raw:break
                 if raw.strip():
                     record=json.loads(raw);timestamp=float(record["timestamp"])
@@ -427,7 +470,7 @@ class CanonicalPhaseProjection:
                 target["module_positions"].append(int(record["module"]))
             drained=self._drain(machine)
             for name,values in drained.items():target[name].extend(values)
-        signature={"filename":source.name,"size":source.stat().st_size,
+        signature={**append_signature(source), "filename":source.name,"size":source.stat().st_size,
                    "mtime_ns":source.stat().st_mtime_ns,"sha256":None}
         identities={}
         for identity,machine in machines.items():
@@ -444,11 +487,15 @@ class CanonicalPhaseProjection:
         artifact={"schema_version":SCHEMA_VERSION,"semantics_version":SEMANTICS_VERSION,
             "algorithm_version":ALGORITHM_VERSION,"day":day,"complete":False,
             "source_signatures":{day:signature},"config_signature":config_signature,
-            "identities":identities}
-        self.store.write_day(day,artifact)
+            "source_offset":new_offset, "identities":identities}
         state.update(offset=new_offset,machines={key:value.snapshot() for key,value in machines.items()},
                      emitted=emitted,source_signature=signature)
-        _atomic_json(self._current_state_path(),state)
+        if new_offset != old_offset or not self._current_state_path().exists():
+            target = self.store.path(day)
+            resume.publish(intent, [
+                resume.replace(target, gzip.compress(resume.encoded(artifact), mtime=0)),
+                {"kind": "canonical_window", "path": str(target.absolute()), "artifact": artifact},
+                resume.replace(self._current_state_path(), resume.encoded(state))])
         return {"day":day,"samples":len(records),"bytes":new_offset-old_offset,
                 "available":True,"wall_seconds":time.perf_counter()-started,
                 "thread_cpu_seconds":time.thread_time()-cpu}
@@ -463,8 +510,8 @@ class CanonicalPhaseProjection:
     @staticmethod
     def _clear_daily_counts(machine):
         if machine.pending_diagnostic is not None:
-            machine.pending_diagnostic["count_timestamps"]=[]
-        for item in machine.visual_segments:item["count_timestamps"]=[]
+            machine.pending_diagnostic["count_timestamps"]=machine._counts()
+        for item in machine.visual_segments:item["count_timestamps"]=machine._counts()
 
     def build(self, days=None, *, stop_after_days=None):
         """Process one source day at a time and publish a resumable EOD state."""
@@ -501,7 +548,9 @@ class CanonicalPhaseProjection:
             records=[]
             with path.open("rb") as handle:
                 while True:
-                    offset=handle.tell();raw=handle.readline()
+                    check_budget()
+                    offset=handle.tell();raw=handle.readline(65537)
+                    if len(raw)>65536: raise CanonicalPhaseError("source record exceeds bounded size")
                     if not raw:break
                     if not raw.strip():continue
                     record=json.loads(raw);timestamp=float(record["timestamp"])
@@ -520,6 +569,7 @@ class CanonicalPhaseProjection:
             try:old_artifact=self.store.read_day(path.stem)
             except (FileNotFoundError,CanonicalPhaseError):pass
             for timestamp,day,offset,identity,serial,record in records:
+                check_budget()
                 machine=machines.setdefault(identity,CanonicalPhaseMachine(identity,serial))
                 positions.setdefault(identity,set()).add(int(record["module"]))
                 options,config_id=self._resolve(configs,times,_iso(timestamp))
@@ -570,51 +620,113 @@ class CanonicalPhaseProjection:
 
 
 class CanonicalPhaseReader:
-    def __init__(self, directory, source_directory=None, config_history_path=None):
+    def __init__(self, directory, source_directory=None, config_history_path=None, *, window_backend=None):
+        check_budget()
+        self.window_backend=window_backend
         self.store=CanonicalPhaseStore(directory)
         self.source_directory=Path(source_directory) if source_directory is not None else None
         self.config_history_path=(Path(config_history_path)
                                   if config_history_path is not None else None)
     @staticmethod
     def _days(start,end):
+        check_budget()
         first=datetime.fromisoformat(start).astimezone(timezone.utc).date()
         last=datetime.fromisoformat(end).astimezone(timezone.utc).date(); result=[]
-        while first<=last: result.append(first.isoformat()); first=first.fromordinal(first.toordinal()+1)
+        while first<=last:
+            check_budget()
+            result.append(first.isoformat()); first=first.fromordinal(first.toordinal()+1)
         return result
+    def _append_tail(self, artifact, source, offset, end_offset, path, start, end, module):
+        """Resume persisted phase rules for at most one writer block, read-only."""
+        from history_block_index import range_lines
+        configs=[]
+        if self.config_history_path is not None and self.config_history_path.is_file():
+            if self.config_history_path.stat().st_size>65536:
+                raise CanonicalPhaseError("bounded_config_checkpoint_unavailable")
+            configs=[json.loads(line) for line in self.config_history_path.read_text().splitlines() if line.strip()]
+        times=[record["timestamp"] for record in configs]
+        machines={}; replacement={}; tail_count=0
+        for identity,value in artifact["identities"].items():
+            state=window_checkpoint(path,identity,artifact["_window_revision"])
+            machine=CanonicalPhaseMachine.restore(state)
+            machines[identity]=machine
+            pending=machine.materialized()
+            replacement[identity]={kind:min((_epoch(i["canonical_from"]) for i in pending[kind]),default=float("inf"))
+                for kind in ("diagnostic_intervals","visual_intervals")}
+        with source.open("rb") as handle:
+            for raw in range_lines(handle,[(offset,end_offset)],unindexed_offset=offset):
+                check_budget()
+                record=json.loads(raw)
+                if module is not None and record.get("module")!=module: continue
+                matches=[key for key,value in artifact["identities"].items()
+                         if value.get("physical_serial")==record.get("module_serial") and
+                         record.get("module") in value.get("module_positions",())]
+                if len(matches)!=1: raise CanonicalPhaseError("tail_identity_checkpoint_unavailable")
+                identity=matches[0];timestamp=float(record["timestamp"])
+                options,config_id=CanonicalPhaseProjection._resolve(configs,times,_iso(timestamp))
+                machines[identity].process(record,options,config_id=config_id,
+                    source_cursor={"source_day":source.stem,"source_offset":handle.tell()},
+                    source_signature=artifact["source_signatures"][source.stem])
+                tail_count+=1
+        for identity,machine in machines.items():
+            value=artifact["identities"][identity];continued=machine.materialized()
+            for kind in ("diagnostic_intervals","visual_intervals"):
+                value[kind]=[i for i in value[kind] if _epoch(i["canonical_from"])<replacement[identity][kind]]+continued[kind]
+            value["relative_endpoints"].extend(continued["relative_endpoints"])
+        artifact["tail_records"]=tail_count
+        return artifact
+
     def query(self, timestamp_from, timestamp_to, *, physical_serial=None, module_number=None,
               timing=None):
+        check_budget()
+        if self.window_backend is not None:
+            return self.window_backend.query(timestamp_from,timestamp_to,
+                physical_serial=physical_serial,module_number=module_number,timing=timing)
         days=self._days(timestamp_from,timestamp_to); artifacts=[]; bytes_read=0
         started=time.perf_counter();cpu=time.thread_time()
         try:
             for day in days:
-                path=self.store.path(day);bytes_read+=path.stat().st_size
-                artifact=self.store.read_day(day)
+                check_budget()
+                path=self.store.path(day)
+                artifact,selected_bytes=read_window(path,timestamp_from,timestamp_to,
+                    module=module_number,serial=physical_serial)
+                bytes_read+=selected_bytes
+                if (artifact.get("schema_version")!=SCHEMA_VERSION or
+                    artifact.get("semantics_version")!=SEMANTICS_VERSION or
+                    artifact.get("algorithm_version")!=ALGORITHM_VERSION):
+                    raise CanonicalPhaseError("projection_contract_mismatch")
                 if self.source_directory is not None:
                     source=self.source_directory/f"{day}.jsonl"
                     expected=artifact.get("source_signatures",{}).get(day)
                     if not source.is_file() or not expected:
                         raise CanonicalPhaseError("source_signature_mismatch")
                     stat=source.stat()
-                    if (stat.st_size!=expected.get("size") or
-                            stat.st_mtime_ns!=expected.get("mtime_ns")):
+                    if not matches_prefix(source, expected):
                         raise CanonicalPhaseError("source_signature_mismatch")
+                    offset=artifact.get("source_offset",expected.get("size",0))
+                    if stat.st_size > offset:
+                        artifact=self._append_tail(artifact,source,offset,stat.st_size,path,
+                                                   timestamp_from,timestamp_to,module_number)
                 if self.config_history_path is not None:
                     expected_config=artifact.get("config_signature")
                     if ((self.config_history_path.is_file()) != bool(expected_config)):
                         raise CanonicalPhaseError("config_mismatch")
                     if expected_config:
-                        stat=self.config_history_path.stat()
-                        if (stat.st_size!=expected_config.get("size") or
-                                stat.st_mtime_ns!=expected_config.get("mtime_ns")):
+                        from canonical_config_compatibility import matches_historical_config
+                        if not matches_historical_config(
+                                self.config_history_path, expected_config, timestamp_to):
                             raise CanonicalPhaseError("config_mismatch")
                 artifacts.append(artifact)
-        except (FileNotFoundError,CanonicalPhaseError) as exc:
-            reason=str(exc) if isinstance(exc,CanonicalPhaseError) else "missing"
+        except (OSError,ValueError,sqlite3.Error,CanonicalPhaseError) as exc:
+            check_budget()
+            reason=str(exc) if isinstance(exc,CanonicalPhaseError) else "indexed_projection_unavailable"
             return {"available":False,"reason":reason,"days":days}
         if timing: timing.record("canonical_phase_read",time.perf_counter()-started,time.thread_time()-cpu)
         diagnostic=[];visual=[];endpoints=[];identities=set()
         for artifact in artifacts:
+            check_budget()
             for identity,value in artifact["identities"].items():
+                check_budget()
                 if physical_serial and value.get("physical_serial")!=physical_serial:continue
                 if not physical_serial and module_number is not None and module_number not in value.get("module_positions",[]):continue
                 identities.add(identity)
@@ -630,11 +742,13 @@ class CanonicalPhaseReader:
         def coalesce(items):
             groups={}
             for item in items:
+                check_budget()
                 key=(item.get("canonical_from"),item.get("phase"),item.get("config_id"),
                      item.get("module_position"))
                 group=groups.setdefault(key,[]);group.append(item)
             result=[]
             for values in groups.values():
+                check_budget()
                 selected=max(values,key=lambda item:(item.get("canonical_to") is not None,
                     item.get("canonical_sample_count",0)))
                 selected=copy.deepcopy(selected)
@@ -644,6 +758,7 @@ class CanonicalPhaseReader:
             # A later A-B-A reduction supersedes previously persisted fragments.
             reduced=[]
             for item in result:
+                check_budget()
                 start=_epoch(item["canonical_from"])
                 end=_epoch(item["canonical_to"]) if item.get("canonical_to") else float("inf")
                 superseded=any(other is not item and other.get("phase")==item.get("phase") and
@@ -686,10 +801,11 @@ class CanonicalPhaseWorker(threading.Thread):
     def run(self):
         while not self.stop_event.is_set():
             try:
-                if self.rebuild_event.is_set():
-                    self.rebuild_active=True;self.rebuild_event.clear()
-                    self.last_result=self.projection.build()
-                else:self.last_result=self.projection.update_current()
+                with historical_slot():
+                    if self.rebuild_event.is_set():
+                        self.rebuild_active=True;self.rebuild_event.clear()
+                        self.last_result=self.projection.build()
+                    else:self.last_result=self.projection.update_current()
                 self.last_error=None
             except Exception as exc:self.last_error=f"{type(exc).__name__}: {exc}"
             finally:self.rebuild_active=False

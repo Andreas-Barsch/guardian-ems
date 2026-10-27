@@ -1,11 +1,17 @@
-"""Schema-versioned maintenance event model and append-only persistence."""
+"""Maintenance revisions with append persistence and explicit atomic deletion."""
 
 from __future__ import annotations
+from history_live_priority import bounded_metadata_lines
+
+
+from research_budget import check_budget, budget_lock, acquire_shared_file_lock
 
 import fcntl
+import hashlib
 import json
 import os
 import re
+import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -331,9 +337,11 @@ def new_maintenance_event(
 
 
 class MaintenanceEventLog:
-    """Low-level append-only JSONL store; revision policy lives above this layer."""
+    """JSONL revision store; ordinary edits append, explicit deletion rewrites atomically."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, append_backend=None):
+        self.append_backend = append_backend
+        self.mutation_backend = None
         self.path = Path(path)
         self.lock_path = self.path.with_name(f"{self.path.name}.lock")
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -354,6 +362,7 @@ class MaintenanceEventLog:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
     def append(self, event: MaintenanceEvent) -> None:
+        if self.mutation_backend is not None:self.mutation_backend.assert_writable()
         if not isinstance(event, MaintenanceEvent):
             raise TypeError("event must be a MaintenanceEvent")
         raw = json.dumps(
@@ -363,6 +372,9 @@ class MaintenanceEventLog:
             sort_keys=True,
             allow_nan=False,
         ).encode("utf-8") + b"\n"
+        if self.append_backend is not None:
+            self.append_backend.append(self.path, raw)
+            return
         with self.path.open("ab") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
@@ -372,17 +384,72 @@ class MaintenanceEventLog:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def read_all(self, check=None) -> list[MaintenanceEvent]:
+    def request_retired(self, request_id: str) -> bool:
+        if self.mutation_backend is not None:return self.mutation_backend.request_retired(request_id)
+        path = self.path.with_suffix(self.path.suffix + ".retired-requests")
+        if not path.exists():
+            return False
+        if self.append_backend is not None:
+            from projection_repository import Unavailable
+            raise Unavailable('confirmed retired-request ledger requires explicit preparation')
+        digest = hashlib.sha256(request_id.encode("ascii")).hexdigest()
+        return digest in path.read_text(encoding="ascii").splitlines()
+
+    def remove_event(self, event_id: str, request_id: str | None = None) -> None:
+        """Caller holds transaction lock; remove every revision atomically.
+
+        Keep only an opaque request digest to reject delayed create retries.
+        No event, payload, event ID, or restorable revision is retained there.
+        """
+        if self.mutation_backend is not None:
+            return self.mutation_backend.delete(event_id,request_id)
+        if self.append_backend is not None:
+            from projection_repository import Unavailable
+            raise Unavailable('confirmed maintenance deletion requires explicit source replacement support')
+        if request_id:
+            receipt = self.path.with_suffix(self.path.suffix + ".retired-requests")
+            with receipt.open("ab") as handle:
+                handle.write(hashlib.sha256(request_id.encode("ascii")).hexdigest().encode("ascii") + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Make the retry receipt durable before committing event removal.
+            directory = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix=".maintenance-delete-", delete=False) as target:
+                temporary = Path(target.name)
+                os.fchmod(target.fileno(), self.path.stat().st_mode & 0o777)
+                with self.path.open("rb") as source:
+                    for line in source:
+                        if not line.strip() or json.loads(line)["maintenance_event_id"] != event_id:
+                            target.write(line)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temporary, self.path)
+            directory = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+
+    def read_all(self) -> list[MaintenanceEvent]:
+        check_budget()
         if not self.path.exists():
             return []
         events: list[MaintenanceEvent] = []
         try:
             with self.path.open("r", encoding="utf-8") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                acquire_shared_file_lock(handle)
                 try:
-                    for line_number, line in enumerate(handle, 1):
-                        if check is not None:
-                            check()
+                    for line_number, line in enumerate(bounded_metadata_lines(handle), 1):
+                        check_budget()
                         if not line.strip():
                             continue
                         try:

@@ -203,7 +203,7 @@ def test_battery_capacity_history_is_windowed_read_only_and_extrema_preserving(t
     result = HycubeBatteryCapacitySeries(history).query(
         timestamp_from="2026-09-02T00:00:00+00:00",
         timestamp_to="2026-09-02T01:00:00+00:00", max_points=20)
-    assert opened == [current]
+    assert opened == [Path(str(current)+".idx"), current]
     assert len(result["points"]) <= 20
     assert {5.0, 99.0} <= {point["value"] for point in result["points"]}
     assert all(point["timestamp"].startswith("2026-09-02") for point in result["points"])

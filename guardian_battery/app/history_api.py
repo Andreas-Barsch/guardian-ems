@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 import json
 import time
+import threading
+from history_live_priority import measurement_slot
+from research_budget import ResearchQueryError, cancellation_scope, query_budget
 from datetime import datetime
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urlencode
+from manual_history_page import ManualHistoryPages
 
 from event_overlay import EventOverlayAdapter, OverlayContext, matches_chart
+from history_series_contract import normalize_series
 from history_series import CellHistorySeries, SERIES_METRICS, SeriesHistoryError
 from rs485_evidence import RS485_SERIES_METRICS, Rs485HistorySeries
 from hycube_evidence import (HycubeBatteryCapacitySeries, HycubeHistoryError,
@@ -41,7 +47,11 @@ class HistoryApi:
                  rs485_series: Rs485HistorySeries | None = None,
                  hycube_series: HycubeBatteryCapacitySeries | None = None,
                  hycube_policy_history: HycubePolicyHistory | None = None,
-                 timing_state=None, display_reader=None, canonical_phase_reader=None):
+                 timing_state=None, display_reader=None, canonical_phase_reader=None, scheduler=None, read_scope=None):
+        self.pages = ManualHistoryPages()
+        self.scheduler = scheduler
+        self.read_scope = read_scope or nullcontext
+        self._job_gate = threading.BoundedSemaphore(1)
         self.series = series
         self.overlays = overlays
         self.phase_engine = phase_engine
@@ -52,7 +62,36 @@ class HistoryApi:
         self.display_reader = display_reader
         self.canonical_phase_reader = canonical_phase_reader
 
-    def handle(self, method: str, target: str) -> ApiResponse:
+    def handle(self, method: str, target: str, *, cancelled=None, deadline=None) -> ApiResponse:
+        if self.scheduler is not None:
+            if deadline is None:
+                from research_api import QUERY_TIMEOUT_SECONDS
+                deadline = time.monotonic() + QUERY_TIMEOUT_SECONDS
+            from local_work_composition import LocalWorkComposition
+            return LocalWorkComposition(self.scheduler).request(
+                self,method,target,cancelled=cancelled,deadline=deadline)
+        # Installed default: one admitted UI read waits cooperatively for live/background work.
+        if deadline is None:
+            from research_api import QUERY_TIMEOUT_SECONDS
+            deadline = time.monotonic() + QUERY_TIMEOUT_SECONDS
+        if not self._job_gate.acquire(blocking=False):
+            return ApiResponse(503, error_json("history_busy", "A history request is already running; submit again manually"))
+        try:
+            with cancellation_scope(cancelled), query_budget(deadline), measurement_slot():
+                return self._handle(method, target)
+        except ResearchQueryError as exc:
+            if self.timing_state:
+                self.timing_state.note_error(exc)
+            body = error_json(exc.code, str(exc))
+            body["coverage"] = {"quality":"unavailable", "reason":exc.code}
+            body["budget"] = {"concurrency":1, "queue":"bounded_cooperative_wait", "retry":"manual_only",
+                              "deadline_basis":"request_deadline_including_wait",
+                              "unindexed_tail_records":256,"metadata_context_bytes":65536}
+            return ApiResponse(exc.status, body)
+        finally:
+            self._job_gate.release()
+
+    def _handle(self, method: str, target: str) -> ApiResponse:
         try:
             if method != "GET":
                 return ApiResponse(405, error_json("method_not_allowed", "Method not allowed"), {"Allow": "GET"})
@@ -60,7 +99,21 @@ class HistoryApi:
             marker = split.path.find(HISTORY_API_ROUTE)
             if marker < 0 or split.path[marker + len(HISTORY_API_ROUTE):].strip("/"):
                 return ApiResponse(404, error_json("not_found", "History API route not found"))
-            return self._query(split.query)
+            with self.read_scope():
+                raw=parse_qs(split.query,keep_blank_values=True)
+                if raw.get('paged') == ['true']:
+                    if any(len(v)!=1 for v in raw.values()):
+                        raise HistoryApiProblem('query parameters must occur once')
+                    values={k:v[0] for k,v in raw.items()}
+                    def read_page(page):
+                        response=self._query(urlencode(page))
+                        if response.status!=200:
+                            raise ResearchQueryError('page_unavailable','History page unavailable',response.status)
+                        return response.body
+                    return ApiResponse(200,self.pages.run('chart',values,read_page))
+                return self._query(split.query)
+        except ResearchQueryError:
+            raise
         except (HistoryApiProblem, PhaseEngineError) as exc:
             if self.timing_state: self.timing_state.note_error(exc)
             return ApiResponse(400, error_json("invalid_request", str(exc)))
@@ -158,6 +211,15 @@ class HistoryApi:
                                "config", "series_build",
                                "soc_timeline", "assembly")
             timing.not_executed("identity")
+            from work_scheduler import current_status
+            scheduled = current_status() if self.scheduler is not None else None
+            timing.counts(history_queue_wait_seconds=scheduled['wait_seconds'] if scheduled else 0,
+                          history_max_parallel_jobs=1,
+                          history_queue_policy="bounded_fifo_cooperative" if scheduled else "reject_no_wait",
+                          peak_memory_bytes=None, peak_memory_basis="not_measured_in_live_process",
+                          physical_disk_io_bytes=None, physical_disk_io_basis="not_measured")
+        if self.scheduler is not None and self.phase_engine is None and values.get('analysis_mode','historical')!='historical':
+            raise ResearchQueryError('history_preparation_required','Dieser Analysemodus ist in der lokalen Reader-Komposition nicht vorbereitet.',503)
         backend_started = time.perf_counter()
         requests = []
         for metric in metrics:
@@ -168,19 +230,53 @@ class HistoryApi:
                              "cell_numbers": selected if combined else cell_numbers})
         cell_requests = [item for item in requests if item["metric"] not in RS485_SERIES_METRICS]
         bundle_reader = self.display_reader or self.series
-        bundle = bundle_reader.query_bundles(
-            requests=cell_requests or [{"metric": "soc", "cell_number": None, "cell_numbers": None}],
-            timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-            module_number=module_number, module_numbers=modules,
-            include_all_module_soc="soc" in metrics, timing=timing)
-        hycube = (self.display_reader.query_hycube(
-                      timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-                      max_points=max(4, 6000 // 7), timing=timing)
-                  if "soc" in metrics and self.display_reader is not None else None)
-        hycube = (hycube or (self.hycube_series.query(timestamp_from=timestamp_from,
-                                           timestamp_to=timestamp_to,
-                                           max_points=max(4, 6000 // 7), timing=timing)
-                  if "soc" in metrics and self.hycube_series is not None else None))
+        need_samples = self.phase_engine is not None and (
+            values.get("analysis_mode","historical") != "historical" or self.canonical_phase_reader is None)
+        unavailable = []
+        def unavailable_source(source, exc):
+            # Only structural index availability is recoverable. Cancellation,
+            # deadlines, corrupt records and other failures still abort normally.
+            if exc.code not in {"history_index_required", "history_context_index_required"}:
+                raise exc
+            unavailable.append({"source": source, "from": timestamp_from,
+                                "to": timestamp_to, "reason": exc.code,
+                                "message": str(exc)})
+
+        try:
+            bundle = bundle_reader.query_bundles(
+                requests=cell_requests or [{"metric": "soc", "cell_number": None, "cell_numbers": None}],
+                timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                module_number=module_number, module_numbers=modules,
+                include_all_module_soc="soc" in metrics, timing=timing, include_samples=need_samples
+            ) if cell_requests or need_samples else {
+                "series":[],"samples":[],"raw_records":0,"file_count":0,"read_seconds":0,
+                "downsample_seconds":0,"cache_hit":False}
+        except ResearchQueryError as exc:
+            if values.get("analysis_mode", "historical") != "historical":
+                raise
+            unavailable_source("pylontech", exc)
+            coverage = {"quality": "unavailable", "reason": exc.code,
+                        "missing_intervals": [unavailable[-1]]}
+            bundle = {"series": [{**r, "points": [], "raw_points": 0,
+                                   "coverage": coverage} for r in cell_requests],
+                      "samples": [], "soc_module_series": [], "raw_records": 0,
+                      "file_count": 0, "read_seconds": 0, "downsample_seconds": 0,
+                      "cache_hit": False}
+        unavailable.extend(bundle.get("unavailable_intervals", []))
+        try:
+            hycube = (self.display_reader.query_hycube(
+                          timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                          max_points=max(4, 6000 // 7), timing=timing)
+                      if "soc" in metrics and self.display_reader is not None else None)
+            hycube = (hycube or (self.hycube_series.query(timestamp_from=timestamp_from,
+                                               timestamp_to=timestamp_to,
+                                               max_points=max(4, 6000 // 7), timing=timing)
+                      if "soc" in metrics and self.hycube_series is not None else None))
+        except ResearchQueryError as exc:
+            unavailable_source("hycube", exc)
+            hycube = None
+        if hycube:
+            unavailable.extend(hycube.get("unavailable_intervals", []))
         if timing and hycube is None:
             timing.not_executed("hycube_discovery",
                                 "hycube_projection_read_parse_filter",
@@ -188,11 +284,17 @@ class HistoryApi:
                                 "hycube_downsampling")
             timing.counts(hycube_source_mode="not_executed")
         policy_seconds = 0.0
+        policy_unavailable_reason = None
         if "soc" in metrics and self.hycube_policy_history is not None:
             policy_started = time.perf_counter(); policy_cpu = time.thread_time()
-            policy_series = self.hycube_policy_history.query(
-                timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-                timing=timing)
+            try:
+                policy_series = self.hycube_policy_history.query(
+                    timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                    timing=timing)
+            except ResearchQueryError as exc:
+                unavailable_source("hycube_policy", exc)
+                policy_series = []
+                policy_unavailable_reason = exc.code
             policy_seconds = time.perf_counter() - policy_started
             if timing:
                 timing.record("policy", policy_seconds, time.thread_time() - policy_cpu)
@@ -206,21 +308,10 @@ class HistoryApi:
             if self.rs485_series is None:
                 raise HistoryApiProblem("RS485 history is unavailable")
             rs485_requests = [item for item in requests if item["metric"] in RS485_SERIES_METRICS]
-            for selected_module in modules:
-                items = self.rs485_series.query_bundles(
-                    rs485_requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to,
-                    module_number=selected_module)
-                for item in items:
-                    target = next((existing for existing in projected_series
-                                   if existing["metric"] == item["metric"]), None)
-                    points = [{**point, "module_number": selected_module}
-                              for point in item["points"]]
-                    if target is None:
-                        projected_series.append({**item, "points": points})
-                    else:
-                        target["points"].extend(points)
-                        target["raw_points"] = target.get("raw_points", 0) + item.get(
-                            "raw_points", len(points))
+            items = self.rs485_series.query_bundles(
+                rs485_requests, timestamp_from=timestamp_from, timestamp_to=timestamp_to,
+                module_numbers=modules, timing=timing)
+            projected_series.extend(items)
         by_metric = {item["metric"]: item for item in projected_series}
         projected_series = [by_metric[metric] for metric in metrics]
         marker_cells = (tuple(sorted(set((voltage_cells or ()) + (temperature_cells or ()))))
@@ -255,7 +346,7 @@ class HistoryApi:
         visual_parameters = {}
         phase_seconds = 0.0
         canonical = None
-        if self.phase_engine is not None:
+        if self.phase_engine is not None or (mode == "historical" and self.canonical_phase_reader is not None):
             what_if = None
             if mode == "what_if":
                 names = {
@@ -278,7 +369,11 @@ class HistoryApi:
                 phases=canonical["visual_intervals"]
                 diagnostic_phases=canonical["diagnostic_intervals"]
                 relative_endpoints=canonical["relative_endpoints"]
-                visual_parameters=dict(self.phase_engine.visual_projection.parameters)
+                if self.phase_engine is not None:
+                    visual_parameters=dict(self.phase_engine.visual_projection.parameters)
+                else:
+                    from phase_engine import VisualPhaseProjection
+                    visual_parameters=dict(VisualPhaseProjection().parameters)
                 if timing:
                     timing.not_executed("diagnostic_phase_full_resolution","phase",
                                         "legacy_phase_fallback")
@@ -289,6 +384,11 @@ class HistoryApi:
                         canonical_relative_endpoints=len(relative_endpoints),
                         phase_semantics_version=canonical["semantics_version"],
                         phase_source_mode=canonical["source_mode"])
+            elif canonical is not None and not canonical.get("available"):
+                # A stale projection must not trigger hidden full-resolution analysis.
+                if timing:
+                    timing.not_executed("legacy_phase_fallback", "diagnostic_phase_full_resolution", "phase")
+                    timing.counts(phase_source_mode="unavailable", phase_unavailable_reason=canonical.get("reason"))
             else:
               phase_samples = bundle["samples"]
               if self.display_reader is not None and bundle.get(
@@ -324,15 +424,10 @@ class HistoryApi:
         elif timing:
             timing.not_executed("phase", "config")
         response = {
-            "series": [{**{key: value for key, value in item.items() if key != "raw_points"},
-                          "module_number": module_number,
-                          "selected_modules": list(modules)} for item in bundle["series"]]
-                      if combined else {
-                          **{key: value for key, value in bundle["series"][0].items()
-                             if key != "raw_points"},
-                          "module_number": module_number,
-                          "selected_modules": list(modules),
-                      },
+            "unavailable_intervals": unavailable,
+            "series": ([{**item,"module_number":module_number,"selected_modules":list(modules)}
+                        for item in projected_series] if combined else
+                       {**projected_series[0],"module_number":module_number,"selected_modules":list(modules)}),
             "overlays": [marker.to_dict() for marker in markers],
             "window": {"from": timestamp_from, "to": timestamp_to, "inclusive": True},
             "semantics": {"overlay_timestamp": "occurred_at", "correlation_only": True,
@@ -348,11 +443,13 @@ class HistoryApi:
                     item["quality"] == "observed" for item in policy_series)
                     else "historically_applicable" if policy_series else "unavailable"),
                 "policy_evidence_reason": (None if policy_series else
-                                           "no_valid_observation_for_window"),
+                                           policy_unavailable_reason or "no_valid_observation_for_window"),
                 "battery_capacity_semantics": "separate_hycube_system_value",
                 "aggregation_rule": "not_verified", "causality": "not_determined",
             } if "soc" in metrics else None,
             "phase_analysis": {"mode": mode, "intervals": phases,
+                               "available": canonical.get("available") if canonical is not None else True,
+                               "unavailable_reason": canonical.get("reason") if canonical is not None else None,
                                "diagnostic_intervals": diagnostic_phases,
                                "relative_endpoints": relative_endpoints,
                                "maintenance_boundaries": maintenance_boundaries,
@@ -364,14 +461,30 @@ class HistoryApi:
                                     "legacy_request_relative_v1"),
                                "source_mode": ((canonical or {}).get("source_mode")
                                     if canonical and canonical.get("available") else
-                                    "legacy_on_demand")},
+                                    "unavailable" if canonical is not None else "legacy_on_demand")},
         }
+        if self.scheduler is not None:
+            from work_scheduler import current_status
+            response['data_state'] = {'measurements': bundle.get('data_state'),
+                'phases': (canonical or {}).get('data_state'),
+                'phases_available': bool(canonical and canonical.get('available')),
+                'latest_raw_coverage': 'not_asserted', 'request': current_status()}
         response["series"] = ([{**item, "module_number": module_number,
                                 "selected_modules": list(modules)}
                                for item in projected_series]
                               if combined else {**projected_series[0],
                                                 "module_number": module_number,
                                                 "selected_modules": list(modules)})
+        response["series"] = ([normalize_series(item, timestamp_from, timestamp_to)
+                               for item in response["series"]] if combined else
+                              normalize_series(response["series"], timestamp_from, timestamp_to))
+        if response["soc_timeline"]:
+            timeline = response["soc_timeline"]
+            timeline["module_series"] = [normalize_series(item, timestamp_from, timestamp_to)
+                                         for item in timeline["module_series"]]
+            if timeline["hycube_series"]:
+                timeline["hycube_series"] = normalize_series(
+                    timeline["hycube_series"], timestamp_from, timestamp_to)
         if timing:
             timing.counts(response_series_count=len(projected_series),
                 response_points_total=sum(len(item["points"]) for item in projected_series),

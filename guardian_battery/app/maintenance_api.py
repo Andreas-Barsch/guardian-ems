@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from projection_repository import Unavailable
+from research_budget import ResearchQueryError
+
 import json
 import logging
 from dataclasses import dataclass, field
@@ -18,6 +21,7 @@ from maintenance_service import (
     MaintenanceArchivedError,
     MaintenanceConflictError,
     MaintenanceHistoryError,
+    MaintenanceRequestConflictError,
     MaintenanceNotArchivedError,
     MaintenanceNotFoundError,
     MaintenanceService,
@@ -168,11 +172,15 @@ class MaintenanceApi:
                     },
                 ),
             )
+        except MaintenanceRequestConflictError as exc:
+            return ApiResponse(409, error_json("request_conflict", str(exc)))
         except (MaintenanceArchivedError, MaintenanceNotArchivedError) as exc:
             return ApiResponse(409, error_json("conflict", str(exc)))
         except MaintenanceHistoryError as exc:
             LOG.error("Maintenance history unavailable: %s", exc)
             return ApiResponse(503, error_json("history_error", "Maintenance history is unavailable"))
+        except (Unavailable, ResearchQueryError) as exc:
+            return ApiResponse(503, error_json(getattr(exc, 'code', 'history_preparation_required'), str(exc)))
         except Exception:
             LOG.exception("Unhandled maintenance API error")
             return ApiResponse(500, error_json("internal_error", "Internal server error"))
@@ -206,7 +214,9 @@ class MaintenanceApi:
                 return ApiResponse(200, {"event": event_json(self.service.get(event_id))})
             if method == "PATCH":
                 return self._update(event_id, headers, body)
-            return self._method_not_allowed("GET, PATCH")
+            if method == "DELETE":
+                return self._delete(event_id, headers, body)
+            return self._method_not_allowed("GET, PATCH, DELETE")
 
         if len(parts) == 2 and parts[1] == "archive":
             if method != "POST":
@@ -298,8 +308,13 @@ class MaintenanceApi:
                 "Missing required request fields",
                 {"fields": sorted(missing)},
             )
-        event = self.service.create(**payload, source={"kind": "manual"})
-        if self.live_publisher is not None:
+        request_id = next((value for key, value in headers.items()
+                           if key.lower() == "idempotency-key"), None)
+        if request_id is None:
+            event, created = self.service.create(**payload, source={"kind": "manual"}), True
+        else:
+            event, created = self.service.create_once(request_id, **payload, source={"kind": "manual"})
+        if created and self.live_publisher is not None:
             try:
                 self.live_publisher.publish_if_live(event)
             except Exception:
@@ -307,7 +322,13 @@ class MaintenanceApi:
                     "Maintenance event persisted but MQTT live publish failed: %s",
                     event.maintenance_event_id,
                 )
-        return ApiResponse(201, {"event": event_json(event)})
+        return ApiResponse(201 if created else 200, {"event": event_json(event)})
+
+    def _delete(self, event_id: str, headers: Mapping[str, str], body: bytes) -> ApiResponse:
+        payload = self._json_body(headers, body)
+        self._reject_unknown(payload, frozenset({"expected_revision"}))
+        self.service.delete(event_id, expected_revision=self._expected_revision(payload))
+        return ApiResponse(200, {"deleted": True})
 
     def _update(
         self,
@@ -410,6 +431,7 @@ class MaintenanceApi:
         items = self.service.list(
             include_archived=include_archived,
             newest_first=newest_first,
+            occurred_from=occurred_from,occurred_to=occurred_to,
         )
         filtered = [
             item

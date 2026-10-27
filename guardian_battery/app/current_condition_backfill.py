@@ -12,6 +12,7 @@ from pathlib import Path
 
 from cell_diagnostics import CellSample
 from position_history import PositionHistoryLog
+import diagnostic_startup_io as startup_io
 
 
 LOG = logging.getLogger("guardian_battery")
@@ -91,6 +92,14 @@ class CurrentConditionBackfill:
         )
 
     def run(self, store):
+        self._startup_merge = None
+        try:
+            return self._run(store)
+        finally:
+            if self._startup_merge is not None:
+                self._startup_merge.close()
+
+    def _run(self, store):
         report = {
             "files_discovered": 0, "files_scanned": 0, "files_skipped": 0,
             "incremental_files": 0, "lines_seen": 0, "valid_samples": 0,
@@ -112,7 +121,12 @@ class CurrentConditionBackfill:
 
         merged = {}
         slot_keys = {}
+        if startup_io.active():
+            from diagnostic_startup_merge import StartupMerge, StartupSlots
+            merged = self._startup_merge = StartupMerge(self.history_directory.parent, store.max_samples)
+            slot_keys = StartupSlots(merged)
         for value in store.iter_all_samples():
+            startup_io.checkpoint()
             try:
                 sample_key = self._sample_key(value)
                 merged[sample_key] = dict(value)
@@ -125,9 +139,10 @@ class CurrentConditionBackfill:
             sources = {}
             report["materialized_cache_incomplete"] = True
         next_sources = dict(sources)
-        paths = sorted(self.history_directory.glob("*.jsonl"))
+        paths = startup_io.paths(self.history_directory)
         report["files_discovered"] = len(paths)
         for path in paths:
+            startup_io.checkpoint()
             key = path.name
             try:
                 signature = self._signature(path)
@@ -156,7 +171,7 @@ class CurrentConditionBackfill:
                 with path.open(encoding="utf-8") as handle:
                     handle.seek(offset)
                     report["files_scanned"] += 1
-                    for line_number, line in enumerate(handle, 1):
+                    for line_number, line in enumerate(startup_io.lines(handle), 1):
                         if not line.strip():
                             continue
                         report["lines_seen"] += 1

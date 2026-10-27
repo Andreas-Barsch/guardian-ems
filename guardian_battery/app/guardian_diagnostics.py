@@ -1,6 +1,8 @@
 """Read-only projection of persisted Guardian Daily Diagnostics derived data."""
 from __future__ import annotations
 
+from research_budget import ResearchQueryError, check_budget
+
 import json
 import logging
 import re
@@ -58,16 +60,17 @@ def _contained_file(path: Path, parent: Path) -> bool:
         return False
 
 
-def read_validated_daily_result(output_root: Path | str, diagnostic_date: str
-                                ) -> tuple[dict[str, Any], dict[str, Any]]:
+def read_validated_daily_result(output_root: Path | str, diagnostic_date: str,
+                                *, text_reader=None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Read an index and its immutable revision using the worker's full contract."""
+    text_reader = text_reader or (lambda path: path.read_text(encoding='utf-8'))
     text = validate_diagnostic_date(diagnostic_date)
     day_dir = Path(output_root) / "daily" / text
     index_path = day_dir / "index.json"
     if not _contained_file(index_path, day_dir):
         raise DiagnosticsNotFound("daily result is not available")
     try:
-        index = json.loads(index_path.read_text(encoding="utf-8"))
+        index = json.loads(text_reader(index_path))
         if not isinstance(index, dict):
             raise ValueError("index is not an object")
         result_name = index["result"]
@@ -83,7 +86,7 @@ def read_validated_daily_result(output_root: Path | str, diagnostic_date: str
         result_path = day_dir / result_name
         if not _contained_file(result_path, day_dir):
             raise ValueError("result revision is missing")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result = json.loads(text_reader(result_path))
         if (not isinstance(result, dict)
                 or result.get("schema_version") != SCHEMA_VERSION
                 or result.get("diagnostic_date") != text
@@ -93,6 +96,8 @@ def read_validated_daily_result(output_root: Path | str, diagnostic_date: str
                 or result.get("overall_status") != index["overall_status"]):
             raise ValueError("index and result revision are inconsistent")
         return index, result
+    except ResearchQueryError:
+        raise
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise DiagnosticsCorrupt("daily result is inconsistent") from exc
 
@@ -131,17 +136,21 @@ def _public_sources(result: Mapping[str, Any]) -> dict[str, Any]:
 class GuardianDiagnosticsRepository:
     """Short-lived, read-only access to one diagnostics output root."""
 
-    def __init__(self, output_root: Path | str):
+    def __init__(self, output_root: Path | str, *, text_reader=None):
+        check_budget()
         self.output_root = Path(output_root)
+        self.text_reader = text_reader or (lambda path: path.read_text(encoding="utf-8"))
         self._warned: set[str] = set()
 
     def _warn_once(self, key: str, message: str) -> None:
+        check_budget()
         if key not in self._warned:
             LOG.warning("Guardian Diagnostics %s", message)
             self._warned.add(key)
 
     def available(self, limit: int | None = None
                   ) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[str]]:
+        check_budget()
         daily = self.output_root / "daily"
         if not daily.is_dir():
             return [], []
@@ -151,6 +160,7 @@ class GuardianDiagnosticsRepository:
                            and _DATE.fullmatch(child.name)),
                           key=lambda child: child.name, reverse=True)
         for child in children[:limit]:
+            check_budget()
             try:
                 valid.append(read_validated_daily_result(self.output_root, child.name))
             except DiagnosticsNotFound:
@@ -163,9 +173,11 @@ class GuardianDiagnosticsRepository:
         return valid, corrupt
 
     def result(self, diagnostic_date: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        return read_validated_daily_result(self.output_root, diagnostic_date)
+        check_budget()
+        return read_validated_daily_result(self.output_root, diagnostic_date, text_reader=self.text_reader)
 
     def aggregates(self, diagnostic_date: str, *, required: bool = False) -> list[dict[str, Any]]:
+        check_budget()
         text = validate_diagnostic_date(diagnostic_date)
         path = self.output_root / "aggregates" / "bms_management" / f"{text}.json"
         if not _contained_file(path, path.parent):
@@ -173,17 +185,20 @@ class GuardianDiagnosticsRepository:
                 raise DiagnosticsNotFound("BMS management aggregate is not available")
             return []
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(self.text_reader(path))
             rows = payload["aggregates"]
             if payload.get("schema_version") != 1 or not isinstance(rows, list):
                 raise ValueError("invalid aggregate contract")
             if any(not isinstance(row, dict) or row.get("day") != text for row in rows):
                 raise ValueError("aggregate date mismatch")
             return rows
+        except ResearchQueryError:
+            raise
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise DiagnosticsCorrupt("BMS management aggregate is inconsistent") from exc
 
     def events(self, diagnostic_date: str, *, required: bool = False) -> dict[str, Any]:
+        check_budget()
         text = validate_diagnostic_date(diagnostic_date)
         path = self.output_root / "events" / "bms_management" / f"{text}.jsonl"
         if not _contained_file(path, path.parent):
@@ -192,14 +207,19 @@ class GuardianDiagnosticsRepository:
             return {"events": [], "event_count": 0, "truncated": False}
         events = []
         try:
-            with path.open(encoding="utf-8") as handle:
+            from contextlib import nullcontext
+            with (nullcontext(self.text_reader(path).splitlines()) if getattr(self, 'bounded_reads', False)
+                  else path.open(encoding="utf-8")) as handle:
                 for line in handle:
+                    check_budget()
                     if not line.strip():
                         continue
                     item = json.loads(line)
                     if not isinstance(item, dict):
                         raise ValueError("event is not an object")
                     events.append(item)
+        except ResearchQueryError:
+            raise
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise DiagnosticsCorrupt("BMS management event store is inconsistent") from exc
         public = [self._without_raw(item) for item in events[:MAX_EVENT_RESPONSE]]
@@ -207,6 +227,7 @@ class GuardianDiagnosticsRepository:
                 "truncated": len(events) > MAX_EVENT_RESPONSE}
 
     def cell_risk(self, diagnostic_date: str, *, required: bool = False) -> dict[str, Any]:
+        check_budget()
         text = validate_diagnostic_date(diagnostic_date)
         path = self.output_root / "aggregates" / "cell_risk" / f"{text}.json"
         if not _contained_file(path, path.parent):
@@ -214,17 +235,20 @@ class GuardianDiagnosticsRepository:
                 raise DiagnosticsNotFound("Cell Risk aggregate is not available")
             return {"schema_version": 1, "diagnostic_date": text, "cells": [], "top10": []}
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(self.text_reader(path))
             if (not isinstance(payload, dict) or payload.get("schema_version") != 1
                     or payload.get("diagnostic_date") != text
                     or not isinstance(payload.get("cells"), list)):
                 raise ValueError("invalid Cell Risk aggregate")
             return payload
+        except ResearchQueryError:
+            raise
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise DiagnosticsCorrupt("Cell Risk aggregate is inconsistent") from exc
 
     def cell_risk_detail(self, diagnostic_date: str, serial: str,
                          cell_number: int) -> dict[str, Any]:
+        check_budget()
         current = self.cell_risk(diagnostic_date, required=True)
         selected = next((row for row in current["cells"]
                          if row.get("physical_serial") == serial
@@ -235,6 +259,7 @@ class GuardianDiagnosticsRepository:
         aggregate_root = self.output_root / "aggregates" / "cell_risk"
         if aggregate_root.is_dir():
             for path in sorted(aggregate_root.glob("*.json")):
+                check_budget()
                 if not _DATE.fullmatch(path.stem) or path.stem > diagnostic_date:
                     continue
                 try:
@@ -252,6 +277,7 @@ class GuardianDiagnosticsRepository:
 
     @classmethod
     def _without_raw(cls, value: Any) -> Any:
+        check_budget()
         if isinstance(value, dict):
             return {key: cls._without_raw(item) for key, item in value.items()
                     if key not in {"raw_frame", "frame_raw", "info_raw", "serial_raw", "path"}}
@@ -261,6 +287,7 @@ class GuardianDiagnosticsRepository:
 
     def day_summary(self, result: Mapping[str, Any], aggregates: list[Mapping[str, Any]]
                     ) -> dict[str, Any]:
+        check_budget()
         aggregate_event_count = sum(int(row.get("ccl_reduction_event_count", 0) or 0)
                                     + int(row.get("dcl_reduction_event_count", 0) or 0)
                                     for row in aggregates)
@@ -283,6 +310,7 @@ class GuardianDiagnosticsRepository:
                      if event_count else "Keine besonderen BMS-Management-Ereignisse erkannt."),
         })
         for row in aggregates:
+            check_budget()
             serial = str(row.get("physical_serial", "Seriennummer unbekannt"))
             dcl_zero = int(row.get("dcl_zero_event_count", row.get("dcl_zero_count", 0)) or 0)
             if dcl_zero:
@@ -305,11 +333,13 @@ class GuardianDiagnosticsRepository:
                 "trend": "Trend noch nicht bestimmbar."}
 
     def day_dto(self, diagnostic_date: str) -> dict[str, Any]:
+        check_budget()
         index, result = self.result(diagnostic_date)
         aggregates = self.aggregates(diagnostic_date)
         event_payload = self.events(diagnostic_date)
         positions: dict[str, set[int]] = {}
         for event in event_payload["events"]:
+            check_budget()
             serial, position = event.get("physical_serial"), event.get("position_at_time")
             if serial and isinstance(position, int):
                 positions.setdefault(str(serial), set()).add(position)
@@ -338,9 +368,11 @@ class GuardianDiagnosticsRepository:
         }
 
     def days_dto(self) -> dict[str, Any]:
+        check_budget()
         valid, corrupt = self.available()
         days = []
         for _index, result in valid:
+            check_budget()
             try:
                 aggregates = self.aggregates(result["diagnostic_date"])
             except DiagnosticsCorrupt:
@@ -358,6 +390,7 @@ class GuardianDiagnosticsRepository:
                 "unavailable_days": corrupt, "failed_history_available": False}
 
     def _window(self, rows: list[dict[str, Any]], latest: date, days: int) -> dict[str, Any]:
+        check_budget()
         floor = latest - timedelta(days=days - 1)
         selected = [row for row in rows if date.fromisoformat(row["date"]) >= floor]
         counts = {status: sum(row["overall_status"] == status for row in selected)
@@ -371,9 +404,11 @@ class GuardianDiagnosticsRepository:
                 "missing_days_are_not_zero_days": True}
 
     def overview(self, now: datetime | None = None) -> dict[str, Any]:
+        check_budget()
         valid, corrupt = self.available(limit=MAX_OVERVIEW_DAYS)
         rows = []
         for _index, result in valid:
+            check_budget()
             try:
                 aggregates = self.aggregates(result["diagnostic_date"])
             except DiagnosticsCorrupt:

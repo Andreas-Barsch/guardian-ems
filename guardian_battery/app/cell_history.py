@@ -1,4 +1,5 @@
 from __future__ import annotations
+from history_live_priority import raw_priority
 
 import json
 from dataclasses import asdict, is_dataclass
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from history_block_index import extend_open_index
+from history_append_receipt import before_append, after_append
 
 
 def _validate_index_record(record):
@@ -35,11 +37,14 @@ class CellHistoryWriter:
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, append_backend=None):
+        self.append_backend = append_backend
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self._index_appends = {}
+        self.frontiers = {}
 
+    @raw_priority
     def append(self, sample: Any) -> None:
         data = asdict(sample) if is_dataclass(sample) else dict(sample)
         timestamp = float(data["timestamp"])
@@ -51,16 +56,24 @@ class CellHistoryWriter:
             "physical_groups": {"1": [1, 2, 3, 4, 5], "2": [6, 7, 8, 9, 10], "3": [11, 12, 13, 14, 15]},
             **data,
         }
+        if self.append_backend is not None:
+            self.append_backend.append(path,(json.dumps(record,separators=(",", ":"),ensure_ascii=False)+"\n").encode('utf-8'))
+            return
+        generation = before_append(path)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False))
             handle.write("\n")
+        after_append(path, generation)
+        from history_append_receipt import signature
+        self.frontiers[path.name] = signature(path)
         pending = self._index_appends.get(day)
         self._index_appends[day] = 1 if pending is None else pending + 1
         if pending is None or self._index_appends[day] >= 256:
+            progress = {}
             try:
                 extend_open_index(path, timestamp_field="timestamp", iso_timestamp=False,
-                                  validate_record=_validate_index_record)
+                                  validate_record=_validate_index_record, progress=progress)
             except Exception:
                 # Cell history is authoritative; its disposable index is best effort only.
                 pass
-            self._index_appends[day] = 0
+            self._index_appends[day] = progress.get("pending_records", 0)

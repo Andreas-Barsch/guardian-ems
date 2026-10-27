@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from research_budget import ResearchQueryError, check_budget
+
+import hashlib
+import json
+import uuid
+
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping
@@ -37,6 +43,10 @@ class MaintenanceConflictError(MaintenanceError):
         )
 
 
+class MaintenanceRequestConflictError(MaintenanceError):
+    """A create request key was reused for different input."""
+
+
 class MaintenanceHistoryError(MaintenanceError):
     """Raised when append-only history cannot form one reliable projection."""
 
@@ -52,15 +62,18 @@ class MaintenanceNotArchivedError(MaintenanceError):
 class MaintenanceRepository:
     """Reconstruct and extend consistent event projections from a JSONL log."""
 
-    def __init__(self, log: MaintenanceEventLog):
+    def __init__(self, log: MaintenanceEventLog, *, read_backend=None):
         self.log = log
+        self.read_backend = read_backend
 
     @staticmethod
     def _project(
         records: Iterable[MaintenanceEvent],
     ) -> tuple[dict[str, MaintenanceEvent], dict[str, tuple[MaintenanceEvent, ...]]]:
+        check_budget()
         histories: dict[str, list[MaintenanceEvent]] = {}
         for record in records:
+            check_budget()
             history = histories.setdefault(record.maintenance_event_id, [])
             expected_revision = len(history) + 1
             if record.revision != expected_revision:
@@ -102,14 +115,20 @@ class MaintenanceRepository:
         return current, immutable_histories
 
     def _load(
-        self, check=None,
+        self,
     ) -> tuple[dict[str, MaintenanceEvent], dict[str, tuple[MaintenanceEvent, ...]]]:
+        check_budget()
         try:
-            return self._project(self.log.read_all(check=check))
+            return self._project(self.log.read_all())
         except MaintenanceStorageError as exc:
             raise MaintenanceHistoryError(str(exc)) from exc
 
     def get(self, event_id: str) -> MaintenanceEvent:
+        if self.read_backend is not None:
+            value = self.read_backend.maintenance_get(event_id)
+            if value is None:
+                raise MaintenanceNotFoundError(f"maintenance event not found: {event_id}")
+            return value
         current, _ = self._load()
         try:
             return current[event_id]
@@ -117,6 +136,11 @@ class MaintenanceRepository:
             raise MaintenanceNotFoundError(f"maintenance event not found: {event_id}") from exc
 
     def history(self, event_id: str) -> tuple[MaintenanceEvent, ...]:
+        if self.read_backend is not None:
+            values = self.read_backend.maintenance_history(event_id)
+            if not values:
+                raise MaintenanceNotFoundError(f"maintenance event not found: {event_id}")
+            return values
         _, histories = self._load()
         try:
             return histories[event_id]
@@ -128,13 +152,20 @@ class MaintenanceRepository:
         *,
         include_archived: bool = False,
         newest_first: bool = True,
-        check=None,
+        occurred_from: str | None = None,
+        occurred_to: str | None = None,
     ) -> list[MaintenanceEvent]:
-        current, _ = self._load(check=check)
+        if self.read_backend is not None:
+            return self.read_backend.maintenance_list(include_archived=include_archived,newest_first=newest_first,
+                occurred_from=occurred_from,occurred_to=occurred_to)
+        check_budget()
+        current, _ = self._load()
         items = [
             event
             for event in current.values()
-            if include_archived or event.archived_at is None
+            if (include_archived or event.archived_at is None)
+            and (occurred_from is None or event.occurred_at >= occurred_from)
+            and (occurred_to is None or event.occurred_at <= occurred_to)
         ]
         # Default logbook order is newest first. Passing newest_first=False
         # provides the chronological order required by a later timeline.
@@ -153,8 +184,11 @@ class MaintenanceRepository:
         """Atomically compare the current revision and append the successor."""
 
         with self.log.transaction():
-            current, _ = self._load()
-            existing = current.get(event.maintenance_event_id)
+            if self.read_backend is None:
+                current, _ = self._load()
+                existing = current.get(event.maintenance_event_id)
+            else:
+                existing = self.read_backend.maintenance_get(event.maintenance_event_id)
             actual_revision = existing.revision if existing else 0
             if actual_revision != expected_revision:
                 raise MaintenanceConflictError(
@@ -173,6 +207,15 @@ class MaintenanceRepository:
                 )
             self.log.append(event)
         return event
+
+    def find_request(self, request_id):
+        if self.read_backend is not None:
+            return self.read_backend.maintenance_request(request_id)
+        current, histories = self._load()
+        for event_id, history in histories.items():
+            if history[0].source.get("create_request_id") == request_id:
+                return history[0], current[event_id]
+        return None
 
     def import_revision(
         self,
@@ -227,6 +270,48 @@ class MaintenanceService:
         event = new_maintenance_event(**fields)
         return self.repository.append_revision(event, expected_revision=0)
 
+    def create_once(self, request_id: str, **fields: Any) -> tuple[MaintenanceEvent, bool]:
+        try:
+            request_id = str(uuid.UUID(request_id))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise MaintenanceValidationError("Idempotency-Key must be a UUID") from exc
+        try:
+            fingerprint = hashlib.sha256(json.dumps(
+                fields, sort_keys=True, ensure_ascii=False, allow_nan=False,
+                separators=(",", ":")).encode()).hexdigest()
+        except (TypeError, ValueError) as exc:
+            raise MaintenanceValidationError("Create request must contain valid JSON values") from exc
+        # Read, compare and append use the same stable lock, including deletion.
+        with self.repository.log.transaction():
+            prior = self.repository.find_request(request_id)
+            if prior is not None:
+                first, current = prior
+                if first.source.get("create_request_hash") != fingerprint:
+                    raise MaintenanceRequestConflictError("Request key already used for different input")
+                return current, False
+            if self.repository.log.request_retired(request_id):
+                raise MaintenanceNotFoundError("The event for this save request has been deleted")
+            source = dict(fields.pop("source", {"kind": "manual"}))
+            source.update(create_request_id=request_id, create_request_hash=fingerprint)
+            event = new_maintenance_event(**fields, source=source, now=self.clock())
+            self.repository.log.append(event)
+            return event, True
+
+    def delete(self, event_id: str, *, expected_revision: int) -> None:
+        with self.repository.log.transaction():
+            if self.repository.read_backend is None:
+                current, histories = self.repository._load()
+                event = current.get(event_id)
+                if event is None:
+                    raise MaintenanceNotFoundError(f"maintenance event not found: {event_id}")
+                history = histories[event_id]
+            else:
+                event = self.repository.get(event_id)
+                history = self.repository.history(event_id)
+            if event.revision != expected_revision:
+                raise MaintenanceConflictError(event_id, expected_revision, event.revision)
+            self.repository.log.remove_event(event_id, history[0].source.get("create_request_id"))
+
     def get(self, event_id: str) -> MaintenanceEvent:
         return self.repository.get(event_id)
 
@@ -238,10 +323,13 @@ class MaintenanceService:
         *,
         include_archived: bool = False,
         newest_first: bool = True,
+        occurred_from: str | None = None,
+        occurred_to: str | None = None,
     ) -> list[MaintenanceEvent]:
         return self.repository.list(
             include_archived=include_archived,
             newest_first=newest_first,
+            occurred_from=occurred_from,occurred_to=occurred_to,
         )
 
     def update(

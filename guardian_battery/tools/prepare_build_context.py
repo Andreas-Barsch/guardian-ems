@@ -22,7 +22,9 @@ def _git(root: Path, *args: str) -> str:
 def prepare_build_context(repository: Path, destination: Path) -> str:
     repository = repository.resolve()
     destination = destination.resolve()
-    if _git(repository, "status", "--porcelain=v1"):
+    if destination == repository or repository in destination.parents:
+        raise RuntimeError("destination must be outside the repository")
+    if _git(repository, "status", "--porcelain=v1", "--untracked-files=all"):
         raise RuntimeError("refusing to package a dirty working tree")
     revision = _git(repository, "rev-parse", "HEAD")
     if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
@@ -39,7 +41,7 @@ def prepare_build_context(repository: Path, destination: Path) -> str:
     try:
         with archive.open("wb") as output:
             subprocess.run(
-                ["git", "-C", str(repository), "archive", "HEAD", "guardian_battery"],
+                ["git", "-C", str(repository), "archive", revision, "guardian_battery"],
                 check=True, stdout=output,
             )
         with tarfile.open(archive) as source:

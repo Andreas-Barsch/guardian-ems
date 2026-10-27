@@ -418,3 +418,36 @@ def test_series_points_carry_only_documented_physical_identity(tmp_path):
     assert "module_serial" not in result["points"][0]
     assert result["points"][1]["module_serial"] == "SN-X"
     assert result["points"][1]["identity_source"] == "position_history"
+
+
+def test_history_cancellation_releases_single_job_gate(tmp_path, monkeypatch):
+    from research_budget import check_budget
+    _, _, api = api_env(tmp_path)
+    calls = []
+    def query(_):
+        calls.append(1)
+        check_budget()
+        raise AssertionError("cancelled work continued")
+    monkeypatch.setattr(api, "_query", query)
+    response = api.handle("GET", "/api/history/series", cancelled=lambda: True)
+    assert response.status == 503
+    assert response.body["error"]["code"] == "cancelled"
+    assert calls == []
+    checks = iter([False, False, True])
+    response = api.handle("GET", "/api/history/series", cancelled=lambda: next(checks, True))
+    assert response.status == 503
+    assert response.body["error"]["code"] == "cancelled"
+    assert api.handle("POST", "/api/history/series").status == 405
+
+
+def test_history_concurrent_request_is_rejected_without_queue(tmp_path, monkeypatch):
+    from maintenance_api import ApiResponse
+    _, _, api = api_env(tmp_path)
+    def query(_):
+        nested = api.handle("GET", "/api/history/series")
+        assert nested.status == 503
+        assert nested.body["error"]["code"] == "history_busy"
+        return ApiResponse(200, {"ok": True})
+    monkeypatch.setattr(api, "_query", query)
+    assert api.handle("GET", "/api/history/series").status == 200
+    assert api.handle("GET", "/api/history/series").status == 200

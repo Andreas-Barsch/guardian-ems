@@ -1,10 +1,12 @@
 """Disposable block-range indexes for append-only Guardian JSONL history."""
 from __future__ import annotations
 
+from history_append_receipt import current_receipt
 import hashlib
 import json
 import math
 import os
+from research_budget import check_budget, ResearchQueryError
 from pathlib import Path
 
 
@@ -30,11 +32,8 @@ def _edge_hash(source: Path, indexed_size: int) -> tuple[str, str]:
 
 
 def _atomic_write(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")),
-                         encoding="utf-8")
-    os.replace(temporary, path)
+    from resume_publication import atomic, encoded
+    atomic(path, encoded(value))
 
 
 def _epoch(record: dict, timestamp_field: str, iso_timestamp: bool) -> float:
@@ -53,22 +52,48 @@ def _epoch(record: dict, timestamp_field: str, iso_timestamp: bool) -> float:
     return result
 
 
+def _advance_identity(record, identities):
+    if record.get("record_type") != "frame": return
+    from rs485_evidence import decode_identity_record
+    identity=decode_identity_record(record)
+    if identity is not None:
+        identities[str(record["adr"])]=identity
+    elif record.get("physical_serial") and record.get("adr") is not None:
+        identities[str(record["adr"]) ]={"serial_string":record["physical_serial"],
+            "decode_source":record.get("identity_decode_source","stored_record")}
+
+
+def policy_reference(record, start, end):
+    if (record.get("record_type") == "hycube_policy_observation"
+            and record.get("parse_quality") == "complete"):
+        return {"timestamp": _epoch(record, "observed_at", True),
+                "offset": start, "length": end-start,
+                "changed": record.get("policy_changed", True)}
+    return None
+
+
 def build_index(source: Path, *, timestamp_field: str, iso_timestamp: bool,
                 block_records: int = DEFAULT_BLOCK_RECORDS, complete: bool = True,
                 validate_record=None) -> dict:
     """Rebuild one index atomically; callers control when this bounded unit runs."""
     source = Path(source)
-    blocks = []
+    blocks = []; identities = {}; policy_refs = []
     with source.open("rb") as handle:
         while True:
             start = handle.tell(); epochs = []; count = 0
+            identities_before=dict(identities)
             while count < block_records:
+                record_start = handle.tell()
                 raw = handle.readline()
                 if not raw:
                     break
                 if not raw.strip():
                     continue
                 record = json.loads(raw)
+                if timestamp_field == "observed_at":
+                    ref = policy_reference(record, record_start, handle.tell())
+                    if ref: policy_refs.append(ref)
+                _advance_identity(record,identities)
                 if validate_record is not None:
                     validate_record(record)
                 epochs.append(_epoch(record, timestamp_field, iso_timestamp)); count += 1
@@ -76,10 +101,11 @@ def build_index(source: Path, *, timestamp_field: str, iso_timestamp: bool,
             if not count:
                 break
             if count < block_records and not complete:
+                identities = identities_before
                 break
             blocks.append({"start_offset": start, "end_offset": end,
                            "min_timestamp": min(epochs), "max_timestamp": max(epochs),
-                           "record_count": count})
+                           "record_count": count, "identities_before":identities_before})
             if end == source.stat().st_size:
                 break
     indexed_size = blocks[-1]["end_offset"] if blocks else 0
@@ -87,6 +113,7 @@ def build_index(source: Path, *, timestamp_field: str, iso_timestamp: bool,
     head_hash, tail_hash = _edge_hash(source, indexed_size)
     value = {
         "schema_version": SCHEMA_VERSION,
+        "append_generation": (current_receipt(source) or {}).get("generation"),
         "source_filename": source.name,
         "source_device": stat.st_dev,
         "source_inode": stat.st_ino,
@@ -99,15 +126,18 @@ def build_index(source: Path, *, timestamp_field: str, iso_timestamp: bool,
         "timestamp_encoding": "iso8601" if iso_timestamp else "unix_seconds",
         "prefix_head_sha256": head_hash,
         "prefix_tail_sha256": tail_hash,
-        "blocks": blocks,
+        "blocks": blocks, "identities_after":identities,
     }
+    if timestamp_field == "observed_at":
+        value.update(policy_index_version=1, policy_refs=[ref for ref in policy_refs
+                     if ref["offset"]+ref["length"] <= indexed_size])
     _atomic_write(index_path(source), value)
     return value
 
 
 def extend_open_index(source: Path, *, timestamp_field: str, iso_timestamp: bool,
                       block_records: int = DEFAULT_BLOCK_RECORDS,
-                      validate_record=None) -> dict:
+                      validate_record=None, progress=None, allow_partial=False, max_bytes=None) -> dict:
     """Index at most one newly completed block and leave the rest as suffix."""
     source = Path(source); stat = source.stat()
     try:
@@ -118,27 +148,45 @@ def extend_open_index(source: Path, *, timestamp_field: str, iso_timestamp: bool
     except BlockIndexError:
         value = {"blocks": [], "indexed_size": 0}
     start = int(value["indexed_size"]); epochs = []; count = 0
+    identities=dict(value.get("identities_after",{})); identities_before=dict(identities)
+    policy_refs=list(value.get("policy_refs", []))
     with source.open("rb") as handle:
         handle.seek(start)
         while count < block_records:
-            raw = handle.readline()
+            if max_bytes is not None and handle.tell()-start >= max_bytes:
+                break
+            record_start = handle.tell()
+            raw = handle.readline(65537)
+            if len(raw) > 65536:
+                raise BlockIndexError("source record exceeds parser allowance")
             if not raw:
                 break
             if not raw.strip():
                 continue
             record = json.loads(raw)
+            if timestamp_field == "observed_at":
+                ref = policy_reference(record, record_start, handle.tell())
+                if ref: policy_refs.append(ref)
+            _advance_identity(record,identities)
             if validate_record is not None:
                 validate_record(record)
             epochs.append(_epoch(record, timestamp_field, iso_timestamp)); count += 1
         end = handle.tell()
-    if count < block_records:
+    if progress is not None:
+        # Caller resumes on the next append while a completed block has a suffix.
+        # Partial blocks retain their count so the next attempt occurs on completion.
+        progress["pending_records"] = (block_records - 1 if count == block_records
+                                       and end < stat.st_size else
+                                       count if count < block_records else 0)
+    if not count or (count < block_records and not allow_partial):
         return value
     blocks = list(value["blocks"])
     blocks.append({"start_offset": start, "end_offset": end,
                    "min_timestamp": min(epochs), "max_timestamp": max(epochs),
-                   "record_count": count})
+                   "record_count": count,"identities_before":identities_before})
     head_hash, tail_hash = _edge_hash(source, end)
     next_value = {"schema_version": SCHEMA_VERSION,
+        "append_generation": (current_receipt(source) or {}).get("generation"),
         "source_filename": source.name, "source_device": stat.st_dev,
         "source_inode": stat.st_ino, "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns, "indexed_size": end,
@@ -146,7 +194,9 @@ def extend_open_index(source: Path, *, timestamp_field: str, iso_timestamp: bool
         "timestamp_field": timestamp_field,
         "timestamp_encoding": "iso8601" if iso_timestamp else "unix_seconds",
         "prefix_head_sha256": head_hash, "prefix_tail_sha256": tail_hash,
-        "blocks": blocks}
+        "blocks": blocks,"identities_after":identities}
+    if timestamp_field == "observed_at":
+        next_value.update(policy_index_version=1, policy_refs=policy_refs)
     _atomic_write(index_path(source), next_value)
     return next_value
 
@@ -154,7 +204,11 @@ def extend_open_index(source: Path, *, timestamp_field: str, iso_timestamp: bool
 def _load_valid(source: Path, *, timestamp_field: str, iso_timestamp: bool) -> dict:
     source = Path(source); path = index_path(source)
     try:
+        if timestamp_field == "observed_at" and path.stat().st_size > 4*1024*1024:
+            raise BlockIndexError("policy index metadata exceeds bound")
         value = json.loads(path.read_text(encoding="utf-8"))
+        if timestamp_field == "observed_at" and value.get("policy_index_version") != 1:
+            raise BlockIndexError("policy index context unavailable")
         stat = source.stat()
         expected_encoding = "iso8601" if iso_timestamp else "unix_seconds"
         if (not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION
@@ -174,6 +228,10 @@ def _load_valid(source: Path, *, timestamp_field: str, iso_timestamp: bool) -> d
         if (not value.get("complete") and stat.st_size == int(value.get("source_size", -1))
                 and stat.st_mtime_ns != int(value.get("source_mtime_ns", -1))):
             raise BlockIndexError("open source changed without append")
+        if stat.st_size != int(value.get("source_size", -1)):
+            receipt = current_receipt(source)
+            if not receipt or not value.get("append_generation") or receipt["generation"] != value["append_generation"]:
+                raise BlockIndexError("append provenance missing or changed")
         head_hash, tail_hash = _edge_hash(source, indexed_size)
         if (head_hash != value.get("prefix_head_sha256")
                 or tail_hash != value.get("prefix_tail_sha256")):
@@ -220,7 +278,12 @@ def selected_ranges(source: Path, start_epoch: float, end_epoch: float, *,
             merged.append((start, end))
     selected = sum(end - start for start, end in merged)
     return merged, {"mode": "block_index", "skipped_bytes": size - selected,
-                    "indexed_size": indexed_size}
+                    "indexed_size": indexed_size,
+                    "validation_bytes":2*min(SIGNATURE_BYTES,indexed_size),
+                    "identity_checkpoints":{str(block["start_offset"]):block.get("identities_before",{})
+                        for block in value["blocks"] if float(block["max_timestamp"]) >= start_epoch
+                            and float(block["min_timestamp"]) <= end_epoch}
+                        | ({str(indexed_size):value.get("identities_after",{})} if indexed_size<size else {})}
 
 
 def index_signature(source: Path):
@@ -230,3 +293,47 @@ def index_signature(source: Path):
         return str(path), stat.st_size, stat.st_mtime_ns
     except OSError:
         return None
+
+
+def bounded_ranges(source, start_epoch, end_epoch, *, timestamp_field, iso_timestamp):
+    """A missing index permits one block only, never an interactive rebuild.
+
+    The quantum is the existing writer's 256-record index block. An absent or
+    stale index on a larger source is explicitly unavailable. This also bounds
+    an unindexed live suffix. No authoritative data or sidecar is changed.
+    """
+    source = Path(source)
+    try:
+        ranges, info = selected_ranges(source, start_epoch, end_epoch,
+                                      timestamp_field=timestamp_field,
+                                      iso_timestamp=iso_timestamp)
+        offset = info["indexed_size"]
+    except BlockIndexError as exc:
+        ranges, info, offset = [], {"mode": "bounded_unindexed", "reason": str(exc),
+                                   "indexed_size": 0, "skipped_bytes": 0}, 0
+    size = source.stat().st_size
+    if offset < size and not ranges:
+        ranges = [(offset, size)]
+    info["unindexed_offset"] = offset
+    return ranges, info
+
+
+def range_lines(handle, ranges, *, unindexed_offset=None):
+    """Read complete records only inside the selected byte blocks."""
+    suffix_records = 0
+    for start, end in ranges:
+        check_budget()
+        handle.seek(start)
+        while handle.tell() < end:
+            check_budget()
+            if unindexed_offset is not None and handle.tell() >= unindexed_offset:
+                suffix_records += 1
+                if suffix_records > DEFAULT_BLOCK_RECORDS:
+                    raise ResearchQueryError("history_index_required",
+                        "History index missing, stale or behind by more than one block; coverage unavailable; no full scan performed", 503)
+            raw = handle.readline(min(65537, end-handle.tell()))
+            if len(raw) > 65536:
+                raise ResearchQueryError("history_record_too_large", "History record exceeds parser allowance", 503)
+            if not raw:
+                break
+            yield raw

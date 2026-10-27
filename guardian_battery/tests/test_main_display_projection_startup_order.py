@@ -1,4 +1,5 @@
 import sys
+import pytest
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,13 @@ with patch.object(Path, "mkdir", return_value=None):
 
 import config_ui
 from config_ui import Handler
+
+
+@pytest.fixture(autouse=True)
+def isolate_legacy_startup_root(tmp_path, monkeypatch):
+    # The legacy entry now creates its root at main(), not module import.
+    # Redirect that one existing startup write; the production guard stays on.
+    monkeypatch.setattr(main, "SHARE_DIR", tmp_path / "legacy-startup")
 
 
 class StopLifecycle(BaseException):
@@ -94,8 +102,8 @@ def options():
 
 
 def prepare(monkeypatch):
-    config_ui.reset_display_projection_startup()
     monkeypatch.setattr(main, "require_source_commit", lambda: "a" * 40)
+    config_ui.reset_display_projection_startup()
     monkeypatch.setattr(config_ui, "_DISPLAY_PROJECTION_PROVIDER", None)
     monkeypatch.setattr(config_ui, "_DISPLAY_PROJECTION_REBUILD_ACTION", None)
     FakeDisplayWorker.latest = None
@@ -183,7 +191,7 @@ def test_display_startup_completes_before_mqtt_discovery(monkeypatch):
     run_until_blocked(blocker, release)
 
 
-def test_display_startup_completes_before_current_condition_backfill(monkeypatch):
+def test_display_startup_completes_before_diagnostic_worker_start(monkeypatch):
     prepare(monkeypatch)
     blocker = threading.Event()
     release = threading.Event()
@@ -193,15 +201,59 @@ def test_display_startup_completes_before_current_condition_backfill(monkeypatch
     monkeypatch.setattr(main, "Mqtt", FakeMqtt)
     monkeypatch.setattr(main, "configure_maintenance_live_publisher", lambda *_args: None)
     monkeypatch.setattr(main, "configure_rs485_status_provider", lambda *_args: None)
-    monkeypatch.setattr(main, "CellDiagnosticStore", FakeStore)
 
-    class BlockingBackfill:
+    class BlockingStartup:
         def __init__(self, *_args):
             pass
 
-        def run(self, *_args):
+        def start(self):
             return blocking_call(blocker, release)
 
-    monkeypatch.setattr(main, "CurrentConditionBackfill", BlockingBackfill)
+    import diagnostic_startup
+    monkeypatch.setattr(diagnostic_startup, "DiagnosticStartup", BlockingStartup)
 
     run_until_blocked(blocker, release)
+
+
+@pytest.fixture(autouse=True)
+def reset_live_gate_after_lifecycle_test():
+    yield
+    from history_live_priority import collector_stopped
+    collector_stopped()
+
+
+def test_first_pwr_runs_before_any_historical_diagnostic_read(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+    import diagnostic_startup
+    import history_live_priority
+    from config_ui import DEFAULTS
+    prepare(monkeypatch)
+    monkeypatch.setattr(main, "load_options", lambda: {**DEFAULTS, "rs485_sniffer_enabled": False})
+    monkeypatch.setattr(main, "find_port", lambda *_: "/dev/null")
+    monkeypatch.setattr(main, "create_rs485_reader", lambda *_: None)
+    monkeypatch.setattr(main, "RUNNING", True)
+    for name in ("CELL_DIAG_FILE", "DIAGNOSTIC_AGGREGATE_FILE", "CELL_HISTORY_DIR",
+                 "DEFAULT_POSITION_HISTORY_FILE", "DEFAULT_MAINTENANCE_EVENT_FILE", "SHARE_DIR"):
+        monkeypatch.setattr(main, name, tmp_path / name)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Historical diagnostic source accessed before first PWR")
+    monkeypatch.setattr(diagnostic_startup.CellDiagnosticStore, "_load", forbidden)
+    monkeypatch.setattr(diagnostic_startup.DiagnosticAggregateStore, "_load", forbidden)
+    called=[]
+    class Console:
+        def __init__(self,*_): pass
+        def command(self,_):
+            called.append("pwr")
+            raise StopLifecycle()
+        def close(self): pass
+    monkeypatch.setattr(main,"PylontechConsole",Console)
+    for name in ("Mqtt", "DerivedMqttWorker", "CellAnalysisWorker",
+                 "DailyDiagnosticWorker", "CanonicalPhaseWorker", "SelectedHistoryPreparation"):
+        monkeypatch.setattr(main,name,lambda *_args,**_kwargs:MagicMock())
+    monkeypatch.setattr(main,"collector_from_options",lambda *_:None)
+    monkeypatch.setattr(main,"configure_maintenance_live_publisher",lambda *_:None)
+    monkeypatch.setattr(main,"configure_rs485_status_provider",lambda *_:None)
+    with pytest.raises(StopLifecycle):
+        main.main()
+    assert called==["pwr"]
+    assert not history_live_priority.live_coordination_ready()

@@ -1,6 +1,10 @@
 """Append-only provenance for physical module serials at stack positions."""
 
 from __future__ import annotations
+from history_live_priority import bounded_metadata_lines
+
+
+from research_budget import check_budget
 
 import fcntl
 import json
@@ -100,7 +104,8 @@ class PositionSnapshot:
 
 
 class PositionHistoryLog:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, append_backend=None):
+        self.append_backend = append_backend
         self.path = Path(path)
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
 
@@ -115,12 +120,14 @@ class PositionHistoryLog:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def read_all(self) -> list[PositionSnapshot]:
+        check_budget()
         if not self.path.exists():
             return []
         result = []
         try:
             with self.path.open(encoding="utf-8") as handle:
-                for line_number, line in enumerate(handle, 1):
+                for line_number, line in enumerate(bounded_metadata_lines(handle), 1):
+                    check_budget()
                     if line.strip():
                         try:
                             result.append(PositionSnapshot.from_dict(json.loads(line)))
@@ -128,12 +135,16 @@ class PositionHistoryLog:
                             raise PositionHistoryError(f"invalid position history line {line_number}") from exc
         except OSError as exc:
             raise PositionHistoryError("position history is unavailable") from exc
+        check_budget()
         ids = [item.position_history_id for item in result]
         if len(ids) != len(set(ids)):
             raise PositionHistoryError("duplicate position history ID")
         return result
 
     def append(self, snapshot: PositionSnapshot) -> None:
+        if self.append_backend is not None:
+            self.append_backend.append(self.path,(json.dumps(snapshot.to_dict(),ensure_ascii=False,separators=(",", ":"))+"\n").encode('utf-8'))
+            return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as handle:
@@ -145,20 +156,27 @@ class PositionHistoryLog:
 
 
 class PositionHistoryService:
-    def __init__(self, log: PositionHistoryLog, maintenance_service, *, clock: Callable[[], datetime] | None = None):
+    def __init__(self, log: PositionHistoryLog, maintenance_service, *, clock: Callable[[], datetime] | None = None, read_backend=None):
         self.log = log
         self.maintenance_service = maintenance_service
+        self.read_backend = read_backend
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def list(self) -> list[PositionSnapshot]:
+        if self.read_backend is not None:
+            return self.read_backend.position_snapshots()
         return sorted(self.log.read_all(), key=lambda item: (item.effective_at, item.created_at, item.position_history_id))
 
     def current(self) -> PositionSnapshot | None:
+        if self.read_backend is not None:
+            return self.read_backend.position_snapshot_at()
         items = self.list()
         return items[-1] if items else None
 
     def at(self, timestamp: str) -> PositionSnapshot | None:
         target = normalize_utc_timestamp(timestamp, "at")
+        if self.read_backend is not None:
+            return self.read_backend.position_snapshot_at(target)
         items = [item for item in self.list() if item.effective_at <= target]
         return items[-1] if items else None
 
@@ -167,8 +185,9 @@ class PositionHistoryService:
         event = self.maintenance_service.get(maintenance_event_id)
         if event.archived_at is not None:
             raise PositionHistoryValidationError("maintenance event must be active")
-        existing_records = self.log.read_all()
         effective = normalize_utc_timestamp(effective_at, "effective_at")
+        existing_records = (self.log.read_all() if self.read_backend is None else
+                            self.read_backend.position_validation_records(effective))
         now = self.clock()
         if not existing_records:
             effective_time = datetime.fromisoformat(effective)
@@ -185,7 +204,8 @@ class PositionHistoryService:
             positions=dict(positions),
         )
         with self.log.transaction():
-            records = self.log.read_all()
+            records = (self.log.read_all() if self.read_backend is None else
+                       self.read_backend.position_validation_records(effective))
             ordered = sorted(
                 records,
                 key=lambda item: (item.effective_at, item.created_at,
@@ -225,10 +245,14 @@ class PositionHistoryService:
     def known_serials(self, position: int) -> list[str]:
         if position not in STACK_POSITIONS:
             raise PositionHistoryValidationError("position must be between 1 and 6")
+        if self.read_backend is not None:
+            return self.read_backend.position_known_serials(position)
         return sorted({item.positions[str(position)] for item in self.list() if item.positions[str(position)] is not None})
 
     def last_documented_serials(self) -> dict[str, str | None]:
         """Retain documentary identity labels independently of current occupancy."""
+        if self.read_backend is not None:
+            return self.read_backend.position_last_documented()
         result = {str(position): None for position in STACK_POSITIONS}
         for snapshot in self.list():
             for position, serial in snapshot.positions.items():
@@ -241,6 +265,8 @@ class PositionHistoryService:
         if position not in STACK_POSITIONS:
             raise PositionHistoryValidationError("position must be between 1 and 6")
         target = normalize_utc_timestamp(timestamp, "at")
+        if self.read_backend is not None:
+            return self.read_backend.position_serial_options(position,target)
         snapshots = self.list()
         effective = self.position_at(position, target)
         starts: dict[str, list[str]] = {}

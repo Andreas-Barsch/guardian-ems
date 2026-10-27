@@ -5,6 +5,7 @@ It does not communicate with a BMS and does not assign causal meaning to the
 observations it correlates.
 """
 from __future__ import annotations
+from work_scheduler import checkpoint as _work_checkpoint
 
 import hashlib
 import fcntl
@@ -65,12 +66,14 @@ class BmsManagementEvidenceStore:
                     raise ValueError("event store has a crash-truncated final line")
                 existing = set()
                 for line in original.splitlines():
+                    _work_checkpoint()
                     try:
                         existing.add(json.loads(line)["event_id"])
                     except (json.JSONDecodeError, KeyError, TypeError):
                         continue
                 pending, pending_ids = [], set()
                 for item in events:
+                    _work_checkpoint()
                     event_id = item.get("event_id")
                     if not event_id or event_id in existing or event_id in pending_ids:
                         continue
@@ -135,6 +138,7 @@ def _observed_union_duration(events: Sequence[Mapping], *, day_bounds=None,
                              coverage_intervals=()) -> float:
     intervals = []
     for item in events:
+        _work_checkpoint()
         end_value = item.get("observed_end") or item.get("observed_through")
         if end_value is None:
             continue
@@ -146,6 +150,7 @@ def _observed_union_duration(events: Sequence[Mapping], *, day_bounds=None,
     intervals.sort()
     merged = []
     for start, end in intervals:
+        _work_checkpoint()
         if not merged or start > merged[-1][1]:
             merged.append([start, end])
         else:
@@ -294,11 +299,13 @@ class BmsManagementEvidenceAnalyzer:
         management, raw_44 = [], []
         sortable = []
         for record in records:
+            _work_checkpoint()
             try:
                 sortable.append((_timestamp(record["timestamp"]), dict(record)))
             except (KeyError, TypeError, ValueError):
                 continue
         for timestamp, record in sorted(sortable, key=lambda item: item[0]):
+            _work_checkpoint()
             identity = decode_identity_record(record)
             if identity is not None:
                 identities[int(identity["adr"])] = identity
@@ -334,10 +341,12 @@ class BmsManagementEvidenceAnalyzer:
     def _prepare_cells(records):
         result = defaultdict(list)
         for record in records:
+            _work_checkpoint()
             metrics = _cell_metrics(record)
             if metrics is not None and metrics["physical_serial"]:
                 result[metrics["physical_serial"]].append(metrics)
         for rows in result.values():
+            _work_checkpoint()
             rows.sort(key=lambda item: (item["timestamp"], item["_tie_breaker"]))
         return result
 
@@ -345,10 +354,12 @@ class BmsManagementEvidenceAnalyzer:
     def _transitions_0x44(records):
         previous, result = {}, []
         for record in sorted(records, key=lambda item: item["timestamp"]):
+            _work_checkpoint()
             adr, current = record["adr"], record["info"]
             old = previous.get(adr)
             if old is not None:
                 for offset in range(max(len(old["info"]), len(current))):
+                    _work_checkpoint()
                     before = old["info"][offset] if offset < len(old["info"]) else None
                     after = current[offset] if offset < len(current) else None
                     if before != after:
@@ -363,17 +374,22 @@ class BmsManagementEvidenceAnalyzer:
     def _events(self, management, cells, transitions):
         by_serial = defaultdict(list)
         for item in management:
+            _work_checkpoint()
             by_serial[item["physical_serial"]].append(item)
         events = []
         for serial, rows in sorted(by_serial.items()):
+            _work_checkpoint()
             rows.sort(key=lambda item: item["timestamp"])
             previous = None
             open_events = {"ccl": [], "dcl": []}
             for row in rows:
+                _work_checkpoint()
                 if previous is not None:
                     for limit in ("ccl", "dcl"):
+                        _work_checkpoint()
                         magnitude = self._limit_magnitude(limit, row[limit])
                         for event in list(open_events[limit]):
+                            _work_checkpoint()
                             if magnitude >= event["limit_before_magnitude_a"]:
                                 event["observed_end"] = _iso(row["timestamp"])
                                 event["observed_duration_seconds"] = (
@@ -394,8 +410,10 @@ class BmsManagementEvidenceAnalyzer:
                             events.append(event)
                             open_events[limit].append(event)
                     for limit, pending in open_events.items():
+                        _work_checkpoint()
                         magnitude = self._limit_magnitude(limit, row[limit])
                         for event in pending:
+                            _work_checkpoint()
                             if magnitude <= event["limit_after_magnitude_a"]:
                                 event["observed_poll_count"] += 1
                                 event["observed_through"] = _iso(row["timestamp"])
@@ -478,6 +496,7 @@ class BmsManagementEvidenceAnalyzer:
         rows = sorted(management, key=lambda item: item["timestamp"])
         cycles, current = [], []
         for row in rows:
+            _work_checkpoint()
             if current and (row["timestamp"] - current[0]["timestamp"]
                             > self.parameters.peer_cycle_seconds
                             or any(item["physical_serial"] == row["physical_serial"]
@@ -490,11 +509,13 @@ class BmsManagementEvidenceAnalyzer:
         result = []
         for cycle_number, cycle in enumerate(cycles, 1):
             # Retain only the latest value per physical serial inside the cycle.
+            _work_checkpoint()
             unique = {item["physical_serial"]: item for item in cycle}
             values = list(unique.values())
             cycle_span = (max(item["timestamp"] for item in values)
                           - min(item["timestamp"] for item in values))
             for row in values:
+                _work_checkpoint()
                 peers = [item for item in values
                          if item["physical_serial"] != row["physical_serial"]]
                 observation = {"schema_version": SCHEMA_VERSION,
@@ -506,6 +527,7 @@ class BmsManagementEvidenceAnalyzer:
                     "peer_cycle_limit_seconds": self.parameters.peer_cycle_seconds,
                     "causality": CAUSALITY}
                 for limit in ("ccl", "dcl"):
+                    _work_checkpoint()
                     observed = self._limit_magnitude(limit, row[limit])
                     peer_values = [self._limit_magnitude(limit, item[limit]) for item in peers]
                     peer_median = _median(peer_values)
@@ -545,6 +567,7 @@ class BmsManagementEvidenceAnalyzer:
             first = None
         windows = {}
         for seconds in (60, 120):
+            _work_checkpoint()
             values = [float(item["module_current_a"]) for item in following
                       if item.get("module_current_a") is not None
                       and item["timestamp"] <= timestamp + seconds]
@@ -576,6 +599,7 @@ class BmsManagementEvidenceAnalyzer:
     def _stack_current(self, timestamp, all_cells):
         selected = []
         for serial, rows in all_cells.items():
+            _work_checkpoint()
             candidates = [item for item in rows if item["timestamp"] <= timestamp
                           and item.get("module_current_a") is not None]
             if candidates:
@@ -597,6 +621,7 @@ class BmsManagementEvidenceAnalyzer:
             return {}
         result = {}
         for seconds in (30, 60, 120):
+            _work_checkpoint()
             candidates = [item for item in before if item["timestamp"] <= timestamp - seconds]
             if not candidates:
                 result[str(seconds)] = None
@@ -627,21 +652,26 @@ class BmsManagementEvidenceAnalyzer:
             return start.timestamp(), end.timestamp()
         management_groups = defaultdict(list)
         for item in management:
+            _work_checkpoint()
             day = local_day(item["timestamp"])
             management_groups[(item["physical_serial"], day)].append(item)
         coverage_groups = defaultdict(list)
         management_by_serial = defaultdict(list)
         for item in management:
+            _work_checkpoint()
             management_by_serial[item["physical_serial"]].append(item)
         for serial, serial_rows in management_by_serial.items():
+            _work_checkpoint()
             serial_rows.sort(key=lambda item: item["timestamp"])
             for first, second in zip(serial_rows, serial_rows[1:]):
+                _work_checkpoint()
                 start, end = first["timestamp"], second["timestamp"]
                 if end - start > self.parameters.management_gap_seconds:
                     continue
                 cursor = datetime.fromtimestamp(start, zone).date()
                 final = datetime.fromtimestamp(end, zone).date()
                 while cursor <= final:
+                    _work_checkpoint()
                     day = cursor.isoformat()
                     day_start, day_end = bounds(day)
                     segment = (max(start, day_start), min(end, day_end))
@@ -651,6 +681,7 @@ class BmsManagementEvidenceAnalyzer:
         event_groups = defaultdict(list)
         duration_groups = defaultdict(list)
         for event in events:
+            _work_checkpoint()
             start = _timestamp(event["observed_start"])
             day = local_day(start)
             event_groups[(event["physical_serial"], day)].append(event)
@@ -659,14 +690,17 @@ class BmsManagementEvidenceAnalyzer:
             cursor = datetime.fromtimestamp(start, zone).date()
             final = datetime.fromtimestamp(end, zone).date()
             while cursor <= final:
+                _work_checkpoint()
                 duration_groups[(event["physical_serial"], cursor.isoformat())].append(event)
                 cursor += timedelta(days=1)
         relative_groups = defaultdict(list)
         for item in relative_limits:
+            _work_checkpoint()
             relative_groups[(item["physical_serial"], local_day(_timestamp(item["timestamp"])))].append(item)
         result = []
         for key in sorted(set(management_groups) | set(event_groups)
                           | set(duration_groups) | set(coverage_groups)):
+            _work_checkpoint()
             serial, day = key
             rows = sorted(management_groups[key], key=lambda item: item["timestamp"])
             all_items = event_groups[key]
@@ -695,6 +729,7 @@ class BmsManagementEvidenceAnalyzer:
             transition_keys = []
             transition_deltas = defaultdict(list)
             for item in items:
+                _work_checkpoint()
                 transition = item.get("transition_0x44")
                 if transition:
                     name = f"offset:{transition['offset']}:{transition['old_hex']}->{transition['new_hex']}"
@@ -796,6 +831,7 @@ class BmsManagementEvidenceAnalyzer:
         cells = self._prepare_cells(cell_records)
         controls, used = [], set()
         for row in sorted(management, key=lambda item: item["timestamp"]):
+            _work_checkpoint()
             if row["dcl"] == 0:
                 continue
             candidates = [item for item in cells.get(row["physical_serial"], [])
@@ -844,6 +880,7 @@ class BmsManagementEvidenceAnalyzer:
                   "minimum_management_coverage_seconds":
                   self.parameters.trend_min_management_coverage_seconds}
         for name, field in fields.items():
+            _work_checkpoint()
             values = [float(item[field]) for item in usable_rows if item.get(field) is not None]
             if len(values) < self.parameters.trend_min_days:
                 result[name] = "insufficient_data"

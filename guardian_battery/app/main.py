@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from soc_crash_detector import SocCrashDetector, SocObservation
+from soc_crash_events import DEFAULT_SOC_CRASH_EVENTS, SocCrashEventStore
+
 import json
 import logging
 import os
@@ -24,30 +27,30 @@ from derived_persistence import DerivedPersistenceWorker
 from derived_mqtt_projection import publish_derived_results
 from derived_mqtt_worker import DerivedMqttWorker
 from diagnostic_aggregates import DiagnosticAggregateStore
-from diagnostic_backfill import (DiagnosticAggregateBackfill,
-                                 DiagnosticAggregateBackfillWorker)
+from diagnostic_backfill import DiagnosticAggregateBackfill
 from current_condition_backfill import CurrentConditionBackfill
 from config_history import ConfigHistory
 from daily_diagnostics import DailyDiagnosticSources
 from daily_diagnostic_worker import DailyDiagnosticWorker
-from hycube_evidence import collector_from_options
+from hycube_evidence import collector_from_options, DEFAULT_POLICY_POLL_INTERVAL_SECONDS
+from hycube_mqtt import HycubeMqttPublisher
 from hycube_projection import HycubeProjectionBackfill
 from display_history_projection import (DisplayHistoryProjection,
                                         DisplayHistoryProjectionWorker)
+from history_preparation import SelectedHistoryPreparation
 from canonical_phase import (CanonicalPhaseProjection, CanonicalPhaseWorker,
                              DEFAULT_CANONICAL_PHASE_DIR)
 from config_ui import (configure_canonical_phase, configure_hycube_projection,
+                       configure_history_preparation,
                        display_projection_startup_status,
                        configure_maintenance_live_publisher,
                        configure_rs485_status_provider,
-                       install_research_identity_snapshot,
                        record_stable_observed_positions, start_config_server,
                        start_display_projection_traced,
                        update_display_projection_startup)
 from maintenance_mqtt import MaintenanceMqttPublisher
 from maintenance import DEFAULT_MAINTENANCE_EVENT_FILE, MaintenanceEventLog
-from timeline import TechnicalEventSource
-from timeline_index import TimelineIndexWorker
+from maintenance_service import MaintenanceRepository
 from mqtt_projection import (MQTT_MAX_ATTRIBUTE_BYTES, MQTT_MAX_PAYLOAD_BYTES,
                              compact_battery_diagnostics, compact_cell_attributes,
                              compact_text)
@@ -61,12 +64,10 @@ from stack_soc import current_stack_soc
 from serial_devices import discover_serial_devices, resolve_console_port, resolve_rs485_port, ensure_distinct_roles
 from rs485_sniffer import PassiveRs485Reader
 from rs485_evidence import (DEFAULT_RS485_HISTORY_DIR, Rs485EvidencePipeline,
-                            Rs485EvidenceWriter, restore_latest_identities)
+                            Rs485EvidenceWriter)
 from rs485_mqtt import Rs485MqttProjection
 from rs485_identity import project_current_management, resolve_rs485_identity
-from version import (DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION,
-                     RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT,
-                     require_source_commit)
+from version import DIAGNOSTIC_ENGINE_VERSION, GUARDIAN_VERSION, require_source_commit
 
 import paho.mqtt.client as mqtt
 import serial
@@ -93,7 +94,6 @@ HYCUBE_HISTORY_DIR = SHARE_DIR / "hycube_history"
 HYCUBE_POLICY_HISTORY_DIR = SHARE_DIR / "hycube_policy_history"
 HYCUBE_PROJECTION_DIR = SHARE_DIR / "hycube_history_projection"
 DISPLAY_HISTORY_DIR = SHARE_DIR / "display_history"
-SHARE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -132,25 +132,32 @@ def load_options() -> dict:
     return json.loads(OPTIONS_FILE.read_text(encoding="utf-8"))
 
 
-def load_persistent_state() -> dict:
-    if not STATE_FILE.exists():
+def load_persistent_state(*, path=None) -> dict:
+    path = STATE_FILE if path is None else Path(path)
+    if not path.exists():
         return {"alarm_counts": {}, "last_alarm_codes": [], "last_status": None}
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         LOG.warning("Persistenter Zustand war nicht lesbar und wird neu aufgebaut.")
         return {"alarm_counts": {}, "last_alarm_codes": [], "last_status": None}
 
 
-def save_persistent_state(state: dict) -> None:
-    tmp = STATE_FILE.with_suffix(".tmp")
+def save_persistent_state(state: dict, *, path=None) -> None:
+    path = STATE_FILE if path is None else Path(path)
+    tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(STATE_FILE)
+    tmp.replace(path)
 
 
-def append_event(event: dict) -> None:
-    with EVENT_FILE.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+def append_event(event: dict, *, path=None, append_backend=None) -> None:
+    path = EVENT_FILE if path is None else Path(path)
+    line = json.dumps(event, ensure_ascii=False) + "\n"
+    if append_backend is not None:
+        append_backend.append(path, line.encode('utf-8'))
+        return
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
 
 
 
@@ -169,9 +176,10 @@ def save_json_file(path: Path, data) -> None:
     tmp.replace(path)
 
 
-def update_trends(modules: list[Module], options: dict) -> dict[int, dict]:
-    history = load_json_file(HISTORY_FILE, {})
-    now = time.time()
+def update_trends(modules: list[Module], options: dict, *, path=None, clock=None) -> dict[int, dict]:
+    path = HISTORY_FILE if path is None else Path(path)
+    history = load_json_file(path, {})
+    now = (clock or time.time)()
     cutoff = now - int(options["trend_window_minutes"]) * 60
     min_change = int(options["trend_min_change_mv"])
     results: dict[int, dict] = {}
@@ -204,19 +212,20 @@ def update_trends(modules: list[Module], options: dict) -> dict[int, dict]:
             "window_minutes": int(options["trend_window_minutes"]),
         }
 
-    save_json_file(HISTORY_FILE, history)
+    save_json_file(path, history)
     return results
 
 
-def update_incident_state(status: str, alarms: list[dict], options: dict) -> dict:
-    state = load_json_file(INCIDENT_FILE, {
+def update_incident_state(status: str, alarms: list[dict], options: dict, *, path=None, clock=None) -> dict:
+    path = INCIDENT_FILE if path is None else Path(path)
+    state = load_json_file(path, {
         "active": False,
         "started_at": None,
         "last_alarm_at": None,
         "cleared_at": None,
         "last_summary": "kein Incident",
     })
-    now = time.time()
+    now = (clock or time.time)()
     has_alarm = bool(alarms)
 
     if has_alarm:
@@ -233,7 +242,7 @@ def update_incident_state(status: str, alarms: list[dict], options: dict) -> dic
             state["cleared_at"] = now
             state["last_summary"] = "Incident beendet"
 
-    save_json_file(INCIDENT_FILE, state)
+    save_json_file(path, state)
     return state
 
 
@@ -247,7 +256,8 @@ def find_port(configured: str) -> str:
     return port
 
 
-def create_rs485_reader(options: dict, console_port: str, frame_callback=None):
+def create_rs485_reader(options: dict, console_port: str, frame_callback=None, *,
+                        port_resolver=None, serial_opener=None, wall_clock=None, monotonic=None):
     if not bool(options.get("rs485_sniffer_enabled", False)):
         LOG.info("RS485 passive sniffer disabled")
         return None
@@ -259,16 +269,36 @@ def create_rs485_reader(options: dict, console_port: str, frame_callback=None):
     )
 
     def resolve_port() -> str:
-        device = resolve_rs485_port(
-            str(options.get("rs485_sniffer_port", "auto")), discover_serial_devices()
-        )
-        selected = device.preferred_path()
+        if port_resolver is None:
+            device = resolve_rs485_port(
+                str(options.get("rs485_sniffer_port", "auto")), discover_serial_devices()
+            )
+            selected = device.preferred_path()
+        else:
+            selected = port_resolver()
         ensure_distinct_roles(console_port, selected)
         return selected
 
     arguments = ([resolve_port, int(options.get("rs485_sniffer_baudrate", 115200))])
-    return (PassiveRs485Reader(*arguments, frame_callback=frame_callback)
-            if frame_callback is not None else PassiveRs485Reader(*arguments))
+    overrides = {}
+    for name, value in (('serial_opener', serial_opener), ('wall_clock', wall_clock), ('monotonic', monotonic)):
+        if value is not None:
+            overrides[name] = value
+    if frame_callback is not None:
+        overrides['frame_callback'] = frame_callback
+    reader = PassiveRs485Reader(*arguments, **overrides)
+    if isinstance(frame_callback, Rs485EvidencePipeline):
+        frame_callback.identity_provider = reader.identities
+    return reader
+
+
+def restore_rs485_checkpoint(reader, store=None):
+    """Legacy startup loads only the small checkpoint, never raw history."""
+    from rs485_identity_store import IdentityStore
+    reader.identity_store = store if store is not None else IdentityStore()
+    reader.restore_identities(reader.identity_store.load())
+    if reader.identity_store.error:
+        LOG.error("RS485 identity restore: %s", reader.identity_store.error)
 
 
 class PylontechConsole:
@@ -677,6 +707,12 @@ class Mqtt:
         self._derived_reconnect_epoch += 1
         if self._last_successfully_published_derived_key is not None:
             self._derived_republish_required_by_reconnect = True
+        hycube = getattr(self, "hycube_mqtt", None)
+        if hycube is not None:
+            try:
+                hycube.discovery()
+            except Exception as exc:
+                LOG.warning("Hycube MQTT discovery failed: %s", type(exc).__name__)
         worker = getattr(self, "derived_mqtt_worker", None)
         if worker is not None:
             worker.invalidate_reconnect()
@@ -1358,7 +1394,10 @@ class Mqtt:
                 time.thread_time() - guardian_cpu)
 
 
-def update_events(status: str, alarms: list[dict], persistent: dict) -> None:
+def update_events(status: str, alarms: list[dict], persistent: dict, *, event_sink=None, state_sink=None, clock=None) -> None:
+    event_sink = append_event if event_sink is None else event_sink
+    state_sink = save_persistent_state if state_sink is None else state_sink
+    clock = time.time if clock is None else clock
     current_codes = sorted(
         f"{alarm.get('module')}:{alarm.get('code')}" for alarm in alarms
     )
@@ -1376,23 +1415,23 @@ def update_events(status: str, alarms: list[dict], persistent: dict) -> None:
                 persistent["alarm_counts"][module_key] = int(
                     persistent["alarm_counts"].get(module_key, 0)
                 ) + 1
-            append_event({
-                "timestamp": time.time(),
+            event_sink({
+                "timestamp": clock(),
                 "type": "alarm_started",
                 "status": status,
                 "alarm": alarm,
             })
 
     for code in cleared_codes:
-        append_event({
-            "timestamp": time.time(),
+        event_sink({
+            "timestamp": clock(),
             "type": "alarm_cleared",
             "code": code,
         })
 
     if persistent.get("last_status") != status:
-        append_event({
-            "timestamp": time.time(),
+        event_sink({
+            "timestamp": clock(),
             "type": "status_changed",
             "from": persistent.get("last_status"),
             "to": status,
@@ -1400,7 +1439,7 @@ def update_events(status: str, alarms: list[dict], persistent: dict) -> None:
 
     persistent["last_alarm_codes"] = current_codes
     persistent["last_status"] = status
-    save_persistent_state(persistent)
+    state_sink(persistent)
 
 
 def log_result(modules: list[Module], status: str, alarms: list[dict], detailed: bool) -> None:
@@ -1425,25 +1464,87 @@ def log_result(modules: list[Module], status: str, alarms: list[dict], detailed:
         LOG.log(level, "ALARM [%s] %s: %s", alarm["level"].upper(), alarm["code"], alarm["message"])
 
 
-def main() -> None:
+def record_soc_crash_observations(modules, detector, store, pending,
+                                  identity_resolver=None):
+    """Observe existing PWR data only; persistence failures cannot stop acquisition."""
     try:
-        require_source_commit()
+        observations = []
+        for module in modules:
+            serial = None
+            if identity_resolver is not None:
+                try:
+                    serial, _ = identity_resolver.identity_at(module.module,
+                        datetime.fromtimestamp(module.pwr_sample_at, timezone.utc))
+                except Exception:
+                    pass
+            observations.append(SocObservation(module.module, module.soc_percent,
+                                               module.pwr_sample_at, serial))
+        for event in detector.observe(observations):
+            if len(pending) >= 64:
+                LOG.error("SOC crash event retry buffer full; event not persisted: %s", event.event_id)
+                continue
+            pending[event.event_id] = event
+        for event_id, event in list(pending.items()):
+            try:
+                store.append(event)
+            except Exception as exc:
+                LOG.warning("SOC crash event persistence failed: %s (%s)",
+                            event_id, type(exc).__name__)
+                break
+            else:
+                del pending[event_id]
+                LOG.info("SOC crash confirmed: id=%s module=%s gap_pp=%s causality=not_determined",
+                         event_id, event.candidate_module, event.observed_gap_pp)
+    except Exception as exc:
+        LOG.warning("SOC crash observation unavailable (%s)", type(exc).__name__)
+
+
+def create_prepared_collector(**dependencies):
+    """Existing collector methods with explicitly bound local stores/transports."""
+    from prepared_collector import PreparedCollector
+    return PreparedCollector(**dependencies)
+
+
+def create_prepared_application(**dependencies):
+    """Explicit local opt-in; no production defaults, discovery or activation."""
+    from prepared_application import PreparedApplication
+    return PreparedApplication(**dependencies)
+
+
+def main(*, application=None) -> None:
+    if application is not None:
+        application.run()
+        return
+    from diagnostic_startup import DiagnosticStartup
+    from history_live_priority import cycle_started as history_cycle_started
+    try:
+        source_commit = require_source_commit()
     except RuntimeError:
-        LOG.critical("Guardian Battery startup refused: runtime source provenance unavailable")
+        LOG.critical("Guardian Battery startup refused: invalid build provenance")
         raise
+    LOG.info("Guardian Battery %s; source_commit=%s; diagnostic_engine=%s",
+             GUARDIAN_VERSION, source_commit, DIAGNOSTIC_ENGINE_VERSION)
+    SHARE_DIR.mkdir(parents=True, exist_ok=True)
     update_display_projection_startup("DISPLAY_INIT_01_MAIN_REACHED")
-    LOG.info("Guardian Battery %s; source_commit=%s; research_semantics=%s",
-             GUARDIAN_VERSION, SOURCE_COMMIT, RESEARCH_SEMANTICS_VERSION)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
     options = load_options()
+    soc_crash_detector = SocCrashDetector.from_options(options)
+    soc_crash_store = SocCrashEventStore(DEFAULT_SOC_CRASH_EVENTS)
+    soc_crash_pending = {}
+    soc_identity_resolver = None
     timing = CollectorTiming(
         float(options["poll_interval_seconds"]),
         float(options["cell_diagnostics_interval_seconds"]),
     )
+    # Block historical workers until acquisition has established its first idle slot.
+    history_cycle_started()
+    diagnostic_startup = None
+    diagnostic_ready = False
     config_server = start_config_server()
     LOG.info("Guardian Konfigurationsmenü auf Port 8099 gestartet")
+    history_preparation_worker = None
     display_projection_worker = None
     update_display_projection_startup("DISPLAY_INIT_02_DEPENDENCIES_READY")
     try:
@@ -1472,8 +1573,6 @@ def main() -> None:
     )
     rs485_writer = None
     rs485_pipeline = None
-    aggregate_backfill_worker = None
-    timeline_index_worker = None
     if bool(options.get("rs485_sniffer_enabled", False)):
         rs485_writer = Rs485EvidenceWriter(DEFAULT_RS485_HISTORY_DIR)
         rs485_pipeline = Rs485EvidencePipeline(rs485_writer)
@@ -1493,78 +1592,29 @@ def main() -> None:
                       position_history_path=DEFAULT_POSITION_HISTORY_FILE),
                   "identities": rs485_reader.identities(),
                   "history": rs485_writer.status() if rs485_writer else {},
-                  "diagnostic_aggregate_backfill": (
-                      aggregate_backfill_worker.status()
-                      if aggregate_backfill_worker else {"state": "not_started"}),
                   "collector_timing": timing.snapshot(),
+                  "diagnostic_startup": diagnostic_startup.status() if diagnostic_startup else {"state": "pending", "complete": False},
                   "hycube_projection": {
                       "live": (hycube_collector.status().get("projection", {})
                                if hycube_collector else {}),
                       "backfill": hycube_backfill.status() if hycube_backfill else {},
                   }})
         if rs485_reader else None)
-    cell_store = CellDiagnosticStore(CELL_DIAG_FILE, int(options["cell_diag_history_max_samples"]))
-    try:
-        current_backfill = CurrentConditionBackfill(
-            CELL_HISTORY_DIR, DEFAULT_POSITION_HISTORY_FILE
-        ).run(cell_store)
-        LOG.info(
-            "Current-Condition-Rebuild: discovered=%s scanned=%s skipped=%s "
-            "incremental=%s valid=%s merged=%s duplicates=%s identity_unknown=%s "
-            "invalid=%s errors=%s",
-            current_backfill["files_discovered"], current_backfill["files_scanned"],
-            current_backfill["files_skipped"], current_backfill["incremental_files"],
-            current_backfill["valid_samples"], current_backfill["samples_merged"],
-            current_backfill["duplicates"], current_backfill["identity_unknown"],
-            current_backfill["invalid_lines"], current_backfill["file_errors"],
-        )
-    except Exception as exc:
-        LOG.warning("Current-Condition-Rebuild fehlgeschlagen: %s", exc)
-    aggregate_store = DiagnosticAggregateStore(
-        DIAGNOSTIC_AGGREGATE_FILE,
-        CellDiagnosticStore.phases,
-        int(options.get("cell_diag_aggregate_retention_days", 730)),
-    )
-    if rs485_reader is not None:
-        restored_identities = restore_latest_identities(DEFAULT_RS485_HISTORY_DIR)
-        rs485_reader.restore_identities(restored_identities)
-        LOG.info("RS485 evidence lifecycle: writer start requested")
-        rs485_writer.start()
-        rs485_reader.start()
-    try:
-        timeline_index_worker = TimelineIndexWorker(
-            EVENT_FILE, validate_record=TechnicalEventSource.validate_index_record,
-            logger=LOG)
-        timeline_index_worker.start()
-    except Exception as exc:
-        timeline_index_worker = None
-        LOG.warning("Timeline index worker could not be started: %s", exc)
-    aggregate_backfill_worker = DiagnosticAggregateBackfillWorker(
-        DiagnosticAggregateBackfill(CELL_HISTORY_DIR, DEFAULT_POSITION_HISTORY_FILE),
-        aggregate_store, options, logger=LOG)
-    aggregate_backfill_worker.start()
-    while RUNNING and aggregate_backfill_worker.is_alive():
-        aggregate_backfill_worker.wait(0.1)
-    if not RUNNING:
-        if not aggregate_backfill_worker.stop():
-            LOG.warning("Diagnostic aggregate backfill did not stop within timeout")
-        if rs485_reader is not None:
-            rs485_reader.stop()
-        if rs485_writer is not None:
-            rs485_writer.stop()
-        if timeline_index_worker is not None:
-            timeline_index_worker.stop()
-        if display_projection_worker is not None:
-            display_projection_worker.stop()
-        console.close()
-        publisher.close()
-        return
+    # Empty private placeholders are never analyzed or persisted. The complete
+    # historical stores arrive through a single ownership handover after live
+    # acquisition has started; no raw source work occurs on this startup path.
+    cell_store = CellDiagnosticStore.in_memory(int(options["cell_diag_history_max_samples"]))
+    aggregate_store = DiagnosticAggregateStore.in_memory(
+        CellDiagnosticStore.phases, int(options.get("cell_diag_aggregate_retention_days", 730)))
+    diagnostic_startup = DiagnosticStartup(
+        CELL_DIAG_FILE, DIAGNOSTIC_AGGREGATE_FILE, CELL_HISTORY_DIR,
+        DEFAULT_POSITION_HISTORY_FILE, options)
+    diagnostic_startup.start()
     poll_deadline = PeriodicDeadline(float(options["poll_interval_seconds"]))
     cell_deadline = PeriodicDeadline(
         float(options["cell_diagnostics_interval_seconds"]))
     persistence_worker = DerivedPersistenceWorker(
         cell_store, aggregate_store, timing=timing)
-    persistence_worker.start()
     analysis_worker = CellAnalysisWorker(analyse_cell_snapshot)
     analysis_worker.start()
     derived_mqtt_sink = publisher.derived_sink()
@@ -1583,6 +1633,11 @@ def main() -> None:
     identity_resolution_log: dict[int, tuple[str, int | None]] = {}
     daily_worker = None
     canonical_phase_worker = None
+
+    if rs485_reader is not None:
+        restore_rs485_checkpoint(rs485_reader)
+        rs485_writer.start()
+        rs485_reader.start()
     try:
         daily_worker = DailyDiagnosticWorker(
             DailyDiagnosticSources(
@@ -1598,10 +1653,20 @@ def main() -> None:
     except Exception as exc:
         daily_worker = None
         LOG.warning("Daily diagnostics worker konnte nicht gestartet werden: %s", exc)
+    hycube_mqtt = HycubeMqttPublisher(publisher.client, publisher.prefix,
+        discovery_enabled=publisher.discovery_enabled,
+        interval_seconds=float(options.get("hycube_interval_seconds", 20)),
+        policy_interval_seconds=DEFAULT_POLICY_POLL_INTERVAL_SECONDS,
+        timeout_seconds=float(options.get("hycube_timeout_seconds", 0.8)))
+    publisher.hycube_mqtt = hycube_mqtt
+    try:
+        hycube_mqtt.discovery()
+    except Exception as exc:
+        LOG.warning("Hycube MQTT discovery failed: %s", type(exc).__name__)
     try:
         hycube_collector = collector_from_options(
             options, HYCUBE_HISTORY_DIR, HYCUBE_POLICY_HISTORY_DIR,
-            HYCUBE_PROJECTION_DIR)
+            HYCUBE_PROJECTION_DIR, observer=hycube_mqtt.observe)
         if hycube_collector is not None:
             hycube_collector.start()
             hycube_backfill = HycubeProjectionBackfill(
@@ -1630,8 +1695,25 @@ def main() -> None:
         LOG.warning("Canonical Phase v2 konnte nicht gestartet werden: %s",
                     type(exc).__name__)
     try:
+        history_preparation_worker = SelectedHistoryPreparation(SHARE_DIR)
+        configure_history_preparation(history_preparation_worker)
+        history_preparation_worker.start()
+    except Exception as exc:
+        LOG.warning("Selected history preparation unavailable: %s", type(exc).__name__)
+    try:
         while RUNNING:
             started = time.monotonic()
+            from history_live_priority import cycle_started as history_cycle_started, idle_until as history_idle_until
+            history_cycle_started()
+            if not diagnostic_ready:
+                initialized = diagnostic_startup.take_ready()
+                if initialized is not None:
+                    cell_store, aggregate_store = initialized
+                    persistence_worker.cell_store = cell_store
+                    persistence_worker.aggregate_store = aggregate_store
+                    persistence_worker.start()
+                    diagnostic_ready = True
+                    LOG.info("Diagnostic startup complete; live replay adopted")
             timing.cycle_started(time.time(), started)
             poll_deadline.consume(started)
             modules: list[Module] = []
@@ -1650,6 +1732,8 @@ def main() -> None:
                 modules = parse_pwr(raw, int(options["module_count"]))
                 for module in modules:
                     module.pwr_sample_at = pwr_sample_at
+                record_soc_crash_observations(modules, soc_crash_detector,
+                    soc_crash_store, soc_crash_pending, soc_identity_resolver)
                 if not modules:
                     (SHARE_DIR / "last_unparsed_pwr.txt").write_text(raw, encoding="utf-8")
                     status = "critical"
@@ -1749,59 +1833,57 @@ def main() -> None:
                         cell_deadline.next_deadline, skipped_slots)
                     try:
                         identity_started = time.monotonic()
-                        identity_stat = DEFAULT_POSITION_HISTORY_FILE.stat()
-                        identity_signature_before = (
-                            identity_stat.st_size, identity_stat.st_mtime_ns)
                         identity_resolver = DocumentedIdentityResolver.from_path(
                             DEFAULT_POSITION_HISTORY_FILE)
-                        identity_stat = DEFAULT_POSITION_HISTORY_FILE.stat()
-                        identity_signature_after = (
-                            identity_stat.st_size, identity_stat.st_mtime_ns)
                         identity_load_seconds = time.monotonic() - identity_started
                     except Exception as identity_exc:
                         identity_resolver = None
                         identity_load_seconds = time.monotonic() - identity_started
                         LOG.warning("Position History für Cell-Runde unklar: %s",
                                     identity_exc)
+                    # Reuse this existing documentary snapshot on later PWR frames.
+                    # No extra identity/history read is introduced by the detector.
+                    soc_identity_resolver = identity_resolver
                     acquired_samples = acquire_cell_round(
                         modules, console, identity_resolver, cell_history,
                         parse_bat_fn=parse_bat, timing=timing,
                         identity_resolution_base=identity_load_seconds)
-                    if (identity_resolver is not None
-                            and identity_signature_before == identity_signature_after):
-                        install_research_identity_snapshot(
-                            identity_resolver.snapshots, identity_signature_after)
-                    # Derived state follows durable append-only raw evidence. Its
-                    # expensive JSON serialization is handled by one coalescing
-                    # single-writer worker; Console ownership remains here.
-                    stage_started = time.monotonic(); cpu_started = time.thread_time()
-                    for sample in acquired_samples:
-                        cell_store.add(sample)
-                    timing.duration("cell_store_add", time.monotonic() - stage_started,
-                                    cpu_seconds=time.thread_time() - cpu_started)
-                    stage_started = time.monotonic(); cpu_started = time.thread_time()
-                    for sample in acquired_samples:
-                        aggregate_store.add(sample, options)
-                    timing.duration("aggregate_store_add", time.monotonic() - stage_started,
-                                    cpu_seconds=time.thread_time() - cpu_started)
-                    stage_started = time.monotonic(); cpu_started = time.thread_time()
-                    cell_payload = cell_store.persistence_payload()
-                    timing.duration("cell_persistence_payload_build",
-                                    time.monotonic() - stage_started,
-                                    cpu_seconds=time.thread_time() - cpu_started)
-                    stage_started = time.monotonic(); cpu_started = time.thread_time()
-                    aggregate_payload = aggregate_store.persistence_payload()
-                    timing.duration("aggregate_persistence_payload_build",
-                                    time.monotonic() - stage_started,
-                                    cpu_seconds=time.thread_time() - cpu_started)
-                    stage_started = time.monotonic()
-                    persistence_worker.submit(
-                        cell_payload, aggregate_payload)
-                    timing.duration("persistence_submit",
-                                    time.monotonic() - stage_started)
-                    if acquired_samples:
-                        analysis_source_sample_at = max(
-                            sample.timestamp for sample in acquired_samples)
+                    if not diagnostic_ready:
+                        diagnostic_startup.submit(acquired_samples, frontiers=cell_history.frontiers)
+                    else:
+                        # Derived state follows durable append-only raw evidence. Its
+                        # expensive JSON serialization is handled by one coalescing
+                        # single-writer worker; Console ownership remains here.
+                        stage_started = time.monotonic(); cpu_started = time.thread_time()
+                        for sample in acquired_samples:
+                            cell_store.add(sample)
+                        timing.duration("cell_store_add", time.monotonic() - stage_started,
+                                        cpu_seconds=time.thread_time() - cpu_started)
+                        stage_started = time.monotonic(); cpu_started = time.thread_time()
+                        for sample in acquired_samples:
+                            aggregate_store.add(sample, options)
+                        timing.duration("aggregate_store_add", time.monotonic() - stage_started,
+                                        cpu_seconds=time.thread_time() - cpu_started)
+                        stage_started = time.monotonic(); cpu_started = time.thread_time()
+                        cell_payload = cell_store.persistence_payload()
+                        timing.duration("cell_persistence_payload_build",
+                                        time.monotonic() - stage_started,
+                                        cpu_seconds=time.thread_time() - cpu_started)
+                        stage_started = time.monotonic(); cpu_started = time.thread_time()
+                        aggregate_payload = aggregate_store.persistence_payload()
+                        timing.duration("aggregate_persistence_payload_build",
+                                        time.monotonic() - stage_started,
+                                        cpu_seconds=time.thread_time() - cpu_started)
+                        stage_started = time.monotonic()
+                        diagnostic_startup.resume_sources.update(cell_history.frontiers)
+                        persistence_worker.submit(
+                            cell_payload, aggregate_payload,
+                            resume_context=diagnostic_startup.resume_context())
+                        timing.duration("persistence_submit",
+                                        time.monotonic() - stage_started)
+                        if acquired_samples:
+                            analysis_source_sample_at = max(
+                                sample.timestamp for sample in acquired_samples)
                     timing.cell_finished(time.monotonic() - cell_started)
                     # If this round crossed another cell slot, skip that missed
                     # slot instead of launching an immediate catch-up round.
@@ -1813,7 +1895,7 @@ def main() -> None:
                     current_mtime_ns = maintenance_log.path.stat().st_mtime_ns if maintenance_log.path.exists() else None
                     if current_mtime_ns != maintenance_mtime_ns:
                         maintenance_events = resolve_maintenance_event_identities(
-                            maintenance_log.read_all(), DEFAULT_POSITION_HISTORY_FILE
+                            MaintenanceRepository(maintenance_log).list(), DEFAULT_POSITION_HISTORY_FILE
                         )
                         maintenance_mtime_ns = current_mtime_ns
                 except Exception as exc:
@@ -1822,7 +1904,7 @@ def main() -> None:
                 timing.duration("maintenance_refresh",
                                 time.monotonic() - maintenance_started,
                                 cpu_seconds=time.thread_time() - maintenance_cpu)
-                if analysis_source_sample_at is not None:
+                if diagnostic_ready and analysis_source_sample_at is not None:
                     snapshot_started = time.monotonic()
                     snapshot_cpu = time.thread_time()
                     analysis_generation += 1
@@ -1983,60 +2065,26 @@ def main() -> None:
             # former permanent drift and also avoids an immediate catch-up poll.
             if poll_deadline.due():
                 poll_deadline.consume()
+            history_idle_until(time.monotonic()+poll_deadline.delay())
             time.sleep(poll_deadline.delay())
     finally:
-        if timeline_index_worker is not None:
-            try:
-                if not timeline_index_worker.stop():
-                    LOG.warning("Timeline index worker did not stop within timeout")
-            except Exception as exc:
-                LOG.warning("Timeline index worker stop failed: %s", exc)
-        if canonical_phase_worker is not None:
-            try:
-                if not canonical_phase_worker.stop():
-                    LOG.warning("Canonical Phase v2 did not stop within timeout")
-            except Exception as exc:
-                LOG.warning("Canonical Phase v2 stop failed: %s", exc)
-        if display_projection_worker is not None:
-            try:
-                if not display_projection_worker.stop():
-                    LOG.warning("Display History Projection did not stop within timeout")
-            except Exception as exc:
-                LOG.warning("Display History Projection stop failed: %s", exc)
-        try:
-            if not derived_mqtt_worker.stop():
-                LOG.warning("Derived MQTT worker did not stop within timeout")
-        except Exception as exc:
-            LOG.warning("Derived MQTT worker stop failed: %s", exc)
-        try:
-            if not analysis_worker.stop():
-                LOG.warning("Cell analysis worker did not stop within timeout")
-        except Exception as exc:
-            LOG.warning("Cell analysis worker stop failed: %s", exc)
-        try:
-            if not persistence_worker.stop():
-                LOG.warning("Derived diagnostic persistence did not stop within timeout")
-        except Exception as exc:
-            LOG.warning("Derived diagnostic persistence stop failed: %s", exc)
-        if hycube_collector is not None:
-            try:
-                hycube_collector.stop()
-            except Exception as exc:
-                LOG.warning("Hycube read-only collector konnte nicht gestoppt werden: %s", exc)
-        if hycube_backfill is not None:
-            try:
-                hycube_backfill.stop()
-            except Exception as exc:
-                LOG.warning("Hycube projection backfill konnte nicht gestoppt werden: %s", exc)
-        if daily_worker is not None:
-            try:
-                daily_worker.stop()
-            except Exception as exc:
-                LOG.warning("Daily diagnostics worker konnte nicht gestoppt werden: %s", exc)
-        if rs485_reader is not None:
-            rs485_reader.stop()
-        if rs485_writer is not None:
-            rs485_writer.stop()
+        configure_history_preparation(None)
+        from derived_persistence import stop_background_workers
+        stop_background_workers([
+            ("diagnostic_startup", diagnostic_startup, 5.0),
+            ("history_preparation", history_preparation_worker, 5.0),
+            ("canonical_phase", canonical_phase_worker, 5.0),
+            ("display_projection", display_projection_worker, 5.0),
+            ("hycube_backfill", hycube_backfill, 5.0),
+            ("daily_diagnostics", daily_worker,
+             daily_worker.shutdown_timeout_seconds if daily_worker is not None else 0),
+            ("hycube_collector", hycube_collector, 5.0),
+            ("derived_mqtt", derived_mqtt_worker, 2.0),
+            ("cell_analysis", analysis_worker, 10.0),
+            ("diagnostic_persistence", persistence_worker, 10.0),
+        ], reader=rs485_reader, writer=rs485_writer, logger=LOG)
+        from history_live_priority import collector_stopped
+        collector_stopped()
         console.close()
         publisher.close()
 
