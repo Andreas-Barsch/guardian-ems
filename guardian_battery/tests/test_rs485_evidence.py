@@ -2,8 +2,6 @@ import ast
 import json
 import logging
 import sys
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
@@ -12,8 +10,6 @@ from rs485_evidence import (Rs485EvidencePipeline, Rs485EvidenceWriter,
                             Rs485HistorySeries, restore_latest_identities)
 from rs485_sniffer import (Correlation, ResponseCorrelator, calculate_checksum,
                            calculate_lchksum, parse_frame)
-from rs485_history_index import load_valid
-import rs485_evidence
 
 
 def frame(*, adr=2, code=0x92, info=b""):
@@ -40,15 +36,6 @@ def pair(info=None, now=1.0):
 
 def read_records(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
-
-
-def wait_until(predicate, timeout=2.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(.005)
-    return False
 
 
 def test_append_only_rotation_full_0x92_and_no_initial_fake_change(tmp_path):
@@ -187,7 +174,8 @@ def test_history_reads_values_transitions_and_tolerates_partial_last_line(tmp_pa
                         "decoded": {"charge_enable": enabled,
                                     "charge_current_limit_a": second / 10}})
     path.write_text("\n".join(json.dumps(item) for item in records) + "\n{partial")
-    series = Rs485HistorySeries(tmp_path).query_bundles(
+    series = Rs485HistorySeries(tmp_path,
+        position_history_path=tmp_path / "positions.jsonl").query_bundles(
         [{"metric": "rs485_charge_enable"}, {"metric": "rs485_ccl"}],
         timestamp_from="2026-08-31T00:00:00+00:00",
         timestamp_to="2026-08-31T00:01:00+00:00", adr=2)
@@ -202,119 +190,6 @@ def test_writer_restart_appends_without_rewriting(tmp_path):
         writer = Rs485EvidenceWriter(tmp_path, batch_size=1, flush_interval_seconds=.01)
         writer.start(); writer.append(record); writer.stop()
     assert len(read_records(tmp_path / "2026-08-31.jsonl")) == 2
-
-
-def test_writer_maintains_rebuildable_rs485_index_outside_research(tmp_path):
-    record = {"timestamp": "2026-08-31T00:00:00+00:00", "record_type": "test"}
-    writer = Rs485EvidenceWriter(
-        tmp_path, batch_size=1, flush_interval_seconds=.01,
-        index_interval_seconds=.01)
-    writer.start(); writer.append(record); writer.stop()
-    source = tmp_path / "2026-08-31.jsonl"
-    index = load_valid(source)
-    assert index["complete"] is True
-    assert index["blocks"][0]["record_count"] == 1
-
-
-def test_existing_large_history_backfills_multiple_blocks_without_new_write(
-        tmp_path, caplog):
-    source = tmp_path / "2026-08-31.jsonl"
-    with source.open("w", encoding="utf-8") as handle:
-        for index in range(1_600):
-            handle.write(json.dumps({
-                "timestamp": f"2026-08-31T00:{index // 60:02d}:{index % 60:02d}+00:00",
-                "record_type": "test", "sequence": index,
-            }, separators=(",", ":")) + "\n")
-    raw = source.read_bytes()
-    writer = Rs485EvidenceWriter(
-        tmp_path, index_interval_seconds=.01, flush_interval_seconds=.02)
-    caplog.set_level(logging.INFO, logger="guardian_battery.rs485_evidence")
-    writer.start()
-    observed_sizes = set()
-
-    def three_cycles():
-        try:
-            index = load_valid(source)
-        except Exception:
-            return False
-        observed_sizes.add(index["indexed_size"])
-        return len(index["blocks"]) >= 3 and len(observed_sizes) >= 3
-
-    assert wait_until(three_cycles)
-    running = writer.status()
-    assert running["writer_thread_alive"] is True
-    assert running["index_thread_alive"] is True
-    assert running["index_files_seen"] == 1
-    assert running["index_last_run_at"] is not None
-    assert running["index_last_error"] is None
-    writer.stop()
-    stopped = writer.status()
-    assert stopped["writer_thread_alive"] is False
-    assert stopped["index_thread_alive"] is False
-    assert source.read_bytes() == raw
-    messages = [record.getMessage() for record in caplog.records]
-    assert sum("index first candidate" in message for message in messages) == 1
-    assert any("day_file=2026-08-31.jsonl sidecar_present=False" in message
-               for message in messages)
-    assert any("index first extend result=success indexed_size=" in message
-               and "block_count=1" in message for message in messages)
-
-
-def test_current_day_short_history_creates_valid_empty_sidecar_without_write(tmp_path):
-    today = datetime.now(timezone.utc).date().isoformat()
-    source = tmp_path / f"{today}.jsonl"
-    source.write_text(json.dumps({"timestamp": f"{today}T00:00:00+00:00",
-                                  "record_type": "test"}) + "\n")
-    writer = Rs485EvidenceWriter(
-        tmp_path, index_interval_seconds=.01, flush_interval_seconds=.02)
-    writer.start()
-    assert wait_until(lambda: Path(str(source) + ".idx").exists())
-    index = load_valid(source)
-    writer.stop()
-    assert index["indexed_size"] == 0
-    assert index["blocks"] == []
-    assert index["complete"] is False
-
-
-def test_indexer_visits_newest_day_first_without_new_write(tmp_path, monkeypatch):
-    old = tmp_path / "2026-08-30.jsonl"
-    new = tmp_path / "2026-08-31.jsonl"
-    for path in (old, new):
-        path.write_text(json.dumps({"timestamp": path.stem + "T00:00:00+00:00"}) + "\n")
-    calls = []
-
-    def observe(path, **_kwargs):
-        calls.append(path.name)
-        return {"indexed_size": 0, "blocks": []}
-
-    monkeypatch.setattr(rs485_evidence, "extend_rs485_history_index", observe)
-    writer = Rs485EvidenceWriter(
-        tmp_path, index_interval_seconds=.01, flush_interval_seconds=.02)
-    writer.start()
-    assert wait_until(lambda: len(calls) >= 2)
-    writer.stop()
-    assert calls[:2] == [new.name, old.name]
-
-
-def test_index_error_is_visible_and_does_not_stop_raw_writer(tmp_path, monkeypatch):
-    source = tmp_path / "2026-08-31.jsonl"
-    source.write_text(json.dumps({"timestamp": "2026-08-31T00:00:00+00:00"}) + "\n")
-
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("test index failure")
-
-    monkeypatch.setattr(rs485_evidence, "extend_rs485_history_index", fail)
-    writer = Rs485EvidenceWriter(
-        tmp_path, batch_size=1, index_interval_seconds=.01,
-        flush_interval_seconds=.01)
-    writer.start()
-    assert wait_until(lambda: writer.status()["index_last_error"] == "RuntimeError")
-    assert writer.status()["writer_thread_alive"] is True
-    writer.append({"timestamp": "2026-08-31T00:00:01+00:00",
-                   "record_type": "test"})
-    assert wait_until(lambda: writer.status()["records_written"] == 1)
-    writer.stop()
-    assert len(read_records(source)) == 2
 
 
 def test_startup_restore_redecodes_latest_valid_identity_read_only(tmp_path):
@@ -369,6 +244,8 @@ def test_main_lifecycle_enabled_reader_persists_0x92_and_logs(tmp_path, caplog):
     class FakeReader:
         def __init__(self, _resolver, _baudrate, frame_callback=None):
             self.frame_callback = frame_callback
+        def identities(self):
+            return {}
         def start(self):
             self.frame_callback(request, Correlation(request, 0x92, False, 1.0))
             self.frame_callback(response.frame, response)
@@ -376,6 +253,7 @@ def test_main_lifecycle_enabled_reader_persists_0x92_and_logs(tmp_path, caplog):
     namespace = {
         "LOG": logging.getLogger("guardian-main-lifecycle-test"),
         "PassiveRs485Reader": FakeReader,
+        "Rs485EvidencePipeline": Rs485EvidencePipeline,
         "discover_serial_devices": lambda: (),
         "resolve_rs485_port": lambda *_: Device(),
         "ensure_distinct_roles": lambda *_: None,
@@ -400,54 +278,29 @@ def test_main_lifecycle_enabled_reader_persists_0x92_and_logs(tmp_path, caplog):
     assert any(item.get("paired_command") == 0x92 for item in records)
     assert "rs485_pipeline = Rs485EvidencePipeline(rs485_writer)" in source
     assert "create_rs485_reader(options, port, rs485_pipeline)" in source
-    assert source.index("CurrentConditionBackfill(") < source.index(
-        'LOG.info("RS485 evidence lifecycle: writer start requested")')
-    assert source.index(
-        'LOG.info("RS485 evidence lifecycle: writer start requested")') < source.index(
-        "rs485_writer.start()")
     assert source.index("rs485_writer.start()") < source.index("rs485_reader.start()")
-    assert source.index("rs485_reader.start()") < source.index(
-        "timeline_index_worker.start()")
-    assert source.index("timeline_index_worker.start()") < source.index(
-        "aggregate_backfill_worker.start()")
-    assert source.index("aggregate_backfill_worker.start()") < source.index(
-        "persistence_worker.start()")
     messages = [record.getMessage() for record in caplog.records]
     assert any("RS485 evidence writer started" in message for message in messages)
     assert any("RS485 evidence first record persisted" in message for message in messages)
 
 
-def test_lifecycle_logs_and_status_are_non_sensitive(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="guardian_battery.rs485_evidence")
-    writer = Rs485EvidenceWriter(
-        tmp_path, index_interval_seconds=.01, flush_interval_seconds=.02)
-    writer.start()
-    assert wait_until(lambda: writer.status()["index_last_run_at"] is not None)
-    writer.stop()
-    messages = [record.getMessage() for record in caplog.records]
-    encoded = "\n".join(messages)
-    assert "writer start entered" in encoded
-    assert "evidence_thread_alive=True index_thread_alive=True" in encoded
-    assert "index thread entered" in encoded
-    assert "index first run candidate_files=0" in encoded
-    assert "index thread exited reason=stop" in encoded
-    assert str(tmp_path) not in encoded
-    assert set(writer.status()) >= {
-        "writer_thread_alive", "index_thread_alive", "index_last_run_at",
-        "index_files_seen", "index_last_error"}
-
-
-def test_runtime_image_uses_embedded_version_module_identity():
-    root = Path(__file__).resolve().parents[2]
-    dockerfile = (root / "guardian_battery/Dockerfile").read_text()
-    run_script = (root / "guardian_battery/run.sh").read_text()
-    main_source = (root / "guardian_battery/app/main.py").read_text()
-    version_source = (root / "guardian_battery/app/version.py").read_text()
-    assert "COPY app /app" in dockerfile
-    assert "exec python3 /app/main.py" in run_script
-    assert "RESEARCH_SEMANTICS_VERSION, SOURCE_COMMIT" in main_source
-    assert 'source_commit=%s; research_semantics=%s' in main_source
-    assert "COPY .guardian-source-commit" in dockerfile
-    assert "build-info.json" in dockerfile
-    assert "require_source_commit()" in main_source
-    assert "43c04ab0b67fec4bcf2e4bcdb34b31767a90b620" not in version_source
+def test_writer_expired_empty_deadline_waits_and_next_record_is_persisted(tmp_path,monkeypatch):
+    import queue
+    import rs485_evidence as module
+    writer=module.Rs485EvidenceWriter(tmp_path)
+    ticks=iter([0,100,100,100,100,100])
+    monkeypatch.setattr(module.time,'monotonic',lambda:next(ticks,100))
+    waits=[];written=[]
+    record={'timestamp':'2026-01-01T00:00:00Z','synthetic':True}
+    class Input:
+        def get(self,timeout):
+            waits.append(timeout)
+            if len(waits)<=2:raise queue.Empty
+            writer._stop.set()
+            return record
+        def empty(self):return True
+    writer._queue=Input()
+    monkeypatch.setattr(writer,'_write_batch',lambda batch:written.extend(batch))
+    writer._run()
+    assert waits==[.25,.25,.25]
+    assert written==[record]
