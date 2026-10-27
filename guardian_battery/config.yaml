@@ -1,5 +1,5 @@
 name: Guardian Battery
-version: 0.8.1
+version: 0.9.11
 slug: guardian_battery
 description: Pylontech-US2000C-Monitoring mit Health Engine, MQTT und Dashboard-Unterstützung.
 
@@ -31,18 +31,19 @@ options:
   rs485_sniffer_port: auto
   rs485_sniffer_baudrate: 115200
   rs485_sniffer_stale_seconds: 600
-  poll_interval_seconds: 10
+  poll_interval_seconds: 20
+  soc_crash_gap_pp: 5.0
+  soc_crash_window_seconds: 300
   module_count: 6
   command: pwr
   command_timeout_seconds: 5
   hycube_evidence_enabled: false
   hycube_base_url: ""
-  hycube_interval_seconds: 5
+  hycube_interval_seconds: 20
   hycube_timeout_seconds: 0.8
   mqtt_topic_prefix: guardian
   publish_discovery: true
   guardian_research_api_token: ""
-  reference_capacity_ah: ""
 
   warning_cell_delta_mv: 30
   critical_cell_delta_mv: 80
@@ -124,6 +125,9 @@ options:
   cell_diag_curve_max_rms_mad_mv: 5
 
 schema:
+  soc_crash_gap_pp: float(0.01,100)
+  soc_crash_drop_pp: float(0.01,100)?
+  soc_crash_window_seconds: int(1,86400)
   serial_port: str
   baudrate: int
   rs485_sniffer_enabled: bool
@@ -141,7 +145,6 @@ schema:
   mqtt_topic_prefix: str
   publish_discovery: bool
   guardian_research_api_token: str
-  reference_capacity_ah: str
 
   warning_cell_delta_mv: int(1,1000)
   critical_cell_delta_mv: int(1,1000)
