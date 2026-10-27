@@ -492,9 +492,11 @@ class PassiveRs485Reader:
         frame_callback=None, read_size: int = 4096, read_timeout: float = 0.25,
         reconnect_delays: tuple[float, ...] = (1.0, 2.0, 5.0, 30.0),
         max_adr_states: int = 256, wall_clock=time.time, monotonic=time.monotonic,
+        identity_store=None,
     ):
         if read_size <= 0 or max_adr_states <= 0 or not reconnect_delays:
             raise ValueError("reader limits must be positive")
+        self.identity_store = identity_store
         self.port_resolver = port_resolver
         self.baudrate = int(baudrate)
         self.serial_opener = serial_opener
@@ -533,7 +535,8 @@ class PassiveRs485Reader:
         with self._lock:
             return {**self._status,
                     "latest_management_adrs": sorted(self.latest_management_by_adr),
-                    "identity_state_entries": len(self.latest_identity_by_adr)}
+                    "identity_state_entries": len(self.latest_identity_by_adr),
+                    "identity_store_error": self.identity_store.error if self.identity_store else None}
 
     def management(self) -> dict[int, dict]:
         with self._lock:
@@ -572,7 +575,7 @@ class PassiveRs485Reader:
         self._thread.start()
         return True
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 5.0) -> bool:
         self._stop.set()
         connection = self._connection
         if connection is not None:
@@ -583,9 +586,12 @@ class PassiveRs485Reader:
         thread = self._thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout)
+        if thread and thread.is_alive():
+            return False
         self._thread = None
         self._connection = None
         self._set(state="disabled")
+        return True
 
     def _process(self, chunk: bytes) -> None:
         if not chunk:
@@ -654,23 +660,20 @@ class PassiveRs485Reader:
                     decoded = decode_0x93(correlation)
                     if decoded.get("decoder_supported"):
                         self._set(decoded_valid_0x93=self.status()["decoded_valid_0x93"] + 1)
-                        value = {
-                            "adr": frame.adr, "serial_string": decoded["serial_string"],
-                            "serial_raw": decoded["serial_raw"], "timestamp": now,
-                            "decode_source": "live_0x93", "identity_known": True,
-                            "identity_currently_confirmed": True,
-                            "quality": {"evidence_level": "observation",
-                                        "identity_source": "direct_0x93",
-                                        "causality": "not_determined"},
-                        }
+                        from rs485_identity_store import observed_identity, apply_observation
+                        value = observed_identity(frame, decoded, now)
                         with self._lock:
                             previous = self.latest_identity_by_adr.get(frame.adr)
-                            if frame.adr not in self.latest_identity_by_adr \
-                                    and len(self.latest_identity_by_adr) >= self.max_adr_states:
+                            apply_observation(self.latest_identity_by_adr, frame.adr, value)
+                            if len(self.latest_identity_by_adr) > self.max_adr_states:
+                                from rs485_identity_store import observation_time
                                 oldest = min(self.latest_identity_by_adr,
-                                             key=lambda adr: self.latest_identity_by_adr[adr]["timestamp"])
+                                    key=lambda adr: observation_time(self.latest_identity_by_adr[adr]['timestamp']))
                                 del self.latest_identity_by_adr[oldest]
-                            self.latest_identity_by_adr[frame.adr] = value
+                            checkpoint = dict(self.latest_identity_by_adr)
+                        if self.identity_store is not None:
+                            if not self.identity_store.save(checkpoint) and self.identity_store.error:
+                                LOG.error("RS485 identity persistence: %s", self.identity_store.error)
                         if previous is None or previous.get("serial_string") != value["serial_string"]:
                             if previous is None:
                                 LOG.info("RS485 identity observed: adr=%02X serial=%s",

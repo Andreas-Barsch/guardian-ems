@@ -1,5 +1,6 @@
 """Append-only passive RS485 evidence and read-only history projection."""
 from __future__ import annotations
+from history_live_priority import raw_priority
 
 import hashlib
 import json
@@ -7,15 +8,17 @@ import logging
 import queue
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from history_append_receipt import before_append, after_append
+from history_block_index import bounded_ranges, range_lines, extend_open_index
+from research_budget import check_budget
 from rs485_sniffer import (Correlation, ParsedFrame, decode_0x47, decode_0x92,
                            decode_0x93, decode_0x93_info)
 from position_history import (DEFAULT_POSITION_HISTORY_FILE, PositionHistoryError,
                               PositionHistoryLog,
                               documented_position_at)
-from rs485_history_index import extend as extend_rs485_history_index
 
 
 LOG = logging.getLogger("guardian_battery.rs485_evidence")
@@ -109,56 +112,34 @@ class Rs485EvidenceWriter:
     """Bounded asynchronous JSONL writer; overload never blocks acquisition."""
 
     def __init__(self, directory=DEFAULT_RS485_HISTORY_DIR, *, queue_size=4096,
-                 batch_size=64, flush_interval_seconds=1.0,
-                 index_interval_seconds=0.25):
+                 batch_size=64, flush_interval_seconds=1.0, append_backend=None):
+        self.append_backend = append_backend
         self.directory = Path(directory)
         self.batch_size = int(batch_size)
         self.flush_interval_seconds = float(flush_interval_seconds)
         self._queue = queue.Queue(maxsize=int(queue_size))
+        from history_live_priority import register_raw_writer
+        register_raw_writer(self)
         self._stop = threading.Event()
         self._thread = None
-        self._index_thread = None
-        self._index_stop = threading.Event()
-        self._index_wakeup = threading.Event()
-        self.index_interval_seconds = float(index_interval_seconds)
         self.records_written = 0
         self.bytes_written = 0
         self.dropped_records = 0
         self.last_error = None
-        self.index_last_run_at = None
-        self.index_files_seen = 0
-        self.index_last_error = None
         self._first_record_logged = False
-        self._index_first_run_logged = False
-        self._index_first_candidate_logged = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
             return False
-        LOG.info(
-            "RS485 evidence lifecycle: writer start entered "
-            "directory_contract=%s directory_matches_contract=%s",
-            DEFAULT_RS485_HISTORY_DIR,
-            self.directory == DEFAULT_RS485_HISTORY_DIR,
-        )
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
         except Exception:
             LOG.exception("RS485 evidence writer error: path=%s", self.directory)
             raise
         self._stop.clear()
-        self._index_stop.clear()
         self._thread = threading.Thread(target=self._run, name="guardian-rs485-evidence", daemon=True)
         self._thread.start()
-        self._index_thread = threading.Thread(
-            target=self._index_thread_main, name="guardian-rs485-index", daemon=True)
-        self._index_thread.start()
-        LOG.info(
-            "RS485 evidence writer started: directory_contract=%s "
-            "evidence_thread_alive=%s index_thread_alive=%s",
-            DEFAULT_RS485_HISTORY_DIR, self._thread.is_alive(),
-            self._index_thread.is_alive(),
-        )
+        LOG.info("RS485 evidence writer started: path=%s", self.directory)
         return True
 
     def append(self, record: dict) -> bool:
@@ -172,25 +153,18 @@ class Rs485EvidenceWriter:
     def status(self):
         return {"queue_depth": self._queue.qsize(), "queue_capacity": self._queue.maxsize,
                 "records_written": self.records_written, "bytes_written": self.bytes_written,
-                "dropped_records": self.dropped_records, "last_error": self.last_error,
-                "writer_thread_alive": bool(self._thread and self._thread.is_alive()),
-                "index_thread_alive": bool(
-                    self._index_thread and self._index_thread.is_alive()),
-                "index_last_run_at": self.index_last_run_at,
-                "index_files_seen": self.index_files_seen,
-                "index_last_error": self.index_last_error}
+                "dropped_records": self.dropped_records, "last_error": self.last_error}
 
     def stop(self, timeout=5.0):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout)
-        self._index_stop.set()
-        self._index_wakeup.set()
-        if self._index_thread:
-            self._index_thread.join(timeout)
+        if self._thread and self._thread.is_alive():
+            return False
         self._thread = None
-        self._index_thread = None
+        return self.last_error is None
 
+    @raw_priority
     def _write_batch(self, batch):
         groups = {}
         for record in batch:
@@ -198,6 +172,21 @@ class Rs485EvidenceWriter:
             groups.setdefault(day, []).append(record)
         for day, records in groups.items():
             path = self.directory / f"{day}.jsonl"
+            if self.append_backend is not None:
+                # Preserve records exactly; receipt blocks never split a line.
+                block=b'';count=0
+                for record in records:
+                    line=(json.dumps(record,ensure_ascii=False,separators=(",", ":"))+"\n").encode('utf-8')
+                    if len(line)>65536:raise ValueError('RS485 record exceeds receipt block budget')
+                    if block and len(block)+len(line)>65536:
+                        self.append_backend.append(path,block)
+                        self.records_written+=count;self.bytes_written+=len(block);block=b'';count=0
+                    block+=line;count+=1
+                if block:
+                    self.append_backend.append(path,block)
+                    self.records_written+=count;self.bytes_written+=len(block)
+                continue
+            generation=before_append(path)
             with path.open("a", encoding="utf-8") as handle:
                 for record in records:
                     line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -205,17 +194,25 @@ class Rs485EvidenceWriter:
                     self.records_written += 1
                     self.bytes_written += len(line.encode("utf-8"))
                 handle.flush()
-                self._index_wakeup.set()
                 if records and not self._first_record_logged:
                     LOG.info("RS485 evidence first record persisted: path=%s type=%s",
                              path, records[0].get("record_type", "unknown"))
                     self._first_record_logged = True
+            after_append(path,generation)
+            if self._queue.empty():
+                try:
+                    extend_open_index(path, timestamp_field="timestamp", iso_timestamp=True)
+                except (OSError, ValueError):
+                    LOG.warning("RS485 optional block index unavailable: %s", path.name)
 
     def _run(self):
         batch = []
         deadline = time.monotonic() + self.flush_interval_seconds
-        while not self._stop.is_set() or not self._queue.empty():
-            timeout = max(0.0, deadline - time.monotonic())
+        while not self._stop.is_set() or not self._queue.empty() or batch:
+            # An expired batch deadline has no work to flush when the batch is
+            # empty. Block for input instead of repeatedly raising queue.Empty
+            # with timeout=0 and starving acquisition/derivation under the GIL.
+            timeout = 0.25 if not batch else max(0.0, deadline - time.monotonic())
             try:
                 batch.append(self._queue.get(timeout=min(timeout, 0.25)))
             except queue.Empty:
@@ -231,70 +228,6 @@ class Rs485EvidenceWriter:
                 batch.clear()
                 deadline = time.monotonic() + self.flush_interval_seconds
 
-    def _index_thread_main(self):
-        try:
-            self._run_indexer()
-        except Exception as exc:
-            self.index_last_error = type(exc).__name__
-            LOG.error(
-                "RS485 evidence lifecycle: index thread exited reason=error "
-                "exception_type=%s", type(exc).__name__)
-
-    def _run_indexer(self):
-        """Advance disposable indexes in bounded units outside Research reads."""
-        LOG.info("RS485 evidence lifecycle: index thread entered")
-        while True:
-            progressed = False
-            today = datetime.now(timezone.utc).date().isoformat()
-            try:
-                candidates = sorted(self.directory.glob("*.jsonl"), reverse=True)
-                self.index_last_run_at = time.time()
-                self.index_files_seen = len(candidates)
-                if not self._index_first_run_logged:
-                    LOG.info(
-                        "RS485 evidence lifecycle: index first run candidate_files=%s",
-                        len(candidates))
-                    self._index_first_run_logged = True
-                for path in candidates:
-                    before = None
-                    sidecar = Path(str(path) + ".idx")
-                    first_candidate = not self._index_first_candidate_logged
-                    if first_candidate:
-                        LOG.info(
-                            "RS485 evidence lifecycle: index first candidate "
-                            "day_file=%s sidecar_present=%s",
-                            path.name, sidecar.exists())
-                        self._index_first_candidate_logged = True
-                    try:
-                        before = sidecar.stat().st_size
-                    except OSError:
-                        pass
-                    result = extend_rs485_history_index(
-                        path, max_blocks=1, close_source=path.stem < today)
-                    self.index_last_error = None
-                    if first_candidate:
-                        LOG.info(
-                            "RS485 evidence lifecycle: index first extend result=success "
-                            "indexed_size=%s block_count=%s",
-                            int(result.get("indexed_size", 0)),
-                            len(result.get("blocks", ())))
-                    try:
-                        progressed = progressed or sidecar.stat().st_size != before
-                    except OSError:
-                        pass
-                    if progressed:
-                        break
-            except Exception as exc:
-                # Raw evidence remains authoritative; index maintenance is best effort.
-                self.index_last_error = type(exc).__name__
-                LOG.warning("RS485 history index maintenance failed", exc_info=True)
-            if self._index_stop.is_set():
-                LOG.info("RS485 evidence lifecycle: index thread exited reason=stop")
-                break
-            self._index_wakeup.wait(
-                self.index_interval_seconds if progressed else self.flush_interval_seconds)
-            self._index_wakeup.clear()
-
 
 class Rs485EvidencePipeline:
     """Convert accepted passive frames into evidence without identity guesses."""
@@ -302,7 +235,9 @@ class Rs485EvidencePipeline:
     def __init__(self, writer: Rs485EvidenceWriter, *, wall_clock=time.time,
                  fast_frame_interval_seconds=300.0,
                  position_history_path=DEFAULT_POSITION_HISTORY_FILE,
-                 max_identity_states=256):
+                 max_identity_states=256, position_reader=None):
+        self.position_reader = position_reader
+        self.identity_provider = None
         self.writer = writer
         self.wall_clock = wall_clock
         self.fast_frame_interval_seconds = float(fast_frame_interval_seconds)
@@ -314,6 +249,17 @@ class Rs485EvidencePipeline:
         self.max_identity_states = int(max_identity_states)
         if self.max_identity_states <= 0:
             raise ValueError("max_identity_states must be positive")
+
+    def restore_identities(self,identities):
+        """Seed confirmed prepared evidence before acquisition starts."""
+        if self._latest_identity:raise ValueError('identity pipeline already active')
+        if len(identities)>self.max_identity_states:raise ValueError('identity restore state budget')
+        for adr,value in identities.items():
+            timestamp=value['timestamp']
+            if isinstance(timestamp,str):
+                timestamp=datetime.fromisoformat(timestamp.replace('Z','+00:00')).timestamp()
+            self._latest_identity[int(adr)]={**value,'timestamp':timestamp,
+                'identity_currently_confirmed':False}
 
     def __call__(self, frame: ParsedFrame, correlation: Correlation):
         now = float(self.wall_clock())
@@ -340,7 +286,7 @@ class Rs485EvidencePipeline:
             decoded = decode_0x92(correlation)
         elif command == 0x93 and not frame.is_request:
             decoded = decode_0x93(correlation)
-        if command == 0x93 and decoded and decoded.get("decoder_supported"):
+        if self.identity_provider is None and command == 0x93 and decoded and decoded.get("decoder_supported"):
             if (frame.adr not in self._latest_identity
                     and len(self._latest_identity) >= self.max_identity_states):
                 oldest = min(self._latest_identity,
@@ -351,12 +297,20 @@ class Rs485EvidencePipeline:
                 "serial_raw": decoded["serial_raw"],
                 "timestamp": now, "decode_source": "stored_decoded",
             }
-        identity = self._latest_identity.get(frame.adr)
+        identity = (self.identity_provider() if self.identity_provider is not None
+                    else self._latest_identity).get(frame.adr)
         position = snapshot_id = None
         if identity is not None:
             try:
-                position, snapshot_id = documented_position_at(
-                    self.position_history_path, identity["serial_string"], _iso(now))
+                if self.position_reader is None:
+                    position, snapshot_id = documented_position_at(
+                        self.position_history_path, identity["serial_string"], _iso(now))
+                else:
+                    snapshot = self.position_reader.at(_iso(now))
+                    if snapshot is not None:
+                        position = next((int(p) for p, serial in snapshot.positions.items()
+                                         if serial == identity['serial_string']), None)
+                        snapshot_id = snapshot.position_history_id
             except Exception:
                 position = snapshot_id = None
         reference = hashlib.sha256(frame.raw_frame).hexdigest()
@@ -401,7 +355,9 @@ class Rs485HistorySeries:
     """Read projected management values from rotated evidence JSONL."""
 
     def __init__(self, directory=DEFAULT_RS485_HISTORY_DIR, max_points=6000, *,
-                 position_history_path=DEFAULT_POSITION_HISTORY_FILE):
+                 position_history_path=DEFAULT_POSITION_HISTORY_FILE, window_backend=None, identity_backend=None):
+        self.window_backend = window_backend
+        self.identity_backend = identity_backend
         self.directory = Path(directory)
         self.max_points = int(max_points)
         self.position_history_path = Path(position_history_path)
@@ -417,7 +373,7 @@ class Rs485HistorySeries:
 
     @staticmethod
     def _position_at(snapshots, serial, timestamp):
-        matches = [item for item in snapshots if item.effective_at <= timestamp]
+        matches = [item for item in snapshots if datetime.fromisoformat(item.effective_at).timestamp() <= datetime.fromisoformat(timestamp.replace("Z","+00:00")).timestamp()]
         if not matches:
             return None, None
         snapshot = matches[-1]
@@ -427,50 +383,86 @@ class Rs485HistorySeries:
                 snapshot.position_history_id)
 
     def query_bundles(self, requests, *, timestamp_from, timestamp_to,
-                      module_number=None, adr=None):
-        if (module_number is None) == (adr is None):
+                      module_number=None, module_numbers=None, adr=None, timing=None):
+        if module_numbers is not None:
+            if module_number is not None or adr is not None or not module_numbers:
+                raise ValueError("module_numbers cannot be mixed with module_number or adr")
+            modules = tuple(module_numbers)
+        else:
+            modules = (module_number,) if module_number is not None else ()
+        if (not modules) == (adr is None):
             raise ValueError("exactly one of module_number or adr is required")
-        start = datetime.fromisoformat(timestamp_from.replace("Z", "+00:00"))
-        end = datetime.fromisoformat(timestamp_to.replace("Z", "+00:00"))
+        if self.window_backend is not None:
+            from indexed_rs485_projection import project_rs485
+            return project_rs485(self,requests,timestamp_from=timestamp_from,timestamp_to=timestamp_to,
+                modules=modules,module_number=module_number,module_numbers=module_numbers,adr=adr,timing=timing)
+        start = datetime.fromisoformat(timestamp_from.replace("Z", "+00:00")).astimezone(timezone.utc)
+        end = datetime.fromisoformat(timestamp_to.replace("Z", "+00:00")).astimezone(timezone.utc)
         points = {item["metric"]: [] for item in requests}
         identities = {}
-        try:
-            snapshots = sorted(PositionHistoryLog(self.position_history_path).read_all(),
-                               key=lambda item: (item.effective_at, item.created_at,
-                                                 item.position_history_id))
-        except PositionHistoryError:
-            snapshots = []
-        paths = sorted(path for path in self.directory.glob("*.jsonl")
-                       if path.stem <= end.date().isoformat())
+        snapshots = None
+        paths = [self.directory / f"{(start.date()+timedelta(days=i)).isoformat()}.jsonl"
+                 for i in range((end.date()-start.date()).days+1)]
+        started = time.perf_counter(); cpu = time.thread_time()
+        opened = decoded_count = bytes_read = unresolved = invalid = validation_bytes = 0
         for path in paths:
+            check_budget()
             if path.exists():
-                with path.open(encoding="utf-8") as handle:
-                    for line in handle:
+                opened += 1
+                ranges, _seek = bounded_ranges(path, start.timestamp(), end.timestamp(),
+                    timestamp_field="timestamp", iso_timestamp=True)
+                validation_bytes += _seek.get("validation_bytes",0)
+                with path.open("rb") as handle:
+                    for line in range_lines(handle, ranges, unindexed_offset=_seek["unindexed_offset"]):
+                        check_budget()
+                        bytes_read += len(line); decoded_count += 1
+                        checkpoint=_seek.get("identity_checkpoints",{}).get(str(handle.tell()-len(line)))
+                        if checkpoint is not None:
+                            identities={int(adr):value for adr,value in checkpoint.items()}
                         try:
                             record = json.loads(line)
                         except json.JSONDecodeError:
-                            continue  # includes a crash-truncated final line
+                            invalid += 1
+                            continue  # explicitly accounted partial evidence
                         if record.get("record_type") != "frame":
                             continue
                         timestamp = record.get("timestamp")
-                        if not timestamp or timestamp > timestamp_to:
+                        try:
+                            epoch = datetime.fromisoformat(timestamp.replace("Z","+00:00")).timestamp()
+                        except (ValueError, TypeError, AttributeError):
+                            invalid += 1
+                            continue
+                        if epoch > end.timestamp():
                             continue
                         serial = self._serial_decode(record)
                         if serial is not None:
                             identities[int(record["adr"])] = serial
                             continue
-                        if (timestamp < timestamp_from
+                        if (epoch < start.timestamp()
                                 or record.get("paired_command") not in (None, 0x92)):
                             continue
                         record_adr = int(record.get("adr", -1))
                         identity = identities.get(record_adr)
                         position = snapshot_id = None
-                        if module_number is not None:
+                        if record.get("physical_serial"):
+                            identity = {"serial_string": record["physical_serial"],
+                                        "decode_source": record.get("identity_decode_source", "stored_record")}
+                        if modules:
                             if identity is None:
+                                unresolved += 1
                                 continue
-                            position, snapshot_id = self._position_at(
-                                snapshots, identity["serial_string"], timestamp)
-                            if position != module_number:
+                            if record.get("position") is not None and record.get("position_history_id") and record.get("physical_serial"):
+                                position,snapshot_id=record["position"],record["position_history_id"]
+                            else:
+                                if snapshots is None:
+                                    if self.position_history_path.exists() and self.position_history_path.stat().st_size>65536:
+                                        from research_budget import ResearchQueryError
+                                        raise ResearchQueryError("identity_checkpoint_required","Bounded historical position checkpoint unavailable",503)
+                                    try:
+                                        snapshots=sorted(PositionHistoryLog(self.position_history_path).read_all(),key=lambda item:(item.effective_at,item.created_at,item.position_history_id))
+                                    except PositionHistoryError: snapshots=[]
+                                position, snapshot_id = self._position_at(snapshots, identity["serial_string"], timestamp)
+                            if position not in modules:
                                 continue
                         elif adr != record_adr:
                             continue
@@ -485,11 +477,20 @@ class Rs485HistorySeries:
                                     "identity_resolved": position is not None,
                                     "physical_serial": identity["serial_string"] if identity else None,
                                     "position": position,
+                                    **({"module_number": position} if module_numbers else {}),
                                     "position_history_id": snapshot_id,
                                     "identity_decode_source": identity.get("decode_source")
                                     if identity else None})
+        if timing:
+            timing.record("rs485_read_decode_identity", time.perf_counter()-started, time.thread_time()-cpu)
+            timing.counts(rs485_files=opened, rs485_bytes=bytes_read,
+                          rs485_decodes=decoded_count, rs485_unresolved=unresolved,
+                          rs485_invalid_records=invalid, rs485_index_validation_bytes=validation_bytes)
         return [{"metric": request["metric"],
                  **({"module_number": module_number} if module_number is not None else {"adr": adr}),
+                 "identity_unresolved_records": unresolved,
+                 "invalid_records":invalid,
+                 "quality":"partial_data" if invalid else "partial_identity" if unresolved else "observed",
                  "state_semantics": {"0": "STOP REQUEST", "1": "ENABLED"}
                  if request["metric"].endswith("_enable") else None,
                  "points": self._downsample(
@@ -497,16 +498,22 @@ class Rs485HistorySeries:
                 for request in requests]
 
     def _downsample(self, points, preserve_transitions=False):
-        if preserve_transitions and points:
-            changes = [points[0]]
-            for point in points[1:]:
-                if point["value"] != changes[-1]["value"]:
-                    changes.append(point)
-            if changes[-1] is not points[-1]:
-                changes.append(points[-1])
-            return changes
-        if len(points) <= self.max_points:
-            return points
-        stride = max(1, len(points) // (self.max_points - 2))
-        selected = [points[0], *points[1:-1:stride], points[-1]]
-        return selected[:self.max_points - 1] + [points[-1]] if selected[-1] is not points[-1] else selected
+        from history_series import _ExtremaCollector
+        groups = {}
+        for point in points:
+            key = (point.get("physical_serial"), point.get("position_history_id"),
+                   point.get("adr"), point.get("module_number"))
+            groups.setdefault(key, []).append(point)
+        result = []
+        for items in groups.values():
+            items.sort(key=lambda point: datetime.fromisoformat(point["timestamp"]).timestamp())
+            if not items:
+                continue
+            first = datetime.fromisoformat(items[0]["timestamp"]).timestamp()
+            last = datetime.fromisoformat(items[-1]["timestamp"]).timestamp()
+            collector = _ExtremaCollector(max(4, self.max_points//max(1, len(groups))),
+                                          first, last, preserve_changes=preserve_transitions)
+            for point in items:
+                collector.add({**point, "_epoch": datetime.fromisoformat(point["timestamp"]).timestamp()})
+            result.extend(collector.points())
+        return sorted(result, key=lambda point: datetime.fromisoformat(point["timestamp"]).timestamp())

@@ -12,6 +12,7 @@ _MANAGEMENT_IDENTITY_FIELDS = (
     "serial_string", "serial_raw", "decode_source", "identity_source",
     "identity_resolved", "identity_known", "identity_currently_confirmed",
     "physical_serial", "position", "position_history_id",
+    "identity_observed_at", "identity_evidence", "identity_displaced_adrs", "identity_previous_serial",
 )
 
 
@@ -26,11 +27,18 @@ def _iso(timestamp: float | str | datetime) -> str:
 def resolve_rs485_identity(adr: int, serial_string: str, serial_raw: str,
                            timestamp: float | str | datetime, *,
                            decode_source: str,
-                           position_history_path: Path | str = DEFAULT_POSITION_HISTORY_FILE) -> dict:
+                           position_history_path: Path | str = DEFAULT_POSITION_HISTORY_FILE,
+                           position_reader=None) -> dict:
     """Resolve one direct ADR/serial observation without deriving a position."""
     try:
-        position, snapshot_id = documented_position_at(
-            position_history_path, serial_string, _iso(timestamp))
+        if position_reader is None:
+            position, snapshot_id = documented_position_at(
+                position_history_path, serial_string, _iso(timestamp))
+        else:
+            snapshot = position_reader.at(_iso(timestamp))
+            position = next((int(p) for p, serial in snapshot.positions.items()
+                             if serial == serial_string), None) if snapshot else None
+            snapshot_id = snapshot.position_history_id if snapshot else None
     except (PositionHistoryError, ValueError, OSError):
         position = snapshot_id = None
     return {
@@ -51,7 +59,7 @@ def resolve_rs485_identity(adr: int, serial_string: str, serial_raw: str,
 
 def project_current_management(management: dict[int, dict], identities: dict[int, dict], *,
                                position_history_path: Path | str = DEFAULT_POSITION_HISTORY_FILE,
-                               at: float | str | datetime | None = None) -> dict[int, dict]:
+                               at: float | str | datetime | None = None, position_reader=None) -> dict[int, dict]:
     """Attach current physical identity while preserving every management value."""
     target = at if at is not None else datetime.now(timezone.utc)
     result = {}
@@ -61,7 +69,7 @@ def project_current_management(management: dict[int, dict], identities: dict[int
             resolved = resolve_rs485_identity(
                 int(adr), identity["serial_string"], identity["serial_raw"], target,
                 decode_source=identity.get("decode_source", "stored_decoded"),
-                position_history_path=position_history_path)
+                position_history_path=position_history_path, position_reader=position_reader)
             resolved["identity_known"] = bool(identity.get("identity_known", True))
             resolved["identity_currently_confirmed"] = bool(
                 identity.get("identity_currently_confirmed", False))
@@ -77,6 +85,13 @@ def project_current_management(management: dict[int, dict], identities: dict[int
                             "identity_source": "unresolved",
                             "causality": "not_determined"},
             }
+        resolved['identity_observed_at'] = identity.get('timestamp') if identity else None
+        resolved['identity_evidence'] = ({
+            'source_frame_reference': identity.get('source_frame_reference'),
+            **identity.get('evidence', {}),
+        } if identity else None)
+        resolved['identity_displaced_adrs'] = identity.get('displaced_adrs', []) if identity else []
+        resolved['identity_previous_serial'] = identity.get('previous_serial') if identity else None
         # Raw frames remain in the reader/evidence layer. The management
         # projection is an MQTT/API DTO and must be JSON-serializable.
         projected = {key: value for key, value in values.items()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,9 +11,6 @@ from typing import Any, Iterable, Mapping
 
 from maintenance_service import MaintenanceService
 from maintenance_ui import maintenance_deep_link
-from timeline_index import (SMALL_SOURCE_MAX_BYTES, TimelineIndexError,
-                            index_path as timeline_index_path,
-                            select_ranges as select_timeline_ranges)
 
 
 DEFAULT_TECHNICAL_EVENT_FILE = Path("/share/guardian_battery/events.jsonl")
@@ -67,6 +65,8 @@ class TechnicalEventSource:
         self.path = Path(path)
 
     def read(self, check=None) -> list[TimelineEvent]:
+        if check is not None:
+            return self._read_checked(check)
         if not self.path.exists():
             return []
         try:
@@ -75,8 +75,6 @@ class TechnicalEventSource:
             raise TechnicalHistoryError("technical event history is unavailable") from exc
         events: list[TimelineEvent] = []
         for line_number, line in enumerate(lines, 1):
-            if check is not None:
-                check()
             if not line.strip():
                 continue
             try:
@@ -88,78 +86,43 @@ class TechnicalEventSource:
             events.append(self._project(raw, line_number))
         return events
 
-    @staticmethod
-    def validate_index_record(raw: Any) -> None:
-        TechnicalEventSource._project(raw, 1)
+    def _read_checked(self, check):
+        """Read only the initial byte extent; close immediately on a deadline.
 
-    def read_range(self, timestamp_from: str, timestamp_to: str, *, check=None,
-                   profile=None) -> tuple[list[TimelineEvent], bool]:
-        """Read a bounded event range, or report that indexed evidence is unavailable."""
-        if profile is not None:
-            profile.update({"read_mode": "not_observed", "index_present": False,
-                "index_valid": False, "selected_blocks": 0, "selected_bytes": 0,
-                "raw_bytes_read": 0, "records_inspected": 0,
-                "full_json_decode_count": 0, "open_suffix_bytes": 0,
-                "files_discovered": 1, "files_opened": 0, "bytes_read": 0,
-                "samples_returned": 0})
+        A blocking OS read or one JSON record is not preemptible. Check on
+        both sides; never create an abandoned background reader on timeout.
+        """
+        check()
         if not self.path.exists():
-            return [], True
-        start_epoch = datetime.fromisoformat(timestamp_from).timestamp()
-        end_epoch = datetime.fromisoformat(timestamp_to).timestamp()
-        size = self.path.stat().st_size
-        try:
-            ranges, selection = select_timeline_ranges(self.path, start_epoch, end_epoch)
-        except TimelineIndexError:
-            present = timeline_index_path(self.path).is_file()
-            if profile is not None:
-                profile["index_present"] = present
-            if size > SMALL_SOURCE_MAX_BYTES:
-                return [], False
-            ranges = [{"byte_start": 0, "byte_end": size, "line_start": 1,
-                       "open_suffix": True}]
-            selection = {"index_present": present, "index_valid": False,
-                "selected_blocks": 0, "selected_bytes": size,
-                "open_suffix_bytes": size, "read_mode": "bounded_small_source"}
-        if profile is not None:
-            profile.update(selection)
+            return []
         events = []
         try:
-            with self.path.open("rb") as handle:
-                if profile is not None:
-                    profile["files_opened"] = 1
-                for selected_range in ranges:
-                    range_start = selected_range["byte_start"]
-                    range_end = selected_range["byte_end"]
-                    line_number = selected_range["line_start"]
-                    handle.seek(range_start)
-                    while handle.tell() < range_end:
-                        if check is not None:
-                            check()
-                        raw_line = handle.readline(range_end - handle.tell())
-                        if not raw_line:
-                            break
-                        if profile is not None:
-                            profile["raw_bytes_read"] += len(raw_line)
-                            profile["bytes_read"] += len(raw_line)
-                            profile["records_inspected"] += int(bool(raw_line.strip()))
-                        if not raw_line.strip():
-                            line_number += 1
-                            continue
-                        if not raw_line.endswith(b"\n") and handle.tell() >= self.path.stat().st_size:
-                            continue
-                        raw = json.loads(raw_line)
-                        if profile is not None:
-                            profile["full_json_decode_count"] += 1
-                        event = self._project(raw, line_number)
-                        line_number += 1
-                        epoch = datetime.fromisoformat(event.timestamp).timestamp()
-                        if start_epoch <= epoch <= end_epoch:
-                            events.append(event)
-        except (OSError, json.JSONDecodeError) as exc:
+            with self.path.open("rb", buffering=256 * 1024) as handle:
+                remaining = os.fstat(handle.fileno()).st_size
+                line_number = 0
+                while remaining:
+                    check()
+                    line = handle.readline(remaining)
+                    check()
+                    if not line:
+                        raise TechnicalHistoryError("technical event history changed during read")
+                    remaining -= len(line)
+                    line_number += 1
+                    if not line.strip():
+                        continue
+                    try:
+                        raw = json.loads(line.decode("utf-8"))
+                    except json.JSONDecodeError as exc:
+                        raise TechnicalHistoryError(
+                            f"technical event line {line_number}: malformed JSON"
+                        ) from exc
+                    check()
+                    events.append(self._project(raw, line_number))
+                    check()
+        except OSError as exc:
             raise TechnicalHistoryError("technical event history is unavailable") from exc
-        if profile is not None:
-            profile["samples_returned"] = len(events)
-        return events, True
+        check()
+        return events
 
     @staticmethod
     def _project(raw: Any, line_number: int) -> TimelineEvent:
@@ -219,6 +182,24 @@ class TechnicalEventSource:
         )
 
 
+
+def project_maintenance(item, serial=None):
+    """Existing timeline DTO projection, shared by bounded preparation."""
+    return TimelineEvent(
+        event_type="maintenance", timestamp=item.occurred_at,
+        title=item.title, summary=item.description or item.action_taken or "",
+        source="maintenance_events", projection_key=f"maintenance:{item.maintenance_event_id}",
+        deep_link=maintenance_deep_link(item.maintenance_event_id),
+        maintenance_event_id=item.maintenance_event_id,
+        module_number=item.module_number, module_serial=serial,
+        cell_number=item.cell_number,
+        status="inactive" if item.archived_at else "active",
+        metadata={"category": item.category, "created_at": item.created_at,
+                  "updated_at": item.updated_at, "archived_at": item.archived_at,
+                  "revision": item.revision},
+    )
+
+
 class TimelineService:
     def __init__(self, maintenance: MaintenanceService, technical: TechnicalEventSource,
                  position_history=None):
@@ -241,19 +222,7 @@ class TimelineService:
                 serial = item.module_serial
                 if serial is None and item.module_number is not None and self.position_history is not None:
                     serial = self.position_history.position_at(item.module_number, item.occurred_at)
-                events.append(TimelineEvent(
-                    event_type="maintenance", timestamp=item.occurred_at,
-                    title=item.title, summary=item.description or item.action_taken or "",
-                    source="maintenance_events", projection_key=f"maintenance:{item.maintenance_event_id}",
-                    deep_link=maintenance_deep_link(item.maintenance_event_id),
-                    maintenance_event_id=item.maintenance_event_id,
-                    module_number=item.module_number, module_serial=serial,
-                    cell_number=item.cell_number,
-                    status="inactive" if item.archived_at else "active",
-                    metadata={"category": item.category, "created_at": item.created_at,
-                              "updated_at": item.updated_at, "archived_at": item.archived_at,
-                              "revision": item.revision},
-                ))
+                events.append(project_maintenance(item, serial))
         if selected & TECHNICAL_EVENT_TYPES:
             events.extend(event for event in self.technical.read() if event.event_type in selected)
         filtered = [event for event in events if
