@@ -1,5 +1,6 @@
 """Bounded background scheduling for deterministic daily diagnostics."""
 from __future__ import annotations
+from work_scheduler import checkpoint as _work_checkpoint
 
 import json
 import logging
@@ -57,7 +58,9 @@ class DailyDiagnosticWorker:
         run_callable: Callable[..., Mapping[str, Any]] = run_daily_diagnostic,
         probe_callable: Callable[..., Any] = probe_daily_inputs,
         logger: logging.Logger | None = None,
+        scheduler=None,
     ):
+        self.scheduler = scheduler
         self.sources = sources
         self.output_root = Path(output_root)
         self.timezone_name = timezone_name
@@ -167,9 +170,13 @@ class DailyDiagnosticWorker:
 
     def _loop(self) -> None:
         while not self.stop_event.is_set():
+            _work_checkpoint()
             try:
                 self.check_once()
             except Exception as exc:  # outer worker-cycle isolation
+                from work_scheduler import WorkCancelled
+                if self.stop_event.is_set() and isinstance(exc.__cause__,WorkCancelled):
+                    break
                 self.log.exception("Daily diagnostics worker cycle failed: %s", exc)
                 self.state["last_error"] = {
                     "kind": "worker_exception", "message": str(exc),
@@ -215,6 +222,7 @@ class DailyDiagnosticWorker:
         candidates = self.state.setdefault("stability_candidates", {})
         invalid = []
         for text in list(candidates):
+            _work_checkpoint()
             try:
                 parsed = date.fromisoformat(text)
             except ValueError:
@@ -224,6 +232,7 @@ class DailyDiagnosticWorker:
                 candidates.pop(text, None)
         stale = []
         for text in self.state.setdefault("stale_dates", []):
+            _work_checkpoint()
             try:
                 if date.fromisoformat(text) < today:
                     stale.append(text)
@@ -259,7 +268,48 @@ class DailyDiagnosticWorker:
                           diagnostic_date, fingerprint[:12])
         return True
 
+    def _prepared_guard(self,text):
+        backend=self.sources.input_backend
+        from daily_diagnostics import guardian_day,_component_manifest,DAILY_SCHEMA_VERSION,CORE_VERSION
+        if backend is None:
+            # Include the exact legacy source selection, including the 14-day
+            # risk horizon and non-date filenames. Stat-only; no raw content scan.
+            from history_append_receipt import signature
+            from daily_diagnostics import _source_files
+            inputs = {}
+            day = date.fromisoformat(text)
+            for field, offsets in (('cell_history_root', range(14)),
+                                   ('rs485_history_root', range(1))):
+                root = getattr(self.sources, field)
+                if root is None: continue
+                selected = set()
+                catalog = _source_files(root)
+                for offset in offsets:
+                    window = guardian_day(day - timedelta(days=offset), self.timezone_name)
+                    selected.update(_source_files(root, window, catalog))
+                inputs[field] = {str(path): signature(path) for path in sorted(selected)}
+            for field in ('position_history_path', 'config_history_path', 'maintenance_history_path'):
+                root = getattr(self.sources, field)
+                inputs[field] = {str(path): signature(path) for path in _source_files(root)}
+        elif hasattr(backend, 'confirmed_guard'):
+            inputs = backend.confirmed_guard(guardian_day(text,self.timezone_name))
+        else: return None
+        return json.loads(json.dumps({'inputs':inputs,
+                'timezone':self.timezone_name,'schema':DAILY_SCHEMA_VERSION,'core':CORE_VERSION,
+                'components':_component_manifest(self.bms_parameters)},sort_keys=True,allow_nan=False))
+
+    def _remember_prepared(self,text,guard,result):
+        self.state.setdefault('prepared_inputs',{})[text]={'guard':guard,
+            'input_fingerprint':result.get('input_fingerprint'),'daily_result_id':result.get('daily_result_id')}
+
     def check_once(self) -> list[dict[str, Any]]:
+        if self.scheduler is not None:
+            from local_work_composition import worker_call
+            return worker_call(self.scheduler, "daily", self._check_once,
+                               cancelled=self.stop_event.is_set)
+        return self._check_once()
+
+    def _check_once(self) -> list[dict[str, Any]]:
         """Perform one bounded scheduling cycle; exposed for deterministic tests."""
         now = self.clock()
         if now.tzinfo is None:
@@ -271,6 +321,7 @@ class DailyDiagnosticWorker:
         initial = not bool(self.state.get("catchup", {}).get("initial_complete"))
         limit = self.initial_catchup_days if initial else 1
         runnable = []
+        prepared_guards = {}
         recent = {today - timedelta(days=age)
                   for age in range(1, self.late_data_days + 1)}
         source_catalog = build_source_catalog(self.sources)
@@ -285,6 +336,7 @@ class DailyDiagnosticWorker:
                 self.automatic_history_days)
             self._startup_cycle_logged = True
         for candidate in eligible:
+            _work_checkpoint()
             text = candidate.isoformat()
             index = self._index(text)
             # Missing days in the bounded automatic horizon and recently indexed
@@ -292,6 +344,15 @@ class DailyDiagnosticWorker:
             if index is not None and candidate not in recent:
                 continue
             try:
+                guard=self._prepared_guard(text)
+                cached=self.state.get('prepared_inputs',{}).get(text)
+                if (guard is not None and index is not None and cached is not None
+                        and cached=={'guard':guard,'input_fingerprint':index.get('input_fingerprint'),
+                                     'daily_result_id':index.get('daily_result_id')}):
+                    self.state.setdefault('stability_candidates',{}).pop(text,None)
+                    if text in self.state.setdefault('stale_dates',[]):self.state['stale_dates'].remove(text)
+                    continue
+                prepared_guards[text]=guard
                 probe = self.probe_callable(
                     text, self.sources, timezone_name=self.timezone_name,
                     bms_parameters=self.bms_parameters,
@@ -310,6 +371,8 @@ class DailyDiagnosticWorker:
                 continue
             fingerprint = probe.input_fingerprint
             if index is not None and index.get("input_fingerprint") == fingerprint:
+                if guard is not None and self._prepared_guard(text)==guard:
+                    self._remember_prepared(text,guard,index)
                 self.state.setdefault("stability_candidates", {}).pop(text, None)
                 if text in self.state.setdefault("stale_dates", []):
                     self.state["stale_dates"].remove(text)
@@ -342,6 +405,7 @@ class DailyDiagnosticWorker:
                 (item for item in runnable if item != yesterday), reverse=True)
         results = []
         for text in runnable[:limit]:
+            _work_checkpoint()
             if self.stop_event.is_set():
                 break
             attempt = str(uuid.uuid4())
@@ -377,6 +441,13 @@ class DailyDiagnosticWorker:
                     if result.get("overall_status") == "partial":
                         self.state["last_partial_date"] = text
                     self.state["last_error"] = None
+                    guard=prepared_guards.get(text)
+                    if guard is not None:
+                        try:
+                            if self._prepared_guard(text)==guard:
+                                self._remember_prepared(text,guard,result)
+                        except (SourceChangedError,ValueError,OSError):
+                            pass  # Result remains as-of; no unproven warm reuse.
                     self.state.setdefault("stability_candidates", {}).pop(text, None)
                     if text in self.state.setdefault("stale_dates", []):
                         self.state["stale_dates"].remove(text)
@@ -410,6 +481,9 @@ class DailyDiagnosticWorker:
 
         if initial and (results or not self.state.get("stability_candidates")):
             self.state.setdefault("catchup", {})["initial_complete"] = True
+        eligible_text={item.isoformat() for item in eligible}
+        self.state['prepared_inputs']={key:value for key,value in self.state.get('prepared_inputs',{}).items()
+                                       if key in eligible_text}
         self.state["last_check_at"] = _iso(now)
         self._save_state()
         return results

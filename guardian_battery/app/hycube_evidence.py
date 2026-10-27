@@ -1,5 +1,8 @@
 """Isolated read-only Hycube system-evidence acquisition."""
 from __future__ import annotations
+from history_live_priority import raw_priority
+
+from research_budget import ResearchQueryError, check_budget
 
 import hashlib
 import ipaddress
@@ -13,7 +16,7 @@ import urllib.request
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from math import isfinite
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -21,7 +24,8 @@ from urllib.parse import urlsplit, urlunsplit
 from hycube_projection import (DEFAULT_HYCUBE_PROJECTION_DIR,
                                HycubeProjectionStore, parse_projection_record,
                                projection_plan)
-from history_block_index import index_signature, selected_ranges
+from history_block_index import index_signature, bounded_ranges, range_lines, extend_open_index
+from history_append_receipt import before_append, after_append
 
 
 LOG = logging.getLogger("guardian_battery.hycube_evidence")
@@ -48,45 +52,43 @@ class _CapacitySourceError(ValueError):
         self.counts = counts
 
 
-def _read_capacity_source(path, offset, is_projection, byte_ranges=None):
+def _read_capacity_source(path, offset, is_projection, byte_ranges=None, *, unindexed_offset=None):
     items = []; lines = parsed = invalid = byte_count = 0
     with Path(path).open("rb") as handle:
         ranges = byte_ranges if byte_ranges is not None else ((offset, Path(path).stat().st_size),)
-        for range_start, range_end in ranges:
-            handle.seek(range_start)
-            while handle.tell() < range_end:
-                raw_line = handle.readline()
-                if not raw_line:
-                    break
-                byte_count += len(raw_line)
-                if not raw_line.strip():
+        ranges=[(max(offset,lo),hi) for lo,hi in ranges if hi>offset]
+        for raw_line in range_lines(handle,ranges,unindexed_offset=unindexed_offset):
+            byte_count += len(raw_line)
+            if not raw_line.strip():
+                continue
+            lines += 1
+            try:
+                record = json.loads(raw_line)
+                parsed += 1
+                if is_projection:
+                    item, epoch, capacity = parse_projection_record(record)
+                    items.append((item, epoch, capacity))
                     continue
-                lines += 1
-                try:
-                    record = json.loads(raw_line)
-                    parsed += 1
-                    if is_projection:
-                        item, epoch, capacity = parse_projection_record(record)
-                        items.append((item, epoch, capacity))
-                        continue
-                except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
-                    raise _CapacitySourceError(str(exc), {
-                        "bytes": byte_count, "lines": lines, "parsed": parsed,
-                        "invalid": invalid}) from exc
-                expected = "hycube_history_projection" if is_projection else "hycube_system_observation"
-                if record.get("record_type") != expected:
-                    if is_projection:
-                        raise ValueError("projection record type mismatch")
-                    invalid += 1
-                    continue
-                received_at = record.get("received_at")
-                capacity = record.get("battery_capacity" if is_projection else "BatteryCapacity")
-                if received_at is None or isinstance(capacity, bool) or not isinstance(capacity, (int, float)):
-                    if is_projection:
-                        raise ValueError("invalid projection record")
-                    continue
-                epoch = datetime.fromisoformat(received_at).timestamp()
-                items.append((record, epoch, float(capacity)))
+            except ResearchQueryError:
+                raise
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+                raise _CapacitySourceError(str(exc), {
+                    "bytes": byte_count, "lines": lines, "parsed": parsed,
+                    "invalid": invalid}) from exc
+            expected = "hycube_history_projection" if is_projection else "hycube_system_observation"
+            if record.get("record_type") != expected:
+                if is_projection:
+                    raise ValueError("projection record type mismatch")
+                invalid += 1
+                continue
+            received_at = record.get("received_at")
+            capacity = record.get("battery_capacity" if is_projection else "BatteryCapacity")
+            if received_at is None or isinstance(capacity, bool) or not isinstance(capacity, (int, float)):
+                if is_projection:
+                    raise ValueError("invalid projection record")
+                continue
+            epoch = datetime.fromisoformat(received_at).timestamp()
+            items.append((record, epoch, float(capacity)))
     return items, {"bytes": byte_count, "lines": lines, "parsed": parsed,
                    "invalid": invalid}
 
@@ -116,7 +118,9 @@ class HycubeBatteryCapacitySeries:
     """Read-only, time-windowed projection of observed BatteryCapacity."""
 
     def __init__(self, directory=DEFAULT_HYCUBE_HISTORY_DIR, cache_size=24,
-                 projection_directory=None):
+                 projection_directory=None, *, window_backend=None):
+        check_budget()
+        self.window_backend = window_backend
         self.directory = Path(directory)
         self.projection_directory = Path(
             projection_directory if projection_directory is not None
@@ -127,24 +131,32 @@ class HycubeBatteryCapacitySeries:
         self._cache = OrderedDict()
 
     def _paths(self, start, end):
+        check_budget()
         if not self.directory.exists():
             return []
         first = datetime.fromisoformat(start).astimezone(timezone.utc).date().isoformat()
         last = datetime.fromisoformat(end).astimezone(timezone.utc).date().isoformat()
-        return sorted(path for path in self.directory.glob("*.jsonl")
-                      if first <= path.stem <= last)
+        first_day=datetime.fromisoformat(first).date();last_day=datetime.fromisoformat(last).date()
+        return [path for day in range((last_day-first_day).days+1)
+                if (path:=self.directory/f"{first_day+timedelta(days=day)}.jsonl").is_file()]
 
     def query(self, *, timestamp_from, timestamp_to, max_points=850, timing=None):
+        check_budget()
+        if self.window_backend is not None:
+            from indexed_series_projection import project_hycube
+            return project_hycube(self.window_backend,timestamp_from=timestamp_from,
+                timestamp_to=timestamp_to,max_points=max_points,timing=timing)
         from history_series import _ExtremaCollector
 
         stage = timing.stage if timing else nullcontext
         with stage("hycube_discovery"):
-            considered = len(list(self.directory.glob("*.jsonl"))) if self.directory.exists() else 0
             paths = self._paths(timestamp_from, timestamp_to)
+            considered = len(paths)
         try:
             plans = [projection_plan(path, self.projection_directory) for path in paths]
             signature_items = []
             for plan in plans:
+                check_budget()
                 files = [plan["raw_path"]]
                 if plan["mode"] != "raw":
                     files.extend((plan["projection_path"], plan["metadata_path"]))
@@ -179,6 +191,7 @@ class HycubeBatteryCapacitySeries:
         try:
           with nullcontext():
             for plan in plans:
+                check_budget()
                 sources = []
                 if plan["mode"] == "raw":
                     raw_fallback_files += 1
@@ -195,19 +208,16 @@ class HycubeBatteryCapacitySeries:
                 day_items = []
                 try:
                     for path, offset, is_projection in sources:
+                        check_budget()
                         source_wall = time.monotonic(); source_cpu = time.thread_time()
-                        ranges = None
+                        ranges, seek = bounded_ranges(path,start_epoch,end_epoch,
+                            timestamp_field="received_at",iso_timestamp=True)
                         if is_projection:
-                            try:
-                                ranges, seek = selected_ranges(
-                                    path, start_epoch, end_epoch,
-                                    timestamp_field="received_at", iso_timestamp=True)
-                                projection_seek_modes.add(seek["mode"])
-                                projection_skipped_bytes += seek["skipped_bytes"]
-                            except Exception:
-                                projection_seek_modes.add("full_scan")
+                            projection_seek_modes.add(seek["mode"])
+                            projection_skipped_bytes += seek["skipped_bytes"]
                         items, counts = _read_capacity_source(
-                            path, offset, is_projection, byte_ranges=ranges)
+                            path, offset, is_projection, byte_ranges=ranges,
+                            unindexed_offset=seek["unindexed_offset"])
                         elapsed_wall = time.monotonic() - source_wall
                         elapsed_cpu = time.thread_time() - source_cpu
                         if is_projection:
@@ -223,6 +233,8 @@ class HycubeBatteryCapacitySeries:
                         opened += 1; bytes_read += counts["bytes"]; raw_lines += counts["lines"]
                         parsed += counts["parsed"]; invalid_records += counts["invalid"]
                         day_items.extend(items)
+                except ResearchQueryError:
+                    raise
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError,
                         ValueError) as projection_error:
                     if plan["mode"] == "raw":
@@ -247,7 +259,10 @@ class HycubeBatteryCapacitySeries:
                     projection_files -= 1
                     fallback_reasons.append("projection_read_error")
                     source_wall = time.monotonic(); source_cpu = time.thread_time()
-                    items, counts = _read_capacity_source(plan["raw_path"], 0, False)
+                    ranges,seek=bounded_ranges(plan["raw_path"],start_epoch,end_epoch,
+                        timestamp_field="received_at",iso_timestamp=True)
+                    items, counts = _read_capacity_source(plan["raw_path"], 0, False,
+                        byte_ranges=ranges,unindexed_offset=seek["unindexed_offset"])
                     raw_wall += time.monotonic() - source_wall
                     raw_cpu += time.thread_time() - source_cpu
                     raw_bytes += counts["bytes"]; raw_source_lines += counts["lines"]
@@ -256,6 +271,7 @@ class HycubeBatteryCapacitySeries:
                     parsed += counts["parsed"]; invalid_records += counts["invalid"]
                     day_items = items
                 for record, epoch, capacity in day_items:
+                    check_budget()
                     if not start_epoch <= epoch <= end_epoch:
                         continue
                     collector.add({
@@ -277,6 +293,8 @@ class HycubeBatteryCapacitySeries:
                         projection_records += 1
                     else:
                         raw_records_in_window += 1
+        except ResearchQueryError:
+            raise
         except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
             if timing:
                 if projection_attempts:
@@ -309,6 +327,7 @@ class HycubeBatteryCapacitySeries:
         projection_points_after = sum(
             point.get("_history_storage") == "projection" for point in points)
         for point in points:
+            check_budget()
             point.pop("_history_storage", None)
         if timing:
             if projection_attempts:
@@ -366,6 +385,7 @@ class HycubeBatteryCapacitySeries:
                   "cache_hit": False}
         self._cache[key] = result
         while len(self._cache) > self.cache_size:
+            check_budget()
             self._cache.popitem(last=False)
         return result
 
@@ -430,10 +450,27 @@ def _policy_values(record):
 class HycubePolicyHistory:
     """Append-only policy observations and time-valid read projection."""
 
-    def __init__(self, directory=DEFAULT_HYCUBE_POLICY_HISTORY_DIR):
+    def __init__(self, directory=DEFAULT_HYCUBE_POLICY_HISTORY_DIR, *, append_backend=None, window_backend=None):
         self.directory = Path(directory)
+        self.append_backend, self.window_backend = append_backend, window_backend
+        self._valid_cache_loaded = False
+        self._valid_cache = None
+        self._valid_cache_head = None
+        if append_backend is not None and window_backend is None:
+            raise ValueError('confirmed policy writer requires prepared latest-policy reader')
 
     def _latest_valid(self):
+        if self.window_backend is not None:
+            registry = self.window_backend.consumer.registry
+            head = registry._head()['hash']
+            if self._valid_cache_loaded and head == self._valid_cache_head:
+                return self._valid_cache
+            value = self.window_backend.latest_valid(require_current=True)
+            if registry._head()['hash'] != head:
+                from projection_repository import Unavailable
+                raise Unavailable('policy registry changed during latest-value selection')
+            self._valid_cache,self._valid_cache_loaded,self._valid_cache_head = value,True,head
+            return value
         if not self.directory.exists():
             return None
         for path in sorted(self.directory.glob("*.jsonl"), reverse=True):
@@ -448,6 +485,7 @@ class HycubePolicyHistory:
                 continue
         return None
 
+    @raw_priority
     def append(self, record: dict) -> Path:
         item = dict(record)
         previous = self._latest_valid() if item.get("parse_quality") == "complete" else None
@@ -458,17 +496,42 @@ class HycubePolicyHistory:
         timestamp = datetime.fromisoformat(item["observed_at"])
         path = self.directory / f"{timestamp.astimezone(timezone.utc).date().isoformat()}.jsonl"
         self.directory.mkdir(parents=True, exist_ok=True)
+        if self.append_backend is not None:
+            receipt = self.append_backend.append(path,(json.dumps(item,ensure_ascii=False,separators=(',',':'))+'\n').encode('utf-8'))
+            # Normal live appends need no consumer catch-up before the next poll.
+            # A fresh process still requires an explicitly current prepared tip.
+            if self._valid_cache_loaded:
+                from raw_registry import encoded,hashed
+                if item.get('parse_quality') == 'complete':self._valid_cache = dict(item)
+                self._valid_cache_head = hashed(encoded(receipt))
+            return path
+        generation=before_append(path)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        after_append(path,generation)
+        try:
+            # Only this live writer owns the current day's sidecar. At most
+            # one block is caught up per existing policy append; no extra poll.
+            extend_open_index(path,timestamp_field="observed_at",iso_timestamp=True,
+                              allow_partial=True, max_bytes=256*1024)
+        except (OSError,ValueError):
+            pass  # Index availability must never prevent persisted observation.
         return path
 
     def query(self, *, timestamp_from, timestamp_to, timing=None):
+        check_budget()
+        if self.window_backend is not None:
+            return self.window_backend.query(timestamp_from=timestamp_from,timestamp_to=timestamp_to,timing=timing)
         if not self.directory.exists():
             if timing:
                 timing.counts(policy_files=0, policy_records=0)
             return []
+        from policy_index_reader import indexed_policy_records
+        indexed=indexed_policy_records(self.directory,timestamp_from,timestamp_to,timing)
+        if indexed is not None:
+            return self.segments(indexed,timestamp_from,timestamp_to,True)
         start = datetime.fromisoformat(timestamp_from).timestamp()
         end = datetime.fromisoformat(timestamp_to).timestamp()
         first_day = datetime.fromtimestamp(start, timezone.utc).date().isoformat()
@@ -476,11 +539,14 @@ class HycubePolicyHistory:
         last_before = None; parsed_records = 0
         changes = []
         try:
-            all_paths = sorted(self.directory.glob("*.jsonl"))
+            from history_live_priority import bounded_metadata_paths
+            all_paths = bounded_metadata_paths(self.directory)
             paths = [path for path in all_paths if first_day <= path.stem <= last_day]
             for path in reversed([path for path in all_paths if path.stem < first_day]):
+                check_budget()
                 lines = path.read_text(encoding="utf-8").splitlines()
                 for line in reversed(lines):
+                    check_budget()
                     record = json.loads(line)
                     parsed_records += 1
                     if (record.get("record_type") == "hycube_policy_observation"
@@ -490,8 +556,10 @@ class HycubePolicyHistory:
                 if last_before:
                     break
             for path in paths:
+                check_budget()
                 with path.open(encoding="utf-8") as handle:
                     for line in handle:
+                        check_budget()
                         if not line.strip():
                             continue
                         record = json.loads(line)
@@ -504,14 +572,21 @@ class HycubePolicyHistory:
                             last_before = record
                         elif epoch <= end and record.get("policy_changed", True):
                             changes.append(record)
+        except ResearchQueryError:
+            raise
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise HycubeHistoryError(f"Hycube policy history is invalid: {exc}") from exc
         records = ([last_before] if last_before else []) + changes
         if timing:
             timing.counts(policy_files=len(all_paths), policy_records=parsed_records)
+        return self.segments(records,timestamp_from,timestamp_to,last_before is not None)
+
+    @staticmethod
+    def segments(records,timestamp_from,timestamp_to,has_previous):
         segments = []
         for index, record in enumerate(records):
-            segment_from = timestamp_from if index == 0 and last_before else record["observed_at"]
+            check_budget()
+            segment_from = timestamp_from if index == 0 and has_previous else record["observed_at"]
             segment_to = (records[index + 1]["observed_at"] if index + 1 < len(records)
                           else timestamp_to)
             segments.append({
@@ -623,21 +698,33 @@ def observation(raw: bytes, received_at: float, http_status: int = 200) -> dict:
 class HycubeEvidenceWriter:
     """Append successful observations to UTC daily JSONL without rewriting."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, *, append_backend=None):
         self.directory = Path(directory)
+        self.append_backend = append_backend
 
+    @raw_priority
     def append_with_receipt(self, record: dict):
         timestamp = datetime.fromisoformat(record["received_at"])
         path = self.directory / f"{timestamp.astimezone(timezone.utc).date().isoformat()}.jsonl"
         self.directory.mkdir(parents=True, exist_ok=True)
         line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
             "utf-8")
+        if self.append_backend is not None:
+            receipt=self.append_backend.append(path,line)
+            return HycubeWriteReceipt(path,receipt['start'],receipt['end'])
+        generation=before_append(path)
         with path.open("ab") as handle:
             start_offset = handle.tell()
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
             end_offset = handle.tell()
+        after_append(path,generation)
+        count=getattr(self,"_index_count",0)+1
+        self._index_count=count
+        if count==1 or count%256==0:
+            try: extend_open_index(path,timestamp_field="received_at",iso_timestamp=True)
+            except (OSError,ValueError): pass
         return HycubeWriteReceipt(path, start_offset, end_offset)
 
     def append(self, record: dict) -> Path:
@@ -662,7 +749,8 @@ class HycubeCollector:
     def __init__(self, base_url, writer, *, policy_writer=None, projection_store=None,
                  interval_seconds=5.0, policy_interval_seconds=DEFAULT_POLICY_POLL_INTERVAL_SECONDS,
                  timeout_seconds=0.8, clock=time.time, monotonic=time.monotonic,
-                 opener=None, max_backoff_seconds=60.0):
+                 opener=None, max_backoff_seconds=60.0, observer=None):
+        self.observer = observer
         self.url = data_row_url(base_url)
         self.policy_url = policy_url(base_url)
         self.writer = writer
@@ -691,6 +779,14 @@ class HycubeCollector:
         if self.projection_store is not None:
             status["projection"] = self.projection_store.status()
         return status
+
+    def _notify(self, kind, record=None):
+        if self.observer is not None:
+            try:
+                self.observer(kind, record)
+            except Exception as exc:
+                # Publication cannot change acquisition, persistence or retry cadence.
+                LOG.warning("Hycube MQTT notification failed: %s", type(exc).__name__)
 
     def _set(self, **values):
         with self._lock:
@@ -728,6 +824,7 @@ class HycubeCollector:
         self._last_received_timestamp = received_timestamp
         self._set(state="available", last_success_at=record["received_at"], last_error=None,
                   observations=self.status()["observations"] + 1)
+        self._notify("system", record)
         return record
 
     def collect_policy_once(self):
@@ -755,6 +852,7 @@ class HycubeCollector:
         self._set(policy_state="available", policy_last_success_at=record["observed_at"],
                   policy_last_error=None,
                   policy_observations=self.status()["policy_observations"] + 1)
+        self._notify("policy", record)
         return record
 
     def start(self):
@@ -768,17 +866,31 @@ class HycubeCollector:
 
     def stop(self, timeout=5.0):
         self._stop.set()
-        if self._thread and self._thread is not threading.current_thread():
-            self._thread.join(timeout)
-        self._thread = None
-        if self.projection_store is not None:
-            try:
-                self.projection_store.close()
-            except Exception as exc:
-                LOG.warning("Hycube projection flush failed: %s", type(exc).__name__)
-        self._set(state="disabled")
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout)
+        # The collecting thread owns the final flush. Never close its store
+        # concurrently, or forget a still-running producer on timeout.
+        return (thread is None or not thread.is_alive()) and not getattr(self, '_shutdown_error', False)
 
     def _run(self):
+        self._shutdown_error = False
+        try:
+            self._collect_loop()
+        finally:
+            self._notify("system")
+            self._notify("policy")
+            try:
+                if self.projection_store is not None:
+                    self.projection_store.close()
+            except Exception as exc:
+                self._shutdown_error = True
+                self._set(state="error", last_error="shutdown_flush: " + type(exc).__name__)
+                LOG.warning("Hycube projection flush failed: %s", type(exc).__name__)
+            else:
+                self._set(state="disabled")
+
+    def _collect_loop(self):
         failures = 0
         next_policy_poll = 0.0
         while not self._stop.is_set():
@@ -788,6 +900,7 @@ class HycubeCollector:
                 failures = 0
             except Exception as exc:
                 failures += 1
+                self._notify("system")
                 self._set(state="error", last_error=f"{type(exc).__name__}: {exc}",
                           failures=self.status()["failures"] + 1)
                 LOG.warning("Hycube read-only observation failed: %s", type(exc).__name__)
@@ -795,6 +908,7 @@ class HycubeCollector:
                 try:
                     self.collect_policy_once()
                 except Exception as exc:
+                    self._notify("policy")
                     self._set(policy_state="error",
                               policy_last_error=f"{type(exc).__name__}: {exc}",
                               policy_failures=self.status()["policy_failures"] + 1)
@@ -807,18 +921,23 @@ class HycubeCollector:
 
 
 def collector_from_options(options: dict, history_directory, policy_history_directory=None,
-                           projection_directory=None):
-    """Construct the collector only after an explicit boolean opt-in."""
+                           projection_directory=None, *, writer=None, policy_writer=None,
+                           projection_store=None, opener=None, clock=None, monotonic=None, observer=None):
+    """Construct the existing collector after explicit opt-in; dependencies optional."""
     if not evidence_enabled(options.get("hycube_evidence_enabled", False)):
         return None
+    overrides = {name:value for name,value in (('opener',opener),('clock',clock),('monotonic',monotonic))
+                 if value is not None}
     return HycubeCollector(
-        options["hycube_base_url"], HycubeEvidenceWriter(history_directory),
-        projection_store=HycubeProjectionStore(
+        options["hycube_base_url"], writer if writer is not None else HycubeEvidenceWriter(history_directory),
+        projection_store=(projection_store if projection_store is not None else HycubeProjectionStore(
             projection_directory if projection_directory is not None
-            else Path(history_directory).parent / "hycube_history_projection"),
-        policy_writer=(HycubePolicyHistory(policy_history_directory)
-                       if policy_history_directory is not None else None),
-        interval_seconds=float(options.get("hycube_interval_seconds", 5)),
+            else Path(history_directory).parent / "hycube_history_projection")),
+        policy_writer=(policy_writer if policy_writer is not None else
+                       HycubePolicyHistory(policy_history_directory) if policy_history_directory is not None else None),
+        observer=observer,
+        interval_seconds=float(options.get("hycube_interval_seconds", 20)),
         policy_interval_seconds=DEFAULT_POLICY_POLL_INTERVAL_SECONDS,
         timeout_seconds=float(options.get("hycube_timeout_seconds", 0.8)),
+        **overrides,
     )

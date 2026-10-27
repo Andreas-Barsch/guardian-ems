@@ -1,4 +1,5 @@
 """Single authoritative MQTT projection for derived-only cell diagnostics."""
+from work_scheduler import checkpoint as _work_checkpoint
 from cell_diagnostics import DIAGNOSTIC_PARAMETER_META
 from mqtt_projection import compact_cell_attributes
 
@@ -29,6 +30,7 @@ def publish_derived_module(sink, position, diag):
         f"{base}_cell_diag_trend_risk_confidence": diag.get("trend_risk_confidence"),
     }
     for key, value in values.items():
+        _work_checkpoint()
         sink.state(key, value)
     if diag.get("current_median_mv") is not None:
         sink.attributes(f"{base}_cell_median", {
@@ -40,17 +42,21 @@ def publish_derived_module(sink, position, diag):
             "soh_hinweis": "Kein SOH-Wert und keine eigenständige Zellgesundheitsbewertung.",
         })
     for cell in diag.get("cells", []):
+        _work_checkpoint()
         cp = f"{base}_cell_{cell['cell']}"
         sink.state(f"{cp}_status", cell.get("status")); sink.state(f"{cp}_confidence", cell.get("confidence"))
         sink.state(f"{cp}_voltage", cell.get("current_voltage_mv")); sink.state(f"{cp}_deviation", cell.get("current_deviation_mv")); sink.state(f"{cp}_evidence", cell.get("evidence_deviation_mv"))
         phases = cell.get("phases", {})
         for phase in ("low", "discharge", "charge", "high"):
+            _work_checkpoint()
             sink.state(f"{cp}_{phase}_deviation", phases.get(phase, {}).get("median_deviation_mv"))
         sink.state(f"{cp}_low_lowest", phases.get("low", {}).get("lowest_percent")); sink.state(f"{cp}_discharge_lowest", phases.get("discharge", {}).get("lowest_percent"))
         for phase in ("low", "discharge", "charge", "high"):
+            _work_checkpoint()
             sink.state(f"{cp}_{phase}_rank", phases.get(phase, {}).get("mean_rank"))
         sink.state(f"{cp}_charge_highest", phases.get("charge", {}).get("highest_percent")); sink.state(f"{cp}_high_highest", phases.get("high", {}).get("highest_percent"))
         for phase in ("low", "discharge", "charge", "high"):
+            _work_checkpoint()
             sink.state(f"{cp}_{phase}_samples", phases.get(phase, {}).get("samples"))
         status_meta = _diag_meta("status") | compact_cell_attributes(
             cell, diag.get("advanced_diagnostics", {}))
@@ -61,6 +67,7 @@ def publish_derived_module(sink, position, diag):
         sink.attributes(f"{cp}_status", status_meta)
         sink.attributes(f"{cp}_confidence", _diag_meta("confidence")); sink.attributes(f"{cp}_voltage", _diag_meta("voltage")); sink.attributes(f"{cp}_deviation", _diag_meta("deviation")); sink.attributes(f"{cp}_evidence", _diag_meta("evidence"))
         for phase in ("low", "discharge", "charge", "high"):
+            _work_checkpoint()
             meta = _diag_meta("deviation", phase); phase_result = phases.get(phase, {})
             meta["status"] = phase_result.get("status", "LERNPHASE"); meta["thresholds_mv"] = phase_result.get("thresholds_mv", {}); meta["samples"] = phase_result.get("samples", 0)
             sink.attributes(f"{cp}_{phase}_deviation", meta); sink.attributes(f"{cp}_{phase}_rank", _diag_meta("rank", phase)); sink.attributes(f"{cp}_{phase}_samples", _diag_meta("samples", phase))
@@ -69,4 +76,5 @@ def publish_derived_module(sink, position, diag):
 
 def publish_derived_results(sink, positions, results):
     for position in positions:
+        _work_checkpoint()
         publish_derived_module(sink, position, results.get(position, {}))

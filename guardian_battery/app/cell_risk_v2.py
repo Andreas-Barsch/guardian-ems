@@ -1,5 +1,6 @@
 """Deterministic, read-only Guardian Cell Risk Ranking V2 analytics."""
 from __future__ import annotations
+from work_scheduler import checkpoint as _work_checkpoint
 
 import math
 import statistics
@@ -101,108 +102,178 @@ def _maintenance_status(serial: str, cell_number: int,
             "latest_event_at": max(str(item.get("occurred_at", "")) for item in relevant)}
 
 
+
+def _release_samples(samples):
+    """Drop private temporary observations in bounded GIL-yielding batches.
+
+    Do not inspect or mutate input records or scientific output. Cleanup must
+    also complete after cancellation, so it cannot raise the cancelled job's
+    checkpoint exception and fall back to a bulk destructor.
+    """
+    import time
+    while samples:
+        del samples[-256:]
+        time.sleep(0)
+
+
 def analyze_cell_risk(records: Sequence[Mapping[str, Any]], *, diagnostic_date: str,
+                      maintenance_records: Sequence[Mapping[str, Any]] = (),
+                      position_resolver: Callable[[str, str], Any] | None = None,
+                      timezone_name: str = "Europe/Berlin") -> dict[str, Any]:
+    """Evaluate identical independent cell methods one physical identity at a time.
+
+    Group only references to original records. This avoids retaining every
+    identity's expanded per-cell observations simultaneously; input records,
+    ordering within each identity, formulas and final global ranking are intact.
+    """
+    groups = defaultdict(list)
+    parameters = dict(diagnostic_date=diagnostic_date,
+        maintenance_records=maintenance_records, position_resolver=position_resolver,
+        timezone_name=timezone_name)
+    try:
+        for record in records:
+            _work_checkpoint()
+            groups[str(record.get("module_serial"))].append(record)
+        result = _analyze_cell_risk_group((), **parameters)
+        rows = result["cells"]
+        counts = ("valid_cell_observations", "valid_discharge_module_samples",
+                  "invalid_records", "excluded_records")
+        for serial in sorted(groups):
+            _work_checkpoint()
+            group = _analyze_cell_risk_group(groups[serial], **parameters)
+            rows.extend(group["cells"])
+            for key in counts:
+                result[key] += group[key]
+            _release_samples(groups[serial])
+        rows.sort(key=lambda row: (-row["risk_score_v2"], row["physical_serial"],
+                                   row["cell_number"]))
+        for rank, row in enumerate(rows, 1):
+            _work_checkpoint()
+            row["rank"] = rank
+        result["top10"] = rows[:10]
+        return result
+    finally:
+        while groups:
+            _key, pending = groups.popitem()
+            _release_samples(pending)
+
+
+def _analyze_cell_risk_group(records: Sequence[Mapping[str, Any]], *, diagnostic_date: str,
                       maintenance_records: Sequence[Mapping[str, Any]] = (),
                       position_resolver: Callable[[str, str], Any] | None = None,
                       timezone_name: str = "Europe/Berlin"
                       ) -> dict[str, Any]:
     """Return one compact deterministic record per physical cell."""
     observations: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    invalid = excluded = 0
-    for record in records:
-        try:
-            serial = record.get("module_serial")
-            values = record.get("voltages_mv")
-            current = float(record["current_a"])
-            timestamp = _timestamp(record["timestamp"])
-            if not serial or not isinstance(values, list) or len(values) != 15 or current >= -.8:
-                excluded += 1
+    try:
+        invalid = excluded = 0
+        for record in records:
+            _work_checkpoint()
+            try:
+                serial = record.get("module_serial")
+                values = record.get("voltages_mv")
+                current = float(record["current_a"])
+                timestamp = _timestamp(record["timestamp"])
+                if not serial or not isinstance(values, list) or len(values) != 15 or current >= -.8:
+                    excluded += 1
+                    continue
+                cells = [float(value) for value in values]
+                module_median = statistics.median(cells)
+                lowest_index = cells.index(min(cells))
+                day = datetime.fromtimestamp(timestamp, ZoneInfo(timezone_name)).date().isoformat()
+            except (KeyError, TypeError, ValueError, OverflowError):
+                invalid += 1
                 continue
-            cells = [float(value) for value in values]
-            module_median = statistics.median(cells)
-            lowest_index = cells.index(min(cells))
-            day = datetime.fromtimestamp(timestamp, ZoneInfo(timezone_name)).date().isoformat()
-        except (KeyError, TypeError, ValueError, OverflowError):
-            invalid += 1
-            continue
-        for index, value in enumerate(cells):
-            number = index + 1
-            start = (index // 5) * 5
-            group_median = statistics.median(cells[start:start + 5])
-            observations[(str(serial), number)].append({
-                "timestamp": timestamp, "timestamp_iso": datetime.fromtimestamp(
-                    timestamp, timezone.utc).isoformat(), "day": day,
-                "delta_module": value - module_median,
-                "delta_group": value - group_median,
-                "lowest": index == lowest_index, "current": current,
-            })
+            for index, value in enumerate(cells):
+                _work_checkpoint()
+                number = index + 1
+                start = (index // 5) * 5
+                group_median = statistics.median(cells[start:start + 5])
+                observations[(str(serial), number)].append({
+                    "timestamp": timestamp, "timestamp_iso": datetime.fromtimestamp(
+                        timestamp, timezone.utc).isoformat(), "day": day,
+                    "delta_module": value - module_median,
+                    "delta_group": value - group_median,
+                    "lowest": index == lowest_index, "current": current,
+                })
 
-    rows = []
-    for (serial, number), samples in sorted(observations.items()):
-        samples.sort(key=lambda sample: sample["timestamp"])
-        module_deltas = [sample["delta_module"] for sample in samples]
-        group_deltas = [sample["delta_group"] for sample in samples]
-        low = [sample["delta_module"] for sample in samples
-               if .8 <= abs(sample["current"]) < 4]
-        high = [sample["delta_module"] for sample in samples if abs(sample["current"]) >= 8]
-        load_sensitivity = (max(0.0, statistics.median(low) - statistics.median(high))
-                            if len(low) >= 30 and len(high) >= 30 else 0.0)
-        by_day: dict[str, list[float]] = defaultdict(list)
-        for sample in samples:
-            by_day[sample["day"]].append(sample["delta_module"])
-        daily = [(day, statistics.median(values)) for day, values in sorted(by_day.items())][-7:]
-        trend_slope = ols_slope([value for _day, value in daily]) if len(daily) >= 3 else 0.0
-        median_module = statistics.median(module_deltas)
-        median_group = statistics.median(group_deltas)
-        lowest_share = sum(sample["lowest"] for sample in samples) / len(samples)
-        components = score_components(median_module, median_group, lowest_share,
-                                      load_sensitivity, trend_slope)
-        sample_quality = "SUFFICIENT" if len(samples) >= 300 else "INSUFFICIENT"
-        load_quality = "SUFFICIENT" if len(low) >= 30 and len(high) >= 30 else "INSUFFICIENT"
-        trend_quality = ("STRONG" if len(daily) >= 7 else
-                         "SUFFICIENT" if len(daily) >= 3 else "INSUFFICIENT")
-        confidence = ("HIGH" if sample_quality == load_quality == "SUFFICIENT"
-                      and trend_quality == "STRONG" else
-                      "MEDIUM" if sample_quality == "SUFFICIENT"
-                      and (load_quality == "SUFFICIENT" or trend_quality != "INSUFFICIENT")
-                      else "LOW")
-        position = history_id = None
-        if position_resolver:
-            resolved = position_resolver(serial, samples[-1]["timestamp_iso"])
-            position, history_id = resolved if isinstance(resolved, tuple) else (resolved, None)
-        score = components["risk_score_v2"]
-        rows.append({
-            "schema_version": 1, "diagnostic_date": diagnostic_date,
-            "cell_risk_algorithm_version": CELL_RISK_ALGORITHM_VERSION,
-            "formula_version": FORMULA_VERSION,
-            "classification_version": CLASSIFICATION_VERSION,
-            "physical_serial": serial, "current_position": position,
-            "position_history_id": history_id, "cell_number": number,
-            "cell_group": cell_group(number), "sample_count": len(samples),
-            "low_load_sample_count": len(low), "high_load_sample_count": len(high),
-            "daily_median_count": len(daily), "daily_medians": [
-                {"date": day, "median_delta_module_mv": value} for day, value in daily],
-            "median_delta_module_mv": median_module,
-            "p10_delta_module_mv": percentile(module_deltas, .10),
-            "median_delta_group_mv": median_group, "lowest_share": lowest_share,
-            "effective_lowest_persistence": components["qualified_lowest_component"] / 100,
-            "low_load_median_delta_mv": statistics.median(low) if len(low) >= 30 else None,
-            "high_load_median_delta_mv": statistics.median(high) if len(high) >= 30 else None,
-            "load_sensitivity_mv": load_sensitivity,
-            "trend7_slope_mv_per_day": trend_slope if len(daily) >= 3 else None,
-            **components, "risk_class": risk_class(score),
-            "sample_quality": sample_quality, "load_quality": load_quality,
-            "trend_quality": trend_quality, "overall_confidence": confidence,
-            "balancing": _maintenance_status(serial, number, maintenance_records),
-            "causality": "not_determined", "score_semantics": "engineering_priority_not_soh",
-        })
-    rows.sort(key=lambda row: (-row["risk_score_v2"], row["physical_serial"],
-                               row["cell_number"]))
-    for rank, row in enumerate(rows, 1):
-        row["rank"] = rank
-    return {"schema_version": 1, "diagnostic_date": diagnostic_date,
-            "cell_risk_algorithm_version": CELL_RISK_ALGORITHM_VERSION,
-            "formula_version": FORMULA_VERSION, "classification_version": CLASSIFICATION_VERSION,
-            "cells": rows, "top10": rows[:10], "valid_cell_observations": sum(map(len, observations.values())),
-            "valid_discharge_module_samples": sum(map(len, observations.values())) // 15,
-            "invalid_records": invalid, "excluded_records": excluded}
+        valid_observations = sum(map(len, observations.values()))
+        rows = []
+        for (serial, number), samples in sorted(observations.items()):
+            _work_checkpoint()
+            samples.sort(key=lambda sample: sample["timestamp"])
+            module_deltas = [sample["delta_module"] for sample in samples]
+            group_deltas = [sample["delta_group"] for sample in samples]
+            low = [sample["delta_module"] for sample in samples
+                   if .8 <= abs(sample["current"]) < 4]
+            high = [sample["delta_module"] for sample in samples if abs(sample["current"]) >= 8]
+            load_sensitivity = (max(0.0, statistics.median(low) - statistics.median(high))
+                                if len(low) >= 30 and len(high) >= 30 else 0.0)
+            by_day: dict[str, list[float]] = defaultdict(list)
+            for sample in samples:
+                _work_checkpoint()
+                by_day[sample["day"]].append(sample["delta_module"])
+            daily = [(day, statistics.median(values)) for day, values in sorted(by_day.items())][-7:]
+            trend_slope = ols_slope([value for _day, value in daily]) if len(daily) >= 3 else 0.0
+            median_module = statistics.median(module_deltas)
+            median_group = statistics.median(group_deltas)
+            lowest_share = sum(sample["lowest"] for sample in samples) / len(samples)
+            components = score_components(median_module, median_group, lowest_share,
+                                          load_sensitivity, trend_slope)
+            sample_quality = "SUFFICIENT" if len(samples) >= 300 else "INSUFFICIENT"
+            load_quality = "SUFFICIENT" if len(low) >= 30 and len(high) >= 30 else "INSUFFICIENT"
+            trend_quality = ("STRONG" if len(daily) >= 7 else
+                             "SUFFICIENT" if len(daily) >= 3 else "INSUFFICIENT")
+            confidence = ("HIGH" if sample_quality == load_quality == "SUFFICIENT"
+                          and trend_quality == "STRONG" else
+                          "MEDIUM" if sample_quality == "SUFFICIENT"
+                          and (load_quality == "SUFFICIENT" or trend_quality != "INSUFFICIENT")
+                          else "LOW")
+            position = history_id = None
+            if position_resolver:
+                resolved = position_resolver(serial, samples[-1]["timestamp_iso"])
+                position, history_id = resolved if isinstance(resolved, tuple) else (resolved, None)
+            score = components["risk_score_v2"]
+            rows.append({
+                "schema_version": 1, "diagnostic_date": diagnostic_date,
+                "cell_risk_algorithm_version": CELL_RISK_ALGORITHM_VERSION,
+                "formula_version": FORMULA_VERSION,
+                "classification_version": CLASSIFICATION_VERSION,
+                "physical_serial": serial, "current_position": position,
+                "position_history_id": history_id, "cell_number": number,
+                "cell_group": cell_group(number), "sample_count": len(samples),
+                "low_load_sample_count": len(low), "high_load_sample_count": len(high),
+                "daily_median_count": len(daily), "daily_medians": [
+                    {"date": day, "median_delta_module_mv": value} for day, value in daily],
+                "median_delta_module_mv": median_module,
+                "p10_delta_module_mv": percentile(module_deltas, .10),
+                "median_delta_group_mv": median_group, "lowest_share": lowest_share,
+                "effective_lowest_persistence": components["qualified_lowest_component"] / 100,
+                "low_load_median_delta_mv": statistics.median(low) if len(low) >= 30 else None,
+                "high_load_median_delta_mv": statistics.median(high) if len(high) >= 30 else None,
+                "load_sensitivity_mv": load_sensitivity,
+                "trend7_slope_mv_per_day": trend_slope if len(daily) >= 3 else None,
+                **components, "risk_class": risk_class(score),
+                "sample_quality": sample_quality, "load_quality": load_quality,
+                "trend_quality": trend_quality, "overall_confidence": confidence,
+                "balancing": _maintenance_status(serial, number, maintenance_records),
+                "causality": "not_determined", "score_semantics": "engineering_priority_not_soh",
+            })
+            _release_samples(samples)
+        rows.sort(key=lambda row: (-row["risk_score_v2"], row["physical_serial"],
+                                   row["cell_number"]))
+        for rank, row in enumerate(rows, 1):
+            _work_checkpoint()
+            row["rank"] = rank
+        return {"schema_version": 1, "diagnostic_date": diagnostic_date,
+                "cell_risk_algorithm_version": CELL_RISK_ALGORITHM_VERSION,
+                "formula_version": FORMULA_VERSION, "classification_version": CLASSIFICATION_VERSION,
+                "cells": rows, "top10": rows[:10], "valid_cell_observations": valid_observations,
+                "valid_discharge_module_samples": valid_observations // 15,
+                "invalid_records": invalid, "excluded_records": excluded}
+    finally:
+        # Cancellation and exceptions must not trigger one giant C-level
+        # destruction while holding the GIL and blocking Live acquisition.
+        while observations:
+            _key, pending = observations.popitem()
+            _release_samples(pending)

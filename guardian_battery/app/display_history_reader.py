@@ -6,6 +6,11 @@ existing full-resolution reader.  It never builds projection data.
 """
 from __future__ import annotations
 
+from research_budget import budgeted, ResearchQueryError, check_budget
+
+from history_append_receipt import matches_prefix
+from display_window_store import read as read_window
+import sqlite3
 import gzip
 import json
 import math
@@ -37,7 +42,7 @@ def _days(timestamp_from: str, timestamp_to: str) -> list[str]:
     first = datetime.fromisoformat(timestamp_from).astimezone(timezone.utc).date()
     last = datetime.fromisoformat(timestamp_to).astimezone(timezone.utc).date()
     return [(first + timedelta(days=index)).isoformat()
-            for index in range((last - first).days + 1)]
+            for index in budgeted(range((last - first).days + 1))]
 
 
 def _channel_count(requests, modules, include_all_module_soc):
@@ -52,7 +57,7 @@ def _channel_count(requests, modules, include_all_module_soc):
         else:
             count = 1
         total += len(modules) * count
-    if include_all_module_soc and not any(r["metric"] == "soc" for r in requests):
+    if include_all_module_soc and not any(r["metric"] == "soc" for r in budgeted(requests)):
         total += len(modules)
     return max(1, total)
 
@@ -84,11 +89,13 @@ def expand_bucket(bucket: dict) -> list[dict]:
     """Expand first/min/max/last in true timestamp order without aliases."""
     candidates = []
     for order, prefix in enumerate(("first", "min", "max", "last")):
+        check_budget()
         candidates.append((bucket[f"{prefix}_timestamp"], order,
                            float(bucket[f"{prefix}_value"])))
     candidates.sort(key=lambda item: (_epoch(item[0]), item[1]))
     result, seen = [], set()
     for timestamp, _order, value in candidates:
+        check_budget()
         key = (timestamp, value)
         if key in seen:
             continue
@@ -105,12 +112,25 @@ def expand_bucket(bucket: dict) -> list[dict]:
         if bucket.get("module_position"):
             point["module_number"] = bucket["module_position"]
         result.append(point)
-    return result
+    common={key:result[0][key] for key in ("display_source","derived","module_serial","identity_quality","cell_number","module_number") if result and key in result[0]}
+    common.update({key:bucket[key] for key in ("position_history_id","identity_epoch_id") if bucket.get(key) is not None})
+    for point in result: point.update(common)
+    result.extend({**common,**point} for point in bucket.get("protected_points",()))
+    coverage=bucket.get("coverage",{})
+    for point in result:
+        if coverage.get("first_observation"):
+            point["_coverage_from"]=coverage["first_observation"]
+            point["_coverage_to"]=coverage["last_observation"]
+            point["_expected_cadence"]=coverage.get("expected_cadence_seconds")
+    unique={json.dumps(point,sort_keys=True):point for point in result}
+    return sorted(unique.values(),key=lambda point:_epoch(point["timestamp"]))
 
 
 class DisplayHistoryReader:
     def __init__(self, display_directory, cell_directory, hycube_directory,
-                 full_series, full_hycube=None):
+                 full_series, full_hycube=None, *, window_backend=None):
+        check_budget()
+        self.window_backend = window_backend
         self.display_directory = Path(display_directory)
         self.cell_directory = Path(cell_directory)
         self.hycube_directory = Path(hycube_directory)
@@ -118,11 +138,13 @@ class DisplayHistoryReader:
         self.full_hycube = full_hycube
 
     def _paths(self, resolution, day):
+        check_budget()
         directory = self.display_directory / resolution
         return (directory / f"{day}.jsonl.gz",
                 directory / f"{day}.meta.json")
 
     def _valid(self, resolution, day):
+        check_budget()
         data, meta_path = self._paths(resolution, day)
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -135,35 +157,43 @@ class DisplayHistoryReader:
                     not data.is_file()):
                 return None
             for source_key, expected in meta.get("source_signatures", {}).items():
+                check_budget()
                 kind = source_key.split(":", 1)[0]
                 source_dir = self.cell_directory if kind == "cell" else self.hycube_directory
                 source = source_dir / expected["filename"]
                 stat = source.stat()
-                if (stat.st_size != expected["size"] or
-                        stat.st_mtime_ns != expected["mtime_ns"] or
-                        expected.get("source_schema_version") != 1):
+                source_matches = (matches_prefix(source, expected) if meta["status"] == "open"
+                                  else stat.st_size == expected["size"] and stat.st_mtime_ns == expected["mtime_ns"])
+                if (not source_matches or expected.get("source_schema_version") != 1):
                     return None
             return meta
+        except ResearchQueryError:
+            raise
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
 
     def _read(self, resolution, day):
+        check_budget()
         data, _meta = self._paths(resolution, day)
         try:
             with gzip.open(data, "rt", encoding="utf-8") as handle:
-                packed = [json.loads(line) for line in handle if line.strip()]
+                packed = [json.loads(line) for line in budgeted(handle) if line.strip()]
             return _unpack(packed), data.stat().st_size
+        except ResearchQueryError:
+            raise
         except (OSError, EOFError, gzip.BadGzipFile, json.JSONDecodeError,
                 KeyError, TypeError, ValueError) as exc:
             raise SeriesHistoryError("display history is invalid") from exc
 
     @staticmethod
     def _requested(bucket, requests, modules):
+        check_budget()
         if bucket.get("source") != "cell_history":
             return False
         if bucket.get("module_position") not in modules:
             return False
         for request in requests:
+            check_budget()
             if bucket.get("metric") != request["metric"]:
                 continue
             if bucket["metric"] in {"cell_voltage", "cell_temperature"}:
@@ -179,7 +209,13 @@ class DisplayHistoryReader:
     def query_bundles(self, *, requests, timestamp_from, timestamp_to,
                       module_number=None, module_numbers=None,
                       max_points=DEFAULT_MAX_DISPLAY_POINTS,
-                      include_all_module_soc=False, timing=None):
+                      include_all_module_soc=False, timing=None, include_samples=True):
+        check_budget()
+        if self.window_backend is not None:
+            return self.window_backend.query_bundles(requests=requests,timestamp_from=timestamp_from,
+                timestamp_to=timestamp_to,module_number=module_number,module_numbers=module_numbers,
+                max_points=max_points,include_all_module_soc=include_all_module_soc,timing=timing,
+                include_samples=include_samples)
         modules = tuple(sorted(set(module_numbers or (module_number,))))
         resolution = select_resolution(timestamp_from=timestamp_from,
             timestamp_to=timestamp_to, requests=requests, module_numbers=modules,
@@ -190,7 +226,7 @@ class DisplayHistoryReader:
                 timestamp_from=timestamp_from, timestamp_to=timestamp_to,
                 module_number=module_number, module_numbers=modules,
                 max_points=max_points, include_all_module_soc=include_all_module_soc,
-                timing=timing)
+                timing=timing, include_samples=include_samples)
             if timing:
                 timing.not_executed("display_projection_discovery",
                                     "display_projection_read",
@@ -206,11 +242,17 @@ class DisplayHistoryReader:
 
         start_epoch, end_epoch = _epoch(timestamp_from), _epoch(timestamp_to)
         display_records=[]; display_bytes=display_buckets=expanded_count=0
-        fallback_days=[]; tails=[]; display_days=[]
+        fallback_days=[]; tails=[]; display_days=[]; edges=set()
         discovery_started=time.perf_counter(); discovery_cpu=time.thread_time()
         decisions=[]
         for day in _days(timestamp_from,timestamp_to):
-            if not (self.cell_directory / f"{day}.jsonl").is_file():
+            check_budget()
+            day_start=datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+            lo=max(start_epoch,day_start.timestamp())
+            hi=min(end_epoch,(day_start+timedelta(days=1)).timestamp()-1e-6)
+            if lo>hi or not self.full_series._paths(
+                    datetime.fromtimestamp(lo,timezone.utc).isoformat(),
+                    datetime.fromtimestamp(hi,timezone.utc).isoformat()):
                 continue
             meta=self._valid(resolution,day)
             decisions.append((day,meta))
@@ -218,131 +260,184 @@ class DisplayHistoryReader:
             time.perf_counter()-discovery_started,time.thread_time()-discovery_cpu)
         read_started=time.perf_counter(); read_cpu=time.thread_time()
         for day,meta in decisions:
+            check_budget()
             if meta is None:
                 fallback_days.append(day);continue
-            try: records,size=self._read(resolution,day)
-            except SeriesHistoryError:
+            try:
+                records,size,boundary=read_window(self._paths(resolution,day)[0],
+                    revision=meta["build_timestamp"], start=start_epoch, end=end_epoch,
+                    bucket_seconds=RESOLUTIONS[resolution], requests=requests,
+                    modules=modules, source="cell_history")
+            except (OSError, ValueError, sqlite3.Error):
                 fallback_days.append(day);continue
-            relevant=[r for r in records if self._requested(r,requests,modules)]
-            if not relevant:
+            relevant=records
+            if not relevant and boundary is None:
                 fallback_days.append(day);continue
             display_days.append(day);display_bytes+=size;display_buckets+=len(relevant)
             # Open days expose only immutable closed buckets in the gzip file.
-            boundary=max((_epoch(r["bucket_end"]) for r in relevant),default=None)
-            display_records.extend(r for r in relevant if
-                                   _epoch(r["bucket_end"])>=start_epoch and
-                                   _epoch(r["bucket_start"])<=end_epoch)
+            # Boundary comes from the indexed closed prefix, not the clipped response.
+            for record in relevant:
+                check_budget()
+                left,right=_epoch(record["bucket_start"]),_epoch(record["bucket_end"])
+                if left<start_epoch or right>end_epoch:
+                    edges.add((day,max(left,start_epoch),min(right-1e-6,end_epoch)))
+                else:
+                    display_records.append(record)
             if meta.get("status")=="open":
                 tails.append((day,boundary))
         if timing: timing.record("display_projection_read",
             time.perf_counter()-read_started,time.thread_time()-read_cpu)
 
         expand_started=time.perf_counter();expand_cpu=time.thread_time()
-        grouped={metric:[] for metric in [r["metric"] for r in requests]}
+        grouped={metric:[] for metric in budgeted([r["metric"] for r in budgeted(requests)])}
         for bucket in display_records:
-            points=[p for p in expand_bucket(bucket)
+            check_budget()
+            points=[p for p in budgeted(expand_bucket(bucket))
                     if start_epoch<=_epoch(p["timestamp"])<=end_epoch]
-            points=[{key:value for key,value in point.items()
-                     if key not in {"display_source","derived"}} for point in points]
             grouped[bucket["metric"]].extend(points);expanded_count+=len(points)
         if timing: timing.record("display_projection_expand",
             time.perf_counter()-expand_started,time.thread_time()-expand_cpu)
 
         fallback_results=[]; fallback_bytes=tail_records=0
-        def full_day(day, lower=None):
+        unavailable_intervals=[]
+        def full_day(day, lower=None, upper=None):
             nonlocal fallback_bytes,tail_records
             day_start=datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
             lo=max(start_epoch,day_start.timestamp(),lower or float("-inf"))
-            hi=min(end_epoch,(day_start+timedelta(days=1)).timestamp()-1e-6)
+            hi=min(end_epoch,(day_start+timedelta(days=1)).timestamp()-1e-6, upper if upper is not None else float("inf"))
             if lo>hi:return None
-            result=self.full_series.query_bundles(requests=requests,
-                timestamp_from=datetime.fromtimestamp(lo,timezone.utc).isoformat(),
-                timestamp_to=datetime.fromtimestamp(hi,timezone.utc).isoformat(),
-                module_number=module_number,module_numbers=modules,max_points=max_points,
-                include_all_module_soc=include_all_module_soc,timing=None)
+            try:
+                result=self.full_series.query_bundles(requests=requests,
+                    timestamp_from=datetime.fromtimestamp(lo,timezone.utc).isoformat(),
+                    timestamp_to=datetime.fromtimestamp(hi,timezone.utc).isoformat(),
+                    module_number=module_number,module_numbers=modules,max_points=max_points,
+                    include_all_module_soc=include_all_module_soc,timing=None,include_samples=include_samples)
+            except ResearchQueryError as exc:
+                if exc.code != "history_index_required":
+                    raise
+                unavailable_intervals.append({"source": "pylontech",
+                    "from": datetime.fromtimestamp(lo,timezone.utc).isoformat(),
+                    "to": datetime.fromtimestamp(hi,timezone.utc).isoformat(),
+                    "reason": exc.code, "message": str(exc)})
+                return None
             fallback_bytes+=result.get("bytes_read",0)
             if lower is not None:tail_records+=result["raw_records"]
             return result
         fallback_started=time.perf_counter();fallback_cpu=time.thread_time()
         for day in fallback_days:
+            check_budget()
             result=full_day(day)
+            if result:fallback_results.append(result)
+        for day,lower,upper in sorted(edges):
+            check_budget()
+            result=full_day(day,lower,upper)
             if result:fallback_results.append(result)
         if timing: timing.record("full_resolution_fallback",
             time.perf_counter()-fallback_started,time.thread_time()-fallback_cpu)
         tail_started=time.perf_counter();tail_cpu=time.thread_time()
         for day,boundary in tails:
+            check_budget()
             result=full_day(day,boundary)
             if result:fallback_results.append(result)
         if timing: timing.record("current_day_tail",
             time.perf_counter()-tail_started,time.thread_time()-tail_cpu)
 
         for result in fallback_results:
-            for item in result["series"]:grouped[item["metric"]].extend(item["points"])
+            check_budget()
+            for item in result["series"]:
+                check_budget()
+                grouped[item["metric"]].extend(item["points"])
         projected=[]
         for request in requests:
+            check_budget()
             metric=request["metric"]; points=grouped[metric]
             # Exact duplicates at the display/tail boundary collapse; distinct evidence remains.
-            unique={json.dumps(p,sort_keys=True,separators=(",",":")):p for p in points}
+            unique={json.dumps(p,sort_keys=True,separators=(",",":")):p for p in budgeted(points)}
             points=sorted(unique.values(),key=lambda p:(p["timestamp"],p.get("module_number",0),p.get("cell_number",0)))
             groups={}
             group_count=max(1,len({(point.get("module_number",modules[0]),
-                                   point.get("cell_number",0)) for point in points}))
+                                   point.get("cell_number",0)) for point in budgeted(points)}))
             for point in points:
+                check_budget()
                 group=(point.get("module_number",modules[0]),point.get("cell_number",0))
                 collector=groups.setdefault(group,_ExtremaCollector(
-                    max(4,max_points//group_count),start_epoch,end_epoch))
+                    max(4,max_points//group_count),start_epoch,end_epoch,preserve_changes=metric=="soc"))
                 collector.add({**point,"_epoch":_epoch(point["timestamp"])})
-            points=sorted([point for collector in groups.values()
-                           for point in collector.points()],key=lambda p:(
+            points=sorted([point for collector in budgeted(groups.values())
+                           for point in budgeted(collector.points())],key=lambda p:(
                            p["timestamp"],p.get("module_number",0),p.get("cell_number",0)))
             if len(modules) == 1:
-                points=[{key:value for key,value in point.items()
-                         if key != "module_number"} for point in points]
+                points=[{key:value for key,value in budgeted(point.items())
+                         if key != "module_number"} for point in budgeted(points)]
             projected.append({"metric":metric,"cell_number":request.get("cell_number"),
                 "cell_numbers":list(request.get("cell_numbers") or ()),"points":points,
-                "raw_points":sum(len(i["points"]) for result in fallback_results
-                                  for i in result["series"] if i["metric"]==metric)
-                             + sum(1 for r in display_records if r["metric"]==metric)})
-        has_display=bool(display_days);has_full=bool(fallback_days);has_tail=bool(tails)
+                "raw_points":sum(len(i["points"]) for result in budgeted(fallback_results)
+                                  for i in budgeted(result["series"]) if i["metric"]==metric)
+                             + sum(1 for r in budgeted(display_records) if r["metric"]==metric)})
+        has_display=bool(display_days);has_full=bool(fallback_days or edges);has_tail=bool(tails)
         mode=("mixed_display_full_plus_tail" if has_display and has_full and has_tail else
               "mixed_display_full" if has_display and has_full else
               "display_plus_tail" if has_display and has_tail else
               "display_projection" if has_display else "full_resolution")
         obs={"display_resolution":resolution,"display_days":len(display_days),
-             "display_bytes":display_bytes,"display_buckets":display_buckets,
+             "display_bytes":display_bytes,"display_bytes_basis":"selected_json_payload_not_physical_io","display_buckets":display_buckets,
              "display_points_expanded":expanded_count,"fallback_days":len(fallback_days),
-             "fallback_bytes":fallback_bytes,"tail_records":tail_records,
+             "fallback_bytes":fallback_bytes,"tail_records":tail_records,"partial_bucket_ranges":len(edges),
              "history_source_mode":mode}
         if timing:timing.counts(**obs)
         soc_module_series=[]
         if include_all_module_soc:
             soc_points=grouped.get("soc",[])
             for number in modules:
-                selected=[p for p in soc_points if p.get("module_number",number)==number]
+                check_budget()
+                selected=[p for p in budgeted(soc_points) if p.get("module_number",number)==number]
                 if selected:
                     soc_module_series.append({"metric":"soc","label":f"Modul {number} SOC",
                         "unit":"%","source":"pylontech","module_number":number,
-                        "points":selected})
+                        "points":sorted(selected,key=lambda p:_epoch(p["timestamp"]))})
+        if unavailable_intervals:
+            # Explicit unread ranges break curves even if only sparse extrema
+            # survive on both sides. Do not claim that Raw measurements are absent.
+            for item in projected + soc_module_series:
+                item["coverage"] = {"quality": "partial" if item["points"] else "unavailable",
+                    "reason": "history_index_required", "missing_intervals": unavailable_intervals}
         return {"series":projected,"samples":[],
-            "raw_records":sum(r["raw_records"] for r in fallback_results),
-            "raw_file_records":sum(r.get("raw_file_records",r["raw_records"]) for r in fallback_results),
+            "unavailable_intervals":unavailable_intervals,
+            "raw_records":sum(r["raw_records"] for r in budgeted(fallback_results)),
+            "raw_file_records":sum(r.get("raw_file_records",r["raw_records"]) for r in budgeted(fallback_results)),
             "file_count":len(display_days)+len(fallback_days),"selected_modules":list(modules),
             "soc_module_series":soc_module_series,"read_seconds":0.0,"downsample_seconds":0.0,
             "cache_hit":False,"display_observability":obs}
 
     def query_hycube(self, *, timestamp_from, timestamp_to,
                      max_points=DEFAULT_MAX_DISPLAY_POINTS, timing=None):
+        check_budget()
+        if self.window_backend is not None:
+            return self.window_backend.query_hycube(timestamp_from=timestamp_from,
+                timestamp_to=timestamp_to,max_points=max_points,timing=timing)
         resolution=select_resolution(timestamp_from=timestamp_from,timestamp_to=timestamp_to,
             requests=({"metric":"soc"},),module_numbers=(1,),max_points=max_points)
         if resolution is None:return None
         start,end=_epoch(timestamp_from),_epoch(timestamp_to);points=[];raw=files=bytes_read=0
         used_display=used_full=used_tail=False
+        unavailable_intervals=[]
+        def read_full(**kwargs):
+            try:
+                return self.full_hycube.query(**kwargs)
+            except ResearchQueryError as exc:
+                if exc.code != "history_index_required":
+                    raise
+                unavailable_intervals.append({"source": "hycube",
+                    "from": kwargs["timestamp_from"], "to": kwargs["timestamp_to"],
+                    "reason": exc.code, "message": str(exc)})
+                return {"points": [], "raw_records": 0}
         for day in _days(timestamp_from,timestamp_to):
+            check_budget()
             if not (self.hycube_directory/f"{day}.jsonl").is_file():
                 if self.full_hycube is None:continue
                 day_start=datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
                 day_end=min(end,(day_start+timedelta(days=1)).timestamp()-1e-6)
-                fallback=self.full_hycube.query(timestamp_from=datetime.fromtimestamp(
+                fallback=read_full(timestamp_from=datetime.fromtimestamp(
                     max(start,day_start.timestamp()),timezone.utc).isoformat(),
                     timestamp_to=datetime.fromtimestamp(day_end,timezone.utc).isoformat(),
                     max_points=max_points,timing=None)
@@ -351,38 +446,53 @@ class DisplayHistoryReader:
             meta=self._valid(resolution,day)
             day_start=datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
             day_end=min(end,(day_start+timedelta(days=1)).timestamp()-1e-6)
-            def fallback_day(lower=None):
+            def fallback_day(lower=None, upper=None):
                 if self.full_hycube is None:return False
-                fallback=self.full_hycube.query(timestamp_from=datetime.fromtimestamp(
+                fallback=read_full(timestamp_from=datetime.fromtimestamp(
                     max(start,day_start.timestamp(),lower or float("-inf")),timezone.utc).isoformat(),
-                    timestamp_to=datetime.fromtimestamp(day_end,timezone.utc).isoformat(),
+                    timestamp_to=datetime.fromtimestamp(min(day_end,upper if upper is not None else day_end),timezone.utc).isoformat(),
                     max_points=max_points,timing=None)
                 points.extend(fallback["points"]);return fallback["raw_records"]
             if meta is None or not any(key.split(":", 1)[0] == "hycube"
-                                      for key in meta.get("source_signatures",{})):
+                                      for key in budgeted(meta.get("source_signatures",{}))):
                 if self.full_hycube is None:return None
                 raw+=fallback_day();used_full=True;continue
-            try:records,size=self._read(resolution,day)
-            except SeriesHistoryError:
+            try:
+                records,size,boundary=read_window(self._paths(resolution,day)[0],
+                    revision=meta["build_timestamp"], start=start, end=end,
+                    bucket_seconds=RESOLUTIONS[resolution], requests=({"metric":"hycube_soc"},),
+                    modules=(0,), source="hycube")
+            except (OSError, ValueError, sqlite3.Error):
                 if self.full_hycube is None:return None
                 raw+=fallback_day();used_full=True;continue
             if meta is None:
                 continue
-            files+=1;bytes_read+=size;day_points=[];boundary=None;used_display=True
+            files+=1;bytes_read+=size;day_points=[];used_display=True
+            edge_ranges=set()
             for bucket in records:
+                check_budget()
                 if bucket.get("source")!="hycube" or bucket.get("metric")!="hycube_soc":continue
                 raw+=1;boundary=max(boundary or float("-inf"),_epoch(bucket["bucket_end"]))
+                left,right=_epoch(bucket["bucket_start"]),_epoch(bucket["bucket_end"])
+                if left<start or right>end:
+                    edge_ranges.add((max(start,left),min(end,right-1e-6)))
+                    continue
                 for point in expand_bucket(bucket):
+                    check_budget()
                     if start<=_epoch(point["timestamp"])<=end:
-                        day_points.append({**{key:value for key,value in point.items()
-                                             if key not in {"display_source","derived"}},
+                        day_points.append({**point,
                             "source":"hycube","source_field":"BatteryCapacity"})
             points.extend(day_points)
+            for lower,upper in sorted(edge_ranges):
+                if lower<=upper:
+                    raw+=fallback_day(lower,upper);used_full=True
             if meta.get("status")=="open" and self.full_hycube is not None and boundary:
                 raw+=fallback_day(boundary);used_tail=True
         points.sort(key=lambda p:p["timestamp"])
         collector=_ExtremaCollector(max_points,start,end)
-        for point in points:collector.add({**point,"_epoch":_epoch(point["timestamp"])})
+        for point in points:
+            check_budget()
+            collector.add({**point,"_epoch":_epoch(point["timestamp"])})
         points=collector.points()
         source_mode=("mixed_display_full_plus_tail" if used_display and used_full and used_tail
                      else "mixed_display_full" if used_display and used_full
@@ -390,5 +500,9 @@ class DisplayHistoryReader:
                      else f"display_{resolution}" if used_display else "full_resolution")
         return {"metric":"hycube_battery_capacity","label":"Hycube BatteryCapacity",
             "unit":"%","source":"hycube","points":points,"raw_records":raw,"file_count":files,
+            "unavailable_intervals":unavailable_intervals,
+            **({"coverage": {"quality": "partial" if points else "unavailable",
+                "reason": "history_index_required", "missing_intervals": unavailable_intervals}}
+               if unavailable_intervals else {}),
             "read_seconds":0.0,"downsample_seconds":0.0,"cache_hit":False,
-            "source_mode":source_mode,"display_bytes":bytes_read}
+            "source_mode":source_mode,"display_bytes":bytes_read,"display_bytes_basis":"selected_json_payload_not_physical_io"}

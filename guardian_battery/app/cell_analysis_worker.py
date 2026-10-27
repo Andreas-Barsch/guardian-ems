@@ -6,6 +6,7 @@ import threading
 import time
 
 from cell_diagnostics import CellDiagnosticStore
+from diagnostic_aggregates import DiagnosticAggregateStore
 from collector_timing import ProfilingTimer
 from config_history import config_id, diagnostic_parameters
 
@@ -51,7 +52,7 @@ def build_analysis_snapshot(cell_store, aggregate_store, module_positions,
     aggregates = {}
     for item in modules:
         aggregate_wall = time.monotonic(); aggregate_cpu = time.thread_time()
-        records = aggregate_store.for_identity(item["position"], item["serial"])
+        records = aggregate_store.records_for_identity(item["position"], item["serial"])
         item["aggregate_projection_seconds"] = time.monotonic() - aggregate_wall
         item["aggregate_projection_thread_cpu_seconds"] = time.thread_time() - aggregate_cpu
         item["aggregate_record_count"] = len(records)
@@ -90,7 +91,7 @@ def build_analysis_snapshot(cell_store, aggregate_store, module_positions,
         "modules": positions,
         "options": frozen_options,
         "maintenance_events": frozen_maintenance,
-        "aggregates": aggregates,
+        "aggregate_records": aggregates,
         "aggregate_records_global": len(aggregate_store.records),
         "config_id": frozen_config_id,
         "snapshot_sample_count": len(samples),
@@ -115,8 +116,10 @@ def analyse_cell_snapshot(payload):
         serial_started = profiler.start()
         latest_serial = store.current_serial(module)
         profiler.finish("current_serial", serial_started)
-        aggregates = payload["aggregates"].get(module, ())
-        profiler.counter("aggregate_for_identity_seconds", 0.0)
+        aggregate_started = profiler.start()
+        aggregates = DiagnosticAggregateStore.project_records(
+            payload["aggregate_records"].get(module, ()))
+        profiler.finish("aggregate_for_identity", aggregate_started)
         store_profiler = profiler.child()
         analysis_started = profiler.start()
         analysis = store.analyse(

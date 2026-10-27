@@ -102,11 +102,14 @@ def config_id(parameters: dict[str, Any]) -> str:
 class ConfigHistory:
     """Append a record only when the effective diagnostic configuration changes."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, append_backend=None, clock=None):
+        self.append_backend = append_backend
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _last_record(self) -> dict[str, Any] | None:
+        if self.append_backend is not None:return self.append_backend.last_record(self.path)
         if not self.path.exists():
             return None
         try:
@@ -152,12 +155,15 @@ class ConfigHistory:
 
         record = {
             "schema_version": CONFIG_HISTORY_SCHEMA_VERSION,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": self.clock().astimezone(timezone.utc).isoformat(),
             "config_id": current_id,
             "guardian_version": GUARDIAN_VERSION,
             "diagnostic_engine_version": DIAGNOSTIC_ENGINE_VERSION,
             "parameters": parameters,
         }
+        if self.append_backend is not None:
+            self.append_backend.append(self.path,(json.dumps(record,ensure_ascii=False,separators=(",", ":"))+"\n").encode('utf-8'))
+            return record
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             handle.write("\n")

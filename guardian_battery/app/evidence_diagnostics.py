@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import defaultdict
+from diagnostic_work_budget import checkpoint
 from datetime import datetime, timezone
 
 from config_history import config_id, diagnostic_parameters
@@ -78,6 +79,7 @@ def _ranks(voltages):
     result = {}
     position = 1
     for voltage in ordered:
+        checkpoint()
         count = voltages.count(voltage)
         result[voltage] = (position + position + count - 1) / 2
         position += count
@@ -216,6 +218,7 @@ class EvidenceDiagnostics:
         started = profiler.start() if profiler else None
         cells = []
         for index, base in enumerate(base_cells):
+            checkpoint()
             evidences = {
                 "ranking_drift": ranking["cells"][index],
                 "dynamic_resistance": resistance["cells"][index],
@@ -331,16 +334,19 @@ class EvidenceDiagnostics:
             profiler.counter("aggregate_records_current_config", len(persisted))
         source_samples = [] if persisted else samples
         for sample in source_samples:
+            checkpoint()
             voltages = sample["voltages_mv"]
             median = statistics.median(voltages)
             ranks = _ranks(voltages)
             day = datetime.fromtimestamp(float(sample["timestamp"]), timezone.utc).date().isoformat()
             for phase in self.phase_classifier(sample, options):
+                checkpoint()
                 if phase not in PHASES:
                     continue
                 phase_counts[phase] += 1
                 low, high = min(voltages), max(voltages)
                 for index, voltage in enumerate(voltages):
+                    checkpoint()
                     entry = daily[(day, phase)][index]
                     entry["rank"].append(ranks[index])
                     entry["dev"].append(voltage - median)
@@ -357,6 +363,7 @@ class EvidenceDiagnostics:
                 "seconds": round(max(ends) - min(starts), 1),
             }
             for record in persisted:
+                checkpoint()
                 phase_counts[record["phase"]] += int(record["sample_count"])
         min_days = int(options["cell_diag_trend_min_days"])
         rank_limit = float(options["cell_diag_trend_min_rank_change"])
@@ -364,7 +371,9 @@ class EvidenceDiagnostics:
         results = [{"status": "NICHT BEWERTBAR", "quality": "LOW", "phases": {}}
                    for _ in range(15)]
         for cell in range(15):
+            checkpoint()
             for phase in PHASES:
+                checkpoint()
                 series = []
                 if persisted:
                     series = [{"day": record["day"], "mean_rank": record["mean_rank"],
@@ -376,6 +385,7 @@ class EvidenceDiagnostics:
                               if int(record["cell"]) == cell + 1 and record["phase"] == phase]
                 else:
                     for (day, item_phase), rows in sorted(daily.items()):
+                        checkpoint()
                         row = rows[cell]
                         if item_phase == phase and row["n"]:
                             series.append({"day": day,
@@ -439,6 +449,7 @@ class EvidenceDiagnostics:
         window_size = int(options["cell_diag_resistance_window_samples"])
         max_span = float(options["cell_diag_resistance_max_current_span_a"])
         for index in range(window_size - 1, len(samples) - window_size):
+            checkpoint()
             before_window = samples[index - window_size + 1:index + 1]
             after_window = samples[index + 1:index + 1 + window_size]
             before, after = before_window[-1], after_window[0]
@@ -466,6 +477,7 @@ class EvidenceDiagnostics:
         required = int(options["cell_diag_resistance_min_events"])
         cells = []
         for index in range(15):
+            checkpoint()
             values = [event[index] for event in events]
             if len(values) < required:
                 cells.append(_not_assessable(
@@ -492,6 +504,7 @@ class EvidenceDiagnostics:
         result, current = [], []
         current_phase = None
         for sample in samples:
+            checkpoint()
             axis = next((phase for phase in self.phase_classifier(sample, options)
                          if phase in {"charge", "discharge"}), None)
             gap = float(sample["timestamp"]) - float(current[-1]["timestamp"]) if current else 0
@@ -511,6 +524,7 @@ class EvidenceDiagnostics:
         minimum_ah = float(options["cell_diag_sequence_min_charge_ah"])
         accepted = []
         for phase, segment in segments:
+            checkpoint()
             duration = float(segment[-1]["timestamp"]) - float(segment[0]["timestamp"])
             charge = sum((abs(float(a["current_a"])) + abs(float(b["current_a"]))) / 2
                          * (float(b["timestamp"]) - float(a["timestamp"])) / 3600
@@ -535,9 +549,12 @@ class EvidenceDiagnostics:
         boundary = float(options["cell_diag_capacity_boundary_fraction"])
         sequence_results = {phase: [] for phase in qualified}
         for phase, phase_items in qualified.items():
+            checkpoint()
             for _phase, segment, charge in phase_items:
+                checkpoint()
                 cumulative = [0.0]
                 for before, after in zip(segment, segment[1:]):
+                    checkpoint()
                     dt = float(after["timestamp"]) - float(before["timestamp"])
                     cumulative.append(cumulative[-1] + (abs(float(before["current_a"]))
                         + abs(float(after["current_a"]))) / 2 * dt / 3600)
@@ -549,6 +566,7 @@ class EvidenceDiagnostics:
                     if target < q_axis[0] or target > q_axis[-1]:
                         return None
                     for right in range(1, len(q_axis)):
+                        checkpoint()
                         if q_axis[right] >= target:
                             left = right - 1
                             span = q_axis[right] - q_axis[left]
@@ -574,8 +592,10 @@ class EvidenceDiagnostics:
                 )
                 crossings = []
                 for curve in curves:
+                    checkpoint()
                     crossing = None
                     for right in range(1, grid_count):
+                        checkpoint()
                         before, after = curve[right - 1], curve[right]
                         crossed = (before <= target_voltage <= after) if phase == "charge" else (before >= target_voltage >= after)
                         if crossed:
@@ -598,8 +618,10 @@ class EvidenceDiagnostics:
 
         capacity_cells, curve_cells = [], []
         for cell in range(15):
+            checkpoint()
             capacity_phases, curve_phases = {}, {}
             for phase, results in sequence_results.items():
+                checkpoint()
                 capacity_results = [result for result in results if result["capacity_eligible"]]
                 if len(capacity_results) < minimum_segments:
                     reason = f"Nur {len(capacity_results)} Sequenzen erreichen den gemeinsamen Grenzbereich ohne Extrapolation; mindestens {minimum_segments} erforderlich."
@@ -671,6 +693,7 @@ class EvidenceDiagnostics:
         previous_axis = None
         segment_predecessor = None
         for sample in samples:
+            checkpoint()
             if abs(float(sample["current_a"])) <= threshold:
                 if not current:
                     segment_predecessor = previous_axis
@@ -691,8 +714,10 @@ class EvidenceDiagnostics:
             return {"cells": [_not_assessable(reason, 0, period) for _ in range(15)], "segments": 0}
         cells = []
         for index in range(15):
+            checkpoint()
             slopes = []
             for _predecessor, segment in accepted:
+                checkpoint()
                 duration_hours = (float(segment[-1]["timestamp"]) - float(segment[0]["timestamp"])) / 3600
                 start = segment[0]["voltages_mv"][index] - statistics.median(segment[0]["voltages_mv"])
                 end = segment[-1]["voltages_mv"][index] - statistics.median(segment[-1]["voltages_mv"])
@@ -710,6 +735,7 @@ class EvidenceDiagnostics:
         required = int(options["cell_diag_balancing_min_active_samples"])
         cells = []
         for index in range(15):
+            checkpoint()
             known_samples = [sample for sample in samples if len(sample.get("balancing", ())) == 15]
             known = [sample["balancing"][index] for sample in known_samples]
             active_samples = [sample for sample in known_samples if sample["balancing"][index] is True]
@@ -722,6 +748,7 @@ class EvidenceDiagnostics:
                 relevant_deviations = 0
                 deviations = []
                 for sample in active_samples:
+                    checkpoint()
                     deviation = abs(sample["voltages_mv"][index] - statistics.median(sample["voltages_mv"]))
                     deviations.append(deviation)
                     phases = [phase for phase in self.phase_classifier(sample, options) if phase in PHASES]
@@ -746,6 +773,7 @@ class EvidenceDiagnostics:
         required = int(options["cell_diag_ica_min_samples"])
         max_cv = float(options["cell_diag_ica_max_current_cv"])
         for phase, segment in segments:
+            checkpoint()
             if phase != "charge" or len(segment) < required:
                 continue
             currents = [abs(float(sample["current_a"])) for sample in segment]
@@ -767,6 +795,7 @@ class EvidenceDiagnostics:
         physical_serial = samples[-1].get("module_serial") if samples else None
         result = []
         for cell in range(15):
+            checkpoint()
             if not physical_serial:
                 result.append({"status": "NICHT BEWERTBAR", "quality": "LOW",
                                "trend": "unklar", "valid_data": 0,
@@ -778,6 +807,7 @@ class EvidenceDiagnostics:
             matching = []
             ambiguous = 0
             for event in events:
+                checkpoint()
                 raw = event.to_dict() if hasattr(event, "to_dict") else dict(event)
                 timestamp = datetime.fromisoformat(str(raw["occurred_at"]).replace("Z", "+00:00")).timestamp()
                 if raw.get("archived_at") is not None or raw.get("cell_number") not in (None, cell + 1) \

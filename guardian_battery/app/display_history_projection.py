@@ -6,7 +6,12 @@ is disposable derived data.
 """
 from __future__ import annotations
 
+from display_window_store import publish as publish_window, path_for as window_path
+from history_live_priority import historical_slot
+from research_budget import check_budget
 import hashlib
+import resume_publication as resume
+from history_append_receipt import signature as append_signature, matches_prefix
 import gzip
 import io
 import json
@@ -19,7 +24,7 @@ from pathlib import Path
 
 
 DISPLAY_PROJECTION_SCHEMA_VERSION = 1
-AGGREGATION_ALGORITHM_VERSION = "guardian_display_bucket_v1"
+AGGREGATION_ALGORITHM_VERSION = "guardian_display_bucket_v2_segments"
 RESOLUTIONS = {"1m": 60, "5m": 300, "15m": 900, "60m": 3600}
 SOURCE_SCHEMA_VERSION = 1
 DEFAULT_DISPLAY_HISTORY_DIR = Path("/share/guardian_battery/display_history")
@@ -50,6 +55,7 @@ def _deterministic_gzip_lines(path: Path, records: list[dict]) -> None:
                            mtime=0) as compressed:
             with io.TextIOWrapper(compressed, encoding="utf-8") as handle:
                 for record in records:
+                    check_budget()
                     handle.write(json.dumps(record, ensure_ascii=False,
                                             separators=(",", ":")) + "\n")
     os.replace(temporary, path)
@@ -59,13 +65,14 @@ def _source_signature(path: Path | None, *, content_hash=True) -> dict | None:
     if path is None or not path.is_file():
         return None
     stat = path.stat()
-    result = {"filename": path.name, "size": stat.st_size,
+    result = {**append_signature(path), "filename": path.name, "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
             "source_schema_version": SOURCE_SCHEMA_VERSION}
     if content_hash:
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             while chunk := handle.read(1024 * 1024):
+                check_budget()
                 digest.update(chunk)
         result["sha256"] = digest.hexdigest()
     else:
@@ -94,12 +101,14 @@ def _new_bucket(channel: dict, resolution: str, timestamp: str, value: float,
             "min_value": value, "min_timestamp": timestamp,
             "max_value": value, "max_timestamp": timestamp,
             "mean": value, "sample_count": 1,
+            "_observations": [[timestamp,value]],
             "_sum": value, "_first_order": source_order,
             "_last_order": source_order, "_min_order": source_order,
             "_max_order": source_order}
 
 
 def _add(bucket: dict, timestamp: str, value: float, source_order: int) -> None:
+    bucket.setdefault("_observations",[]).append([timestamp,value])
     key = _sample_key(timestamp, source_order)
     first_key = _sample_key(bucket["first_timestamp"], bucket["_first_order"])
     last_key = _sample_key(bucket["last_timestamp"], bucket["_last_order"])
@@ -121,7 +130,24 @@ def _add(bucket: dict, timestamp: str, value: float, source_order: int) -> None:
 
 
 def _public(bucket: dict) -> dict:
-    return {"display_projection_schema_version": DISPLAY_PROJECTION_SCHEMA_VERSION,
+    from research_timeseries import observation_coverage
+    observations=sorted(bucket.get("_observations",()),key=lambda item:datetime.fromisoformat(item[0]).timestamp())
+    coverage=observation_coverage(bucket["bucket_start"],bucket["bucket_end"],
+        [datetime.fromisoformat(item[0]).timestamp() for item in observations])
+    if coverage["expected_cadence_seconds"] is None:
+        coverage["expected_cadence_seconds"] = bucket.get("_source_cadence")
+    coverage["cadence_basis"] = "observed_source_intervals"
+    gaps={(gap["from"],gap["to"]) for gap in coverage["missing_intervals"] if gap["kind"]=="internal"}
+    protected=[]
+    for left,right in zip(observations,observations[1:]):
+        conflict=left[0]==right[0] and left[1]!=right[1]
+        gap=(left[0],right[0]) in gaps
+        jump=bucket["metric"] in {"soc","hycube_soc"} and left[1]!=right[1]
+        if conflict or gap or jump:
+            protected.extend([{"timestamp":left[0],"value":left[1],**({"conflict":True} if conflict else {})},
+                              {"timestamp":right[0],"value":right[1],**({"conflict":True} if conflict else {}),**({"_segment_start":True} if gap else {})}])
+    return {"coverage":coverage,"protected_points":protected,
+            "display_projection_schema_version": DISPLAY_PROJECTION_SCHEMA_VERSION,
             "aggregation_algorithm_version": AGGREGATION_ALGORITHM_VERSION,
             **{key: value for key, value in bucket.items() if not key.startswith("_")},
             "quality": "observed", "derived": True,
@@ -134,7 +160,8 @@ def _pack(records: list[dict]) -> list[dict]:
     for item in records:
         key = (item["resolution"], item["bucket_start"], item["bucket_end"],
                item["source"], item.get("module_position"),
-               item.get("physical_serial"), item.get("identity_quality"))
+               item.get("physical_serial"), item.get("identity_quality"),
+               item.get("position_history_id"), item.get("identity_epoch_id"))
         packed = groups.setdefault(key, {
             "display_projection_schema_version": DISPLAY_PROJECTION_SCHEMA_VERSION,
             "aggregation_algorithm_version": AGGREGATION_ALGORITHM_VERSION,
@@ -143,10 +170,13 @@ def _pack(records: list[dict]) -> list[dict]:
             "module_position": item.get("module_position"),
             "physical_serial": item.get("physical_serial"),
             "identity_quality": item.get("identity_quality"),
-            "channels": {}, "quality": "observed", "derived": True,
+            "position_history_id": item.get("position_history_id"),
+            "identity_epoch_id": item.get("identity_epoch_id"),
+            "channel_evidence": {}, "channels": {}, "quality": "observed", "derived": True,
             "authoritative": False})
         name = item["metric"] + (f":{item['cell_number']}"
                                  if item.get("cell_number") else "")
+        packed["channel_evidence"][name] = {key:item[key] for key in ("coverage","protected_points") if key in item}
         start_epoch = datetime.fromisoformat(item["bucket_start"]).timestamp()
         packed["channels"][name] = [
             datetime.fromisoformat(item[field]).timestamp() - start_epoch
@@ -167,7 +197,7 @@ def _unpack(records: list[dict]) -> list[dict]:
                        timezone.utc).isoformat() if field in TIMESTAMP_FIELDS else value
                        for field, value in zip(CHANNEL_VALUE_FIELDS, values)]
             expanded.append({key: value for key, value in record.items()
-                             if key != "channels"} | {"metric": metric,
+                             if key not in {"channels", "channel_evidence"}} | record.get("channel_evidence",{}).get(name,{}) | {"metric": metric,
                              **({"cell_number": int(cell)} if cell else {}),
                              **dict(zip(CHANNEL_VALUE_FIELDS, decoded))})
     return expanded
@@ -181,6 +211,8 @@ def _channels(record: dict, source: str) -> list[tuple[dict, str, float]]:
         serial = record.get("module_serial")
         base = {"source": "cell_history", "module_position": module,
                 "physical_serial": serial,
+                "position_history_id":record.get("position_history_id"),
+                "identity_epoch_id":record.get("identity_epoch_id"),
                 "identity_quality": "physical_serial" if serial else "position_only"}
         result = [(base, "soc", float(record["soc_percent"])),
                   (base, "current", float(record["current_a"]))]
@@ -210,7 +242,8 @@ def _timestamp(record: dict, source: str) -> str:
 
 
 def _channel_key(channel: dict, metric: str, resolution: str, start: int) -> str:
-    identity = channel.get("physical_serial") or f"position:{channel.get('module_position')}"
+    identity = (channel.get("physical_serial") or f"position:{channel.get('module_position')}",
+                channel.get("identity_epoch_id"),channel.get("position_history_id"))
     return "|".join(map(str, (resolution, start, channel["source"], identity,
                               channel.get("cell_number", 0), metric)))
 
@@ -219,13 +252,15 @@ class DisplayHistoryProjection:
     """One-pass, chunked builder for independent UTC days."""
 
     def __init__(self, cell_history_directory, hycube_history_directory, output_directory,
-                 *, max_records=1000, max_bytes=4 * 1024 * 1024, clock=time.time):
+                 *, max_records=1000, max_bytes=4 * 1024 * 1024, clock=time.time,
+                 incremental_historical=False):
         self.cell_directory = Path(cell_history_directory)
         self.hycube_directory = Path(hycube_history_directory)
         self.output_directory = Path(output_directory)
         self.max_records = max(1, int(max_records))
         self.max_bytes = max(1, int(max_bytes))
         self.clock = clock
+        self.incremental_historical = bool(incremental_historical)
         self._lock = threading.Lock()
         self._status = {"enabled": True, "state": "idle", "days": 0,
                         "complete_days": 0, "open_days": 0, "invalid_days": 0,
@@ -286,16 +321,25 @@ class DisplayHistoryProjection:
                     DISPLAY_PROJECTION_SCHEMA_VERSION or
                     value.get("aggregation_algorithm_version") !=
                     AGGREGATION_ALGORITHM_VERSION):
-                return fresh
+                raise DisplayProjectionError("display format changed; explicit bounded day rebuild required")
             if (not isinstance(value.get("offsets"), dict)
                     or not isinstance(value.get("orders"), dict)
                     or not isinstance(value.get("buckets"), dict)
                     or not isinstance(value.get("watermarks"), dict)
                     or not isinstance(value.get("closed_before"), dict)):
                 raise ValueError("invalid open-state structure")
+            for _kind, source_key, source in self._sources(day):
+                if int(value["offsets"].get(source_key,0)):
+                    expected=value.get("source_checkpoints",{}).get(source_key)
+                    if expected is not None and not matches_prefix(source,expected):
+                        raise DisplayProjectionError("source changed; explicit bounded rebuild required")
             return value
         except FileNotFoundError:
+            if any(self._meta_path(resolution, day).exists() for resolution in RESOLUTIONS):
+                raise DisplayProjectionError("missing display checkpoint; explicit bounded day rebuild required")
             return fresh
+        except DisplayProjectionError:
+            raise
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             # Open state is derived and can be rebuilt from authoritative sources.
             with self._lock:
@@ -303,12 +347,26 @@ class DisplayHistoryProjection:
                     state="invalid",
                     last_error=f"{type(exc).__name__}: invalid open state for {day}: {exc}",
                 )
-            return fresh
+            raise DisplayProjectionError("invalid display checkpoint; explicit bounded day rebuild required") from exc
 
     def process_chunk(self, day: str, *, finalize: bool | None = None) -> dict:
         """Read one bounded chunk. Repeated calls resume from persisted offsets."""
-        state = self._load_state(day)
+        if resume.recover(self._state_path(day).with_suffix(".publication.json")):
+            self.refresh_status(validate_contents=False)
+            if self.status()["invalid_days"] == 0:
+                with self._lock: self._status.update(state="available", last_error=None)
         sources = self._sources(day)
+        if not self._state_path(day).exists() and sources:
+            try:
+                metas = [json.loads(self._meta_path(res, day).read_text()) for res in RESOLUTIONS]
+                if all(meta.get("status") == "complete" and
+                       all(meta["source_signatures"][key]["size"] == path.stat().st_size and
+                           meta["source_signatures"][key]["mtime_ns"] == path.stat().st_mtime_ns
+                           for _kind, key, path in sources) for meta in metas):
+                    return {"day": day, "records_processed": 0, "bytes_processed": 0,
+                            "caught_up": True, "complete": True, "bucket_count": 0}
+            except (OSError, ValueError, KeyError, TypeError): pass
+        state = self._load_state(day)
         if not sources:
             raise DisplayProjectionError("no source history for day")
         processed = consumed = 0
@@ -318,7 +376,10 @@ class DisplayHistoryProjection:
             with path.open("rb") as handle:
                 handle.seek(offset)
                 while processed < self.max_records and consumed < self.max_bytes:
-                    raw = handle.readline()
+                    check_budget()
+                    raw = handle.readline(65537 if self.incremental_historical else -1)
+                    if self.incremental_historical and len(raw) > 65536:
+                        raise DisplayProjectionError("source record exceeds bounded size")
                     if not raw:
                         break
                     consumed += len(raw); processed += 1; order += 1
@@ -331,6 +392,13 @@ class DisplayHistoryProjection:
                         state["watermarks"][kind] = max(
                             epoch, float(state["watermarks"].get(kind, epoch)))
                         for channel, metric, value in _channels(record, kind):
+                            import statistics
+                            cadence_key = _channel_key(channel, metric, "source", 0)
+                            context = state.setdefault("cadence", {}).setdefault(cadence_key, {"last":epoch,"gaps":[]})
+                            if epoch > context["last"]:
+                                context["gaps"] = (context["gaps"] + [epoch-context["last"]])[-256:]
+                                context["last"] = epoch
+                            cadence = statistics.median(context["gaps"]) if context["gaps"] else None
                             for resolution, seconds in RESOLUTIONS.items():
                                 start = _bucket_start(epoch, seconds)
                                 closed_before = float(state["closed_before"].get(
@@ -346,6 +414,7 @@ class DisplayHistoryProjection:
                                         timestamp, value, order)
                                 else:
                                     _add(bucket, timestamp, value, order)
+                                state["buckets"][key]["_source_cadence"] = cadence
                     except DisplayProjectionError:
                         raise
                     except (json.JSONDecodeError, KeyError, TypeError, ValueError,
@@ -355,8 +424,13 @@ class DisplayHistoryProjection:
                 state["orders"][kind] = order
             if processed >= self.max_records or consumed >= self.max_bytes:
                 break
+        if processed == 0 and self._state_path(day).exists() and finalize is not True:
+            if self.status()["state"] == "invalid":
+                raise DisplayProjectionError("invalid display products; explicit bounded day rebuild required")
+            return {"day": day, "records_processed": 0, "bytes_processed": 0,
+                    "caught_up": True, "complete": False, "bucket_count": len(state["buckets"])}
+        state["source_checkpoints"] = {key: append_signature(path) for _kind,key,path in sources}
         state["records"] += processed; state["bytes"] += consumed
-        _atomic_json(self._state_path(day), state)
         caught_up = all(int(state["offsets"].get(source_key, 0)) == path.stat().st_size
                         for _kind, source_key, path in sources)
         current_day = datetime.fromtimestamp(self.clock(), timezone.utc).date().isoformat()
@@ -365,10 +439,12 @@ class DisplayHistoryProjection:
         if should_finalize:
             self._publish(day, state, sources, complete=True)
             projection_written = True
-        elif caught_up or day == current_day:
+        elif caught_up or day == current_day or self.incremental_historical:
             self._publish_open(day, state, sources)
-            _atomic_json(self._state_path(day), state)
             projection_written = True
+        else:
+            resume.atomic(self._state_path(day), resume.encoded(state))
+        self.refresh_status(validate_contents=False)
         completed_at = self.clock()
         with self._lock:
             self._status.update(
@@ -380,13 +456,25 @@ class DisplayHistoryProjection:
                 bootstrap_caught_up=caught_up,
                 bootstrap_records=state["records"], bootstrap_bytes=state["bytes"],
                 last_error=None)
-        self.refresh_status(validate_contents=False)
         return {"day": day, "records_processed": processed,
                 "bytes_processed": consumed, "caught_up": caught_up,
                 "complete": bool(should_finalize),
                 "bucket_count": len(state["buckets"])}
 
     def _publish(self, day, state, sources, *, complete):
+        if complete and state.get("closed_before"):
+            # Keep immutable published prefixes when the live day closes.
+            state["watermarks"] = {kind: float("inf") for kind, _key, _path in sources}
+            self._publish_open(day, state, sources)
+            signatures = {key: _source_signature(path) for _kind, key, path in sources}
+            for resolution in RESOLUTIONS:
+                check_budget()
+                path = self._meta_path(resolution, day)
+                metadata = json.loads(path.read_text())
+                metadata.update(status="complete", source_signatures=signatures)
+                _atomic_json(path, metadata)
+            self._state_path(day).unlink(missing_ok=True)
+            return
         signatures = {source_key: _source_signature(path, content_hash=complete)
                       for _kind, source_key, path in sources}
         by_resolution = {resolution: [] for resolution in RESOLUTIONS}
@@ -397,6 +485,7 @@ class DisplayHistoryProjection:
             records.sort(key=lambda item: (item["bucket_start"], item["source"],
                 item.get("physical_serial") or "", item.get("module_position") or 0,
                 item.get("cell_number") or 0, item["metric"]))
+            window_records = list(records)
             channel_count = len(records); records = _pack(records)
             data = self._data_path(resolution, day, building=True)
             data.parent.mkdir(parents=True, exist_ok=True)
@@ -414,6 +503,7 @@ class DisplayHistoryProjection:
                         "first_bucket": records[0]["bucket_start"] if records else None,
                         "last_bucket": records[-1]["bucket_start"] if records else None,
                         "build_timestamp": built_at, "authoritative": False}
+            publish_window(self._data_path(resolution, day), window_records, built_at)
             _atomic_json(self._meta_path(resolution, day, building=True), metadata)
             os.replace(data, self._data_path(resolution, day))
             os.replace(self._meta_path(resolution, day, building=True),
@@ -442,15 +532,15 @@ class DisplayHistoryProjection:
                 retained[key] = bucket
         state["buckets"] = retained
         built_at = datetime.fromtimestamp(self.clock(), timezone.utc).isoformat()
+        operations = []
         for resolution, records in closed.items():
             path = self._data_path(resolution, day)
             path.parent.mkdir(parents=True, exist_ok=True)
+            window_records = list(records)
             channel_count = len(records); records = _pack(records)
             if records:
-                with gzip.open(path, "at", encoding="utf-8", compresslevel=6) as handle:
-                    for record in records:
-                        handle.write(json.dumps(record, ensure_ascii=False,
-                                                separators=(",", ":")) + "\n")
+                payload = b"".join(resume.encoded(record) + b"\n" for record in records)
+                operations.append(resume.append(path, gzip.compress(payload, compresslevel=6, mtime=0)))
             previous = 0
             try:
                 previous = json.loads(self._meta_path(
@@ -476,7 +566,11 @@ class DisplayHistoryProjection:
                                                  for bucket in retained.values()),
                         "first_bucket": None, "last_bucket": None,
                         "build_timestamp": built_at, "authoritative": False}
-            _atomic_json(self._meta_path(resolution, day), metadata)
+            operations.append({"kind": "display_window", "path": str(path.absolute()),
+                               "records": window_records, "revision": built_at})
+            operations.append(resume.replace(self._meta_path(resolution, day), resume.encoded(metadata)))
+        operations.append(resume.replace(self._state_path(day), resume.encoded(state)))
+        resume.publish(self._state_path(day).with_suffix(".publication.json"), operations)
 
     def build_day(self, day: str) -> dict:
         """Finish one independent day using bounded resumable chunks."""
@@ -493,7 +587,8 @@ class DisplayHistoryProjection:
         """Discard only rebuildable current-day artifacts before crash recovery."""
         for resolution in RESOLUTIONS:
             for path in (self._data_path(resolution, day),
-                         self._meta_path(resolution, day)):
+                         self._meta_path(resolution, day),
+                         window_path(self._data_path(resolution, day))):
                 try: path.unlink()
                 except FileNotFoundError: pass
         try: self._state_path(day).unlink()
@@ -608,7 +703,8 @@ def read_projection(directory, resolution, day) -> list[dict]:
 class DisplayHistoryProjectionWorker:
     """Failure-isolated tailer; it never owns or calls an acquisition source."""
 
-    def __init__(self, projection: DisplayHistoryProjection, *, interval_seconds=30.0):
+    def __init__(self, projection: DisplayHistoryProjection, *, interval_seconds=30.0, scheduler=None):
+        self.scheduler = scheduler
         self.projection = projection
         self.interval_seconds = max(0.01, float(interval_seconds))
         self._stop = threading.Event(); self._rebuild = threading.Event()
@@ -638,20 +734,32 @@ class DisplayHistoryProjectionWorker:
             self._thread.join(timeout)
         return not (self._thread and self._thread.is_alive())
 
+    def _cycle(self, recovering):
+        if self._rebuild.is_set():
+            self._rebuild.clear()
+            with historical_slot():
+                self.projection.rebuild(include_current=False)
+        day = datetime.fromtimestamp(
+            self.projection.clock(), timezone.utc).date().isoformat()
+        if recovering[0]:
+            # process_chunk recovers a saved publication before loading its frontier.
+            # Valid open-day products must survive an ordinary restart.
+            recovering[0] = False
+        if self.projection._sources(day):
+            with historical_slot():
+                self.projection.process_chunk(day)
+        return recovering
+
     def _run(self):
-        recovering = True
+        recovering = [True]
         while not self._stop.is_set():
             try:
-                if self._rebuild.is_set():
-                    self._rebuild.clear()
-                    self.projection.rebuild(include_current=False)
-                day = datetime.fromtimestamp(
-                    self.projection.clock(), timezone.utc).date().isoformat()
-                if recovering:
-                    self.projection.reset_open_day(day)
-                    recovering = False
-                if self.projection._sources(day):
-                    self.projection.process_chunk(day)
+                if self.scheduler is None:
+                    recovering = self._cycle(recovering)
+                else:
+                    from local_work_composition import worker_call
+                    recovering = worker_call(self.scheduler, "display",
+                        lambda: self._cycle(recovering), cancelled=self._stop.is_set)
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 with self.projection._lock:
