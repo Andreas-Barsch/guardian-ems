@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+from history_append_receipt import before_append, after_append
 import json
 import gzip
 import logging
@@ -40,6 +42,7 @@ def hycube_record(timestamp, value):
 def write_rows(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    after_append(path,before_append(path))
 
 
 def builder(tmp_path, cell_rows=(), hycube_rows=(), **kwargs):
@@ -138,7 +141,7 @@ def test_current_day_incremental_update_and_restart_recovery(tmp_path):
     core = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
                                     max_records=1, clock=lambda: NOW)
     assert core.process_chunk(today)["caught_up"]
-    with path.open("a") as handle:
+    with append_rows(path) as handle:
         handle.write(json.dumps(cell_record(base + 10, soc=20)) + "\n")
     restarted = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
                                          max_records=1, clock=lambda: NOW)
@@ -224,7 +227,7 @@ def test_live_update_cost_is_small_and_all_resolutions_are_updated(tmp_path):
                                     max_records=1, clock=lambda: NOW)
     durations = []
     for index in range(40):
-        with path.open("a") as handle:
+        with append_rows(path) as handle:
             handle.write(json.dumps(cell_record(NOW + index * 5, soc=index)) + "\n")
         started = time.perf_counter(); core.process_chunk(today); durations.append(
             time.perf_counter() - started)
@@ -254,7 +257,7 @@ def test_late_current_day_record_never_rewrites_a_closed_bucket(tmp_path):
     core = DisplayHistoryProjection(cell, tmp_path / "hycube", tmp_path / "display",
                                     clock=lambda: NOW)
     core.process_chunk(today)
-    with path.open("a") as handle:
+    with append_rows(path) as handle:
         handle.write(json.dumps(cell_record(NOW + 10)) + "\n")
     with pytest.raises(DisplayProjectionError, match="requires day rebuild"):
         core.process_chunk(today)
@@ -519,33 +522,10 @@ def test_restart_with_missing_persisted_source_keeps_provider_and_recovers(tmp_p
     assert config_ui._DISPLAY_PROJECTION_PROVIDER()["enabled"] is True
 
     write_rows(source, rows)
-    worker = DisplayHistoryProjectionWorker(restarted, interval_seconds=.01)
-    assert worker.start()
-    deadline = time.time() + 1
-    while worker.status()["last_success"] is None and time.time() < deadline:
-        time.sleep(.01)
-    recovered = worker.status()
-    assert worker.stop(timeout=1)
-    assert recovered["state"] == "available"
-    assert recovered["last_error"] is None
-    assert recovered["last_success"] is not None
-    assert recovered["days"] > 0 and recovered["open_days"] > 0
-    assert read_projection(output, "1m", today)
-
-    from display_history_reader import DisplayHistoryReader
-    from history_series import CellHistorySeries
-    history = DisplayHistoryReader(output, cell, tmp_path / "hycube",
-                                   CellHistorySeries(cell)).query_bundles(
-        requests=({"metric": "soc"},),
-        timestamp_from="2026-09-02T00:00:00+00:00",
-        timestamp_to="2026-09-03T00:00:00+00:00",
-        module_number=1, module_numbers=(1,), include_all_module_soc=True,
-    )
-    observability = history["display_observability"]
-    assert observability["display_days"] > 0
-    assert observability["display_bytes"] > 0
-    assert observability["display_buckets"] > 0
-    assert observability["history_source_mode"] != "full_resolution"
+    before = (output / "1m" / f"{today}.jsonl.gz").read_bytes()
+    with pytest.raises(DisplayProjectionError, match="source changed"):
+        restarted.process_chunk(today)
+    assert (output / "1m" / f"{today}.jsonl.gz").read_bytes() == before
 
 
 def test_restart_with_corrupt_metadata_is_invalid_not_disabled(tmp_path):
@@ -557,9 +537,9 @@ def test_restart_with_corrupt_metadata_is_invalid_not_disabled(tmp_path):
     assert status["enabled"] is True and status["state"] == "invalid"
     assert status["invalid_days"] == 1
     assert status["last_error"].startswith("JSONDecodeError:")
-    assert restarted.process_chunk(today)["caught_up"]
-    recovered = restarted.status()
-    assert recovered["state"] == "available" and recovered["last_error"] is None
+    with pytest.raises(DisplayProjectionError, match="invalid display products"):
+        restarted.process_chunk(today)
+    assert restarted.status()["state"] == "invalid"
 
 
 def test_restart_with_source_signature_mismatch_is_invalid_not_disabled(tmp_path):
@@ -574,7 +554,7 @@ def test_restart_with_source_signature_mismatch_is_invalid_not_disabled(tmp_path
         "ValueError: cell source signature mismatch for 2026-09-02")
 
 
-def test_invalid_open_state_is_rebuilt_without_process_restart(tmp_path):
+def test_invalid_open_state_requires_explicit_bounded_rebuild(tmp_path):
     today, cell, _source, _rows, output = _current_day_projection(tmp_path)
     state = output / ".state" / f"{today}.json"
     state.write_text(json.dumps({
@@ -585,11 +565,10 @@ def test_invalid_open_state_is_rebuilt_without_process_restart(tmp_path):
     }))
     restarted = DisplayHistoryProjection(cell, tmp_path / "hycube", output,
                                          clock=lambda: NOW)
-    result = restarted.process_chunk(today)
-    status = restarted.status()
-    assert result["caught_up"]
-    assert status["enabled"] is True and status["state"] == "available"
-    assert status["last_error"] is None and status["last_success"] is not None
+    with pytest.raises(DisplayProjectionError, match="invalid display checkpoint"):
+        restarted.process_chunk(today)
+    assert restarted.status()["enabled"] is True
+    assert restarted.status()["state"] == "invalid"
 
 
 def test_legacy_source_signature_restart_with_missing_source_is_observable(tmp_path):
@@ -622,3 +601,34 @@ def test_clean_start_remains_enabled_and_idle(tmp_path):
                     "current_file": None, "records": 0, "bytes": 0,
                     "buckets": 0, "errors": 0},
     }
+
+
+@contextmanager
+def append_rows(path):
+    generation=before_append(path)
+    with path.open("a") as handle:
+        yield handle
+    after_append(path,generation)
+
+
+def test_live_buckets_survive_day_finalization_with_coverage(tmp_path):
+    today,cell,source,rows,output=_current_day_projection(tmp_path)
+    core=DisplayHistoryProjection(cell,tmp_path/"hycube",output,clock=lambda:NOW+86400)
+    result=core.build_day(today)
+    buckets=by(read_projection(output,"1m",today),"soc")
+    assert len(buckets)==2
+    assert sum(item["sample_count"] for item in buckets)==2
+    assert buckets[-1]["coverage"]["expected_cadence_seconds"]==60
+    assert result["records"]==0
+
+
+def test_regular_single_sample_buckets_connect_but_outage_breaks(tmp_path):
+    from display_history_reader import expand_bucket
+    from history_series_contract import normalize_series
+    base=datetime(2026,9,1,tzinfo=timezone.utc).timestamp()
+    core,output=builder(tmp_path,[cell_record(base+second) for second in (5,65,125,185,1205)])
+    core.build_day(DAY)
+    points=[point for bucket in by(read_projection(output,"1m",DAY),"soc") for point in expand_bucket(bucket)]
+    result=normalize_series({"points":points},DAY+"T00:00:00+00:00","2026-09-02T00:00:00+00:00")
+    assert not any(point.get("_segment_start") for point in result["points"][:4])
+    assert result["points"][-1]["_segment_start"]

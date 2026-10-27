@@ -13,7 +13,9 @@ import history_block_index
 from cell_history import CellHistoryWriter
 from history_block_index import (BlockIndexError, build_index, extend_open_index,
                                  index_path, selected_ranges)
+from history_append_receipt import before_append, after_append
 from history_series import CellHistorySeries
+from research_budget import ResearchQueryError
 from history_timing import HistoryRequestTimingState
 from hycube_evidence import HycubeBatteryCapacitySeries, HycubeEvidenceWriter
 from hycube_projection import HycubeProjectionBackfill, HycubeProjectionStore
@@ -102,10 +104,13 @@ def test_invalid_index_is_detected_for_full_scan_fallback(tmp_path, damage):
 def test_open_index_reads_unindexed_growth_and_detects_prefix_change(tmp_path):
     path = tmp_path / "day.jsonl"
     write_jsonl(path, [cell_record(1000 + index) for index in range(256)])
+    after_append(path,before_append(path))
     extend_open_index(path, timestamp_field="timestamp", iso_timestamp=False)
+    generation=before_append(path)
     with path.open("a") as handle:
         for index in range(256, 270):
             handle.write(json.dumps(cell_record(1000 + index)) + "\n")
+    after_append(path,generation)
     ranges, info = selected_ranges(path, 1258, 1269,
                                    timestamp_field="timestamp", iso_timestamp=False)
     assert ranges[-1][1] == path.stat().st_size
@@ -142,9 +147,9 @@ def test_hycube_full_scan_and_index_are_pointwise_equal_cross_day(tmp_path):
                 timestamp_to="2026-09-02T08:00:00+00:00", max_points=180)
     indexed = HycubeBatteryCapacitySeries(raw, projection_directory=projection).query(**args)
     for idx in projection.glob("*.idx"): idx.rename(idx.with_suffix(".disabled"))
-    scanned = HycubeBatteryCapacitySeries(raw, projection_directory=projection).query(**args)
-    assert indexed["points"] == scanned["points"]
-    assert indexed["raw_records"] == scanned["raw_records"]
+    assert indexed["points"]
+    with pytest.raises(ResearchQueryError,match="index missing"):
+        HycubeBatteryCapacitySeries(raw, projection_directory=projection).query(**args)
 
 
 def test_current_day_projection_suffix_and_raw_tail_remain_equal_to_raw(tmp_path):
@@ -163,7 +168,7 @@ def test_current_day_projection_suffix_and_raw_tail_remain_equal_to_raw(tmp_path
     assert indexed["points"] == scanned["points"]
 
 
-def test_cell_full_scan_and_index_are_pointwise_equal_with_module_filter(tmp_path):
+def test_cell_requires_index_and_indexed_values_match_source_filter(tmp_path):
     directory = tmp_path / "cell"; path = directory / "2026-09-01.jsonl"
     base = datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp()
     records = [cell_record(base + index * 10, index % 6 + 1, index % 100)
@@ -174,12 +179,16 @@ def test_cell_full_scan_and_index_are_pointwise_equal_with_module_filter(tmp_pat
     args = dict(metric="soc", timestamp_from="2026-09-01T02:00:00+00:00",
                 timestamp_to="2026-09-01T03:00:00+00:00", module_number=1,
                 max_points=100)
-    scanned = CellHistorySeries(directory).query_bundle(**args)
+    with pytest.raises(ResearchQueryError, match="index missing"):
+        CellHistorySeries(directory).query_bundle(**args)
     build_index(path, timestamp_field="timestamp", iso_timestamp=False)
     indexed = CellHistorySeries(directory).query_bundle(**args)
-    assert indexed["points"] == scanned["points"]
-    assert indexed["samples"] == scanned["samples"]
-    assert indexed["raw_records"] == scanned["raw_records"]
+    expected = [record for record in records if record["module"] == 1 and
+                base+7200 <= record["timestamp"] <= base+10800]
+    assert indexed["raw_records"] == len(expected)
+    assert sorted((p["timestamp"], p["value"]) for p in indexed["points"]) == sorted(
+        (datetime.fromtimestamp(r["timestamp"], timezone.utc).isoformat(), r["soc_percent"])
+        for r in expected)
 
 
 def test_cell_writer_index_failure_never_affects_history(tmp_path, monkeypatch):
@@ -190,7 +199,7 @@ def test_cell_writer_index_failure_never_affects_history(tmp_path, monkeypatch):
     assert len(next(tmp_path.glob("*.jsonl")).read_text().splitlines()) == 1
 
 
-def test_cell_live_index_keeps_open_suffix_and_reader_falls_back_if_corrupt(tmp_path):
+def test_cell_live_index_keeps_open_suffix_and_refuses_unbounded_corrupt_index(tmp_path):
     writer = CellHistoryWriter(tmp_path)
     for index in range(300):
         writer.append(cell_record(index, index % 6 + 1, index % 100))
@@ -202,8 +211,9 @@ def test_cell_live_index_keeps_open_suffix_and_reader_falls_back_if_corrupt(tmp_
                 timestamp_to="1970-01-01T00:05:00+00:00", module_number=1)
     expected = CellHistorySeries(tmp_path).query_bundle(**args)
     value["schema_version"] = 99; idx.write_text(json.dumps(value))
-    fallback = CellHistorySeries(tmp_path).query_bundle(**args)
-    assert fallback["points"] == expected["points"]
+    assert expected["points"]
+    with pytest.raises(ResearchQueryError, match="index missing"):
+        CellHistorySeries(tmp_path).query_bundle(**args)
 
 
 def test_existing_complete_projection_gets_index_from_explicit_backfill(tmp_path):
@@ -269,3 +279,15 @@ def test_production_shape_indexes_reduce_hycube_and_cell_reads(tmp_path):
                                    timestamp_field="timestamp", iso_timestamp=False)
     assert info["skipped_bytes"] > 0
     assert sum(hi - lo for lo, hi in ranges) < cell.stat().st_size
+
+
+def test_identity_checkpoint_does_not_include_unindexed_future_identity(tmp_path):
+    path=tmp_path/"2026-09-01.jsonl"
+    def row(second,serial):
+        return {"record_type":"frame","timestamp":f"2026-09-01T00:00:{second:02d}+00:00",
+                "adr":1,"physical_serial":serial}
+    write_jsonl(path,[row(0,"A"),row(1,"A"),row(2,"B")])
+    value=build_index(path,timestamp_field="timestamp",iso_timestamp=True,block_records=2,complete=False)
+    assert value["identities_after"]["1"]["serial_string"]=="A"
+    ranges,plan=selected_ranges(path,0,2000000000,timestamp_field="timestamp",iso_timestamp=True)
+    assert plan["identity_checkpoints"][str(value["indexed_size"])]["1"]["serial_string"]=="A"

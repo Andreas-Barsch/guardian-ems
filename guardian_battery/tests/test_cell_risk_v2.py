@@ -125,3 +125,48 @@ def test_quality_exact_boundaries_299_300_29_30_and_2_3_7_days():
     assert row(60, 30, 2)["trend_quality"] == "INSUFFICIENT"
     assert row(60, 30, 3)["trend_quality"] == "SUFFICIENT"
     assert row(60, 30, 7)["trend_quality"] == "STRONG"
+
+
+
+def _cleanup_parity_records():
+    return [dict(timestamp=1788134400+(i%3)*86400+i,module_serial='A' if i%2 else 'B',
+        voltages_mv=[3300+((i+j*7)%29) for j in range(15)],current_a=-2 if i%4 else -12)
+        for i in reversed(range(1200))]
+
+
+def test_bounded_cleanup_preserves_frozen_original_scientific_result():
+    import copy,hashlib,json
+    from cell_risk_v2 import analyze_cell_risk
+    records=_cleanup_parity_records();before=copy.deepcopy(records)
+    result=analyze_cell_risk(records,diagnostic_date='2026-08-31')
+    # Complete original be77e80 result, no fields/values normalized away.
+    digest=hashlib.sha256(json.dumps(result,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    assert digest=='d1ce75540a3457964adbbc5a8a4d1a4d2f01fd90b9d74debc2ebe4812f7e5d2b'
+    assert records==before
+
+
+def test_private_cleanup_yields_after_each_bounded_batch(monkeypatch):
+    import time
+    from cell_risk_v2 import _release_samples
+    samples=[{'sample':i} for i in range(2049)];remaining=[]
+    monkeypatch.setattr(time,'sleep',lambda seconds:remaining.append((seconds,len(samples))))
+    _release_samples(samples)
+    assert remaining==[(0,n) for n in (1793,1537,1281,1025,769,513,257,1,0)]
+
+
+def test_cancelled_science_still_releases_private_samples_cooperatively(monkeypatch):
+    import cell_risk_v2 as risk
+    from work_scheduler import WorkCancelled
+    import pytest,copy
+    records=_cleanup_parity_records();before=copy.deepcopy(records);checks=[0];released=[]
+    release=risk._release_samples
+    def track(samples):
+        released.append(len(samples));release(samples)
+    def cancel():
+        checks[0]+=1
+        if checks[0]==80:raise WorkCancelled('synthetic cancellation')
+    monkeypatch.setattr(risk,'_release_samples',track)
+    monkeypatch.setattr(risk,'_work_checkpoint',cancel)
+    with pytest.raises(WorkCancelled,match='synthetic cancellation'):
+        risk.analyze_cell_risk(records,diagnostic_date='2026-08-31')
+    assert released and sum(released)>0 and records==before

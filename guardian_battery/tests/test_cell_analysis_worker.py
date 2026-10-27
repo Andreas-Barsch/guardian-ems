@@ -288,3 +288,28 @@ def test_snapshot_contains_only_current_identity_and_freezes_context(tmp_path):
     assert module["aggregate_record_count"] == 0
     assert module["sample_projection_seconds"] >= 0
     assert module["aggregate_projection_seconds"] >= 0
+
+
+def test_aggregate_projection_is_deferred_and_snapshot_remains_consistent(tmp_path, monkeypatch):
+    store = CellDiagnosticStore(tmp_path / "cells.json")
+    aggregates = DiagnosticAggregateStore.in_memory(CellDiagnosticStore.phases)
+    sample = CellSample(10, 1, [3300] * 14 + [3320], -1.0, 50.0,
+                        [25.0] * 15, [False] * 15, "SERIAL-1")
+    store.add(sample)
+    aggregates.add(sample, options())
+    expected = aggregates.for_identity(1, "SERIAL-1")
+    calls = []
+    original = DiagnosticAggregateStore.project_records
+    def project(records):
+        calls.append(len(records))
+        return original(records)
+    monkeypatch.setattr(DiagnosticAggregateStore, "project_records", staticmethod(project))
+    snapshot = build_analysis_snapshot(store, aggregates, [1], options(), (), {})
+    assert calls == []  # Collector freezes membership; no histogram evaluation.
+    aggregates.add(CellSample(11, 1, [3290] + [3300] * 14, -1.0, 50.0,
+                              [25.0] * 15, [False] * 15, "SERIAL-1"), options())
+    assert original(snapshot["aggregate_records"][1]) == expected
+    results, profiles, _ = analyse_cell_snapshot(snapshot)
+    assert calls == [len(expected)]
+    assert results[1]["sample_count"] == 1
+    assert profiles

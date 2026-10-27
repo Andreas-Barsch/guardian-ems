@@ -96,7 +96,7 @@ def test_projection_preserves_soc_current_voltage_and_temperature_extrema(tmp_pa
     assert min(values["cell_voltage"])==2900 and max(values["cell_voltage"])==3500
     assert min(values["cell_temperature"])==10 and max(values["cell_temperature"])==40
     assert result["display_observability"]["history_source_mode"]=="display_projection"
-    assert all("derived" not in point and "display_source" not in point
+    assert all(point["derived"] and point["display_source"].startswith("display_")
                for item in result["series"] for point in item["points"])
 
 
@@ -226,3 +226,13 @@ def test_hycube_soc_uses_display_extrema_and_invalid_day_falls_back(tmp_path):
     result=reader.query_hycube(timestamp_from="2026-09-01T00:00:00+00:00",
                                timestamp_to="2026-09-01T23:59:59+00:00")
     assert result["points"][0]["value"]==55
+
+
+def test_partial_bucket_keeps_in_window_value_not_global_bucket_extremum(tmp_path):
+    base=datetime(2026,9,1,tzinfo=timezone.utc).timestamp()
+    reader,_,_,_=setup_reader(tmp_path,[record(base+5,current=0),
+        record(base+25,current=4),record(base+45,current=10)])
+    result=query(reader,"2026-09-01T00:00:20+00:00",
+                 "2026-09-02T00:00:20+00:00",({"metric":"current"},))
+    assert [point["value"] for point in result["series"][0]["points"]]==[4,10]
+    assert result["display_observability"]["partial_bucket_ranges"]==1

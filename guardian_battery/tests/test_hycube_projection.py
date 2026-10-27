@@ -246,7 +246,7 @@ def test_projection_flush_failure_is_bounded_and_raw_remains_complete(
     import hycube_projection
     raw = tmp_path / "raw"; projection = tmp_path / "projection"
     writer = HycubeEvidenceWriter(raw); store = HycubeProjectionStore(projection, flush_records=2)
-    monkeypatch.setattr(hycube_projection, "_write_json_atomic",
+    monkeypatch.setattr(hycube_projection.resume, "atomic",
                         lambda *_: (_ for _ in ()).throw(failure))
     for second in range(5):
         receipt = writer.append_with_receipt(

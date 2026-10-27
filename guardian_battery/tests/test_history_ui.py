@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import re
 
 import pytest
 
@@ -133,11 +134,12 @@ class Item {{
   }}
   querySelectorAll(selector) {{
     if(selector==='button') return this.children.filter(item=>item.tag==='button');
-    if(selector==='path.series') return [];
+    if(selector==='path.series') return this.paths||[];
     return [];
   }}
   get lastChild() {{ return this.children[this.children.length-1]; }}
   setAttribute(key,value) {{ this.attrs[key]=value; }}
+  getAttribute(key) {{ return this.attrs[key]; }}
 }}
 const node=(tag,text)=>new Item(tag,text);
 const labels=[
@@ -151,7 +153,10 @@ const socLabels=()=>labels;
 const legend=new Item('div');
 for(let index=0;index<labels.length;index++){{const button=new Item('button');button.append(new Item('span'),new Item('text','old'));legend.append(button)}}
 const root=new Item('root');root.legend=legend;
+root.paths=labels.map(()=>{{const path=new Item('path');path.attrs.stroke='#1565c0';path._isolatedPoints=[new Item('circle')];return path}});
 relabelSocLegend(root,{{soc_timeline:{{}}}});
+const assert=require('node:assert/strict');
+assert.deepEqual(root.paths.map(path=>path._isolatedPoints[0].attrs.fill),['#1565c0','#111111','#f57c00','#1565c0']);
 console.log(JSON.stringify(legend.children.map(group=>[group.children[0].textContent,group.children.slice(1).map(button=>button.lastChild.textContent)])));
 """
     groups = json.loads(_run_node(script))
@@ -263,7 +268,7 @@ def test_local_midnight_boundaries_are_inner_dst_safe_and_shared_by_all_views():
 
 def test_midnight_projection_does_not_change_measurement_phase_or_maintenance_data():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
-    assert "data.series.points.map" in html
+    assert "orderedPoints(data.series,metric)" in html
     assert "data.phase_analysis?.intervals" in html
     assert "for(const marker of data.overlays)" in html
     assert "class:'marker'" in html and "class:'wrench'" in html
@@ -360,14 +365,14 @@ def test_single_is_default_and_combined_mode_has_independent_stacked_tracks():
 
 def test_explicit_apply_loading_dirty_and_error_states_preserve_charts():
     html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
-    for text in ("AKTUELL", "AUSWAHL GEÄNDERT", "WIRD GELADEN",
+    for text in ("ZEITFENSTER GELADEN", "AUSWAHL GEÄNDERT", "WIRD GELADEN",
                  "Wird geladen …", "Daten werden geladen …"):
         assert text in html
-    assert "queryStatus==='LOADING'" in html
+    assert "if(!e||activeRequest)return" in html
     assert "submitButton.disabled=active" in html
     assert "const generation=++requestGeneration" in html
-    assert "if(generation!==requestGeneration)return" in html
-    assert "Zeitverlauf konnte nicht geladen werden. Bitte erneut versuchen." in html
+    assert "if(generation!==requestGeneration||controller.signal.aborted)return" in html
+    assert "Zeitverlauf konnte nicht geladen werden: " in html
     assert "currentData=null" not in html.split("load=async function", 1)[1]
 
 
@@ -380,3 +385,174 @@ def test_comparison_module_picker_and_responsive_grouped_controls():
     assert "moduleAware" in html and "_actual_cell_number" in html
     assert "Modul ${point.module_number} · Zelle ${point.cell_number}" in html
     assert "relabelModuleLegend" in html
+
+
+def test_progressive_loading_full_window_busy_resume_cancel_and_limits_execute():
+    html = render_history_html(configuration_path="/", maintenance_path="maintenance", timeline_path="timeline")
+    assert ";load();" not in html
+    helpers = "\n".join(_javascript_function(html, name) for name in
+                         ("evidenceKey", "cancelHistory", "markDirty", "setLoading", "renderLoaded"))
+    loader = html[html.index("// Explicit user-started, serial pagination."):html.index("socLabels=function")]
+    script = r"""
+const assert=require('node:assert/strict');
+let requestGeneration=0,queryStatus='UNLOADED',activeRequest=null,loadedQuery=null,loadedMode=null,currentData=null,load;
+const start='2026-10-20T18:30:00Z',end='2026-10-25T18:30:00Z';
+let selected='from='+start+'&to='+end+'&metric=soc',drawn=[],calls=[],timers=[],waiters=[];
+const elements=new Map();
+const byId=id=>{if(!elements.has(id))elements.set(id,{value:id==='view-mode'?'single':'soc',hidden:false,selectedOptions:[{textContent:'SOC'}],append(){}});return elements.get(id)};
+const submitButton={},loadSpinner={},loadLabel={},loadingOverlay={},queryState={},historyStop={},historyNext={};
+const query=()=>({toString:()=>selected}),clear=()=>{},node=()=>({}),history={replaceState(){}},location={pathname:'/history'},exact=t=>new Date(t).toISOString();
+// Real base renderer replaces currentData with a projection: raw buffer must survive.
+const render=d=>{drawn.push(d);currentData={...d,series:{metric:'soc',points:[{value:999}]}}},renderCombined=render;
+const setTimeout=(fn,ms)=>{timers.push(ms);queueMicrotask(fn);return 1},clearTimeout=()=>{};
+let answer;
+const fetch=async(url,options)=>{calls.push({url,options});return answer(url,options)};
+const event={preventDefault(){}};
+function page(index,total=120){const from=new Date(Date.parse(start)+index*3600000).toISOString(),to=new Date(Math.min(Date.parse(end),Date.parse(from)+3600000)).toISOString();const points=[{timestamp:from,value:27,module_serial:'A'},{timestamp:new Date(Date.parse(from)+1000).toISOString(),value:index===60?5:28,module_serial:'A'}];return {series:{metric:'soc',points},window:{from,to},overlays:[],unavailable_intervals:index===70?[{source:'hycube',from,to,reason:'missing_index'}]:[],soc_timeline:{module_series:[{metric:'soc',module_number:1,source:'pylontech',points}],hycube_series:null,policy_series:[]},phase_analysis:{available:false,unavailable_reason:'indexed_projection_unavailable',intervals:[]},pagination:{page_range:{from,to},next_cursor:index+1<total?'page-'+(index+1):null}}}
+const ok=data=>({ok:true,json:async()=>data});
+""" + helpers + "\n" + loader + r"""
+(async()=>{
+ await load();assert.equal(calls.length,0);
+ answer=async url=>{const cursor=new URL('http://test/'+url).searchParams.get('cursor');return ok(page(cursor?Number(cursor.split('-')[1]):0))};
+ await load(event);
+ assert.equal(calls.length,120);assert.equal(timers.length,119);assert.ok(timers.every(ms=>ms===1000));
+ assert.equal(historyPages,120);assert.equal(currentData.window.from,start);assert.equal(currentData.window.to,end);
+ assert.equal(currentData.series.points.length,240);assert.equal(currentData.soc_timeline.module_series[0].points.length,240);
+ assert.equal(Math.min(...currentData.series.points.map(p=>p.value)),5);assert.equal(currentData.series.points[2]._segment_start,true);
+ assert.equal(queryState.textContent,'ZEITFENSTER GELADEN · EINGESCHRÄNKT');assert.equal(historyNext.hidden,true);
+ assert.equal(currentData.unavailable_intervals.length,1);assert.equal(currentData.phase_analysis.available,false);
+ assert.equal(new Date(end)-new Date(start),120*3600000); // local 20:30 -> 19:30 crosses DST
+ // Six-module five-day volume, with 600 Hycube points/hour, fits the explicit cap.
+ let wide=null;
+ for(let i=0;i<120;i++){
+  const q=page(i);const modules=Array.from({length:6},(_,m)=>({metric:'soc',source:'pylontech',module_number:m+1,points:Array.from({length:60},(_,j)=>({timestamp:new Date(Date.parse(start)+i*3600000+j*60000).toISOString(),module_number:m+1,value:j===30?m:27}))}));
+  q.series={metric:'soc',points:modules.flatMap(s=>s.points)};q.soc_timeline.module_series=modules;q.soc_timeline.hycube_series={metric:'soc',source:'hycube',points:Array.from({length:600},(_,j)=>({timestamp:new Date(Date.parse(start)+i*3600000+j*6000).toISOString(),value:34}))};
+  wide=historyMergePage(wide,q,{from:start,to:end});
+ }
+ assert.equal(historyPointCount(wide),158400);assert.equal(wide.soc_timeline.module_series.length,6);assert.equal(wide.soc_timeline.module_series[5].points.length,7200);assert.equal(wide.soc_timeline.hycube_series.points.length,72000);
+ assert.equal(wide.window.to,end);assert.equal(Math.min(...wide.soc_timeline.module_series[5].points.map(p=>p.value)),5);
+ // Combined tracks retain metric boundaries instead of mixing values.
+ const ca=page(0),cb=page(1);ca.series=[ca.series,{metric:'current',points:[{timestamp:start,value:-7}]}];cb.series=[cb.series,{metric:'current',points:[{timestamp:end,value:8}]}];
+ const combined=historyMergePage(historyMergePage(null,ca,{from:start,to:end}),cb,{from:start,to:end});assert.equal(combined.series.length,2);assert.deepEqual(combined.series[1].points.map(p=>p.value),[-7,8]);
+ // Error stops serial loader without retry; resume uses the unconsumed cursor.
+ let n=0;answer=async()=>++n===1?ok(page(0,3)):{ok:false,json:async()=>({error:{message:'history_busy'}})};
+ const before=calls.length;await load(event);assert.equal(calls.length-before,2);assert.equal(historyPages,1);assert.equal(historyNext.hidden,false);assert.ok(queryState.textContent.includes('TEILWEISE'));
+ answer=async url=>{const i=Number(new URL('http://test/'+url).searchParams.get('cursor').split('-')[1]);return ok(page(i,3))};
+ await load({...event,currentTarget:historyNext});assert.equal(historyPages,3);assert.equal(currentData.series.points.length,6);
+ // Cancellation and changed selection cannot accept a late response or load another page.
+ answer=()=>new Promise(resolve=>waiters.push(resolve));const pending=load(event);assert.equal(waiters.length,1);const count=calls.length;cancelHistory();waiters.shift()(ok(page(0)));await pending;assert.equal(calls.length,count);assert.equal(activeRequest,null);assert.equal(submitButton.disabled,false);
+ const stale=load(event);selected+='&selected_modules=1,2';markDirty();waiters.shift()(ok(page(0)));await stale;assert.notEqual(loadedQuery,selected);
+ // Bounded browser memory: fail before replacing accepted buffer, no thinning.
+ const huge=page(0);huge.series.points=Array.from({length:HISTORY_POINT_LIMIT+1},()=>({timestamp:start,value:1}));
+ assert.throws(()=>historyMergePage(null,huge,{from:start,to:end}),/Darstellungsgrenze/);
+ // Empty page and policy gaps remain gaps; extrema and conflict metadata survive.
+ const first=page(0,3),empty=page(1,3),last=page(2,3);empty.series.points=[];empty.soc_timeline.module_series[0]={...empty.soc_timeline.module_series[0],points:[]};last.series.points[0].conflict=true;
+ const merged=historyMergePage(historyMergePage(historyMergePage(null,first,{from:start,to:end}),empty,{from:start,to:end}),last,{from:start,to:end});
+ assert.equal(merged.series.points.length,4);assert.equal(merged.series.points[2]._segment_start,true);assert.equal(merged.series.points[2].conflict,true);
+ console.log('ok');
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+    assert _run_node(script).strip() == "ok"
+
+
+def test_render_path_separates_identity_source_epoch_gap_and_conflict_execute():
+    html=render_history_html(configuration_path="configuration",maintenance_path="maintenance",timeline_path="timeline")
+    start=html.index("function evidenceKey(")
+    end=html.index("function render(data)",start)
+    helpers=html[start:end]
+    script="const COLORS=['blue','red'];\n"+helpers+"""
+const assert=require('node:assert/strict');
+const p=(time,serial,extra={})=>({time,display:time,module_serial:serial,...extra});
+const path=seriesPath([p(3,'B'),p(2,'A'),p(0,'A'),p(1,'B')],v=>v,v=>v);
+assert.equal(path,'M1.00,1.00 L3.00,3.00 M0.00,0.00 L2.00,2.00');
+for(const extra of [{_segment_start:true},{conflict:true},{position_history_id:'new'}, {source:'hycube'}]){
+ const path=seriesPath([p(0,'A'),p(1,'A',extra)],v=>v,v=>v);
+ assert.equal((path.match(/M/g)||[]).length,2);
+ assert.equal((path.match(/L/g)||[]).length,0);
+}
+assert.ok(seriesColor(90).startsWith('hsl('));
+assert.equal(seriesColor(90),seriesColor(90));
+console.log('ok');
+"""
+    assert _run_node(script).strip()=="ok"
+
+
+def test_url_module_restore_occurs_after_dynamic_control_creation():
+    html=render_history_html(configuration_path="/",maintenance_path="maintenance",timeline_path="timeline")
+    reset=html.index("byId('module').value='1';addModules()")
+    restored=html.index("restore();const selectionQuery")
+    assert reset<restored
+    assert "load();" not in html[restored:]
+
+
+def test_responsive_grid_rules_do_not_span_nested_metric_labels():
+    html=render_history_html(configuration_path='/',maintenance_path='maintenance',timeline_path='timeline')
+    assert '.controls>label:nth-of-type(4)' in html
+    assert '.controls label:nth-of-type(4)' not in html
+    assert '.controls .metric-options input{min-height:auto;flex:none}' in html
+
+
+def test_all_selection_fields_bind_final_dirty_and_abort_handler():
+    html=render_history_html(configuration_path='/',maintenance_path='maintenance',timeline_path='timeline')
+    match=re.search(r"for\(const element of document.querySelectorAll\('#controls select[^']+'\)\)element.onchange=updateControlState;",html)
+    assert match
+    script="""
+const assert=require('node:assert/strict');let changed=0,selector;
+const elements=Array.from({length:5},()=>({onchange:()=>{throw Error('stale handler')}}));
+const document={querySelectorAll:s=>{selector=s;return elements}};
+const updateControlState=()=>changed++;
+"""+match.group()+"""
+for(const element of elements)element.onchange();
+assert.equal(changed,5);
+for(const field of ['#module-picker input','#voltage-cell-picker input','#temperature-cell-picker input'])assert.ok(selector.includes(field));
+console.log('ok');
+"""
+    assert _run_node(script).strip()=='ok'
+
+
+@pytest.mark.parametrize('combined', [False, True])
+def test_actual_renderers_show_isolated_observations_without_bridging(combined):
+    html = render_history_html(configuration_path='/', maintenance_path='maintenance', timeline_path='timeline')
+    helpers = html[html.index('function evidenceKey('):html.index('function render(data)')]
+    renderer = _javascript_function(html, 'renderTrack(series,data)' if combined else 'render(data)')
+    script = r"""
+const assert=require('node:assert/strict');
+class Element {
+ constructor(tag='div',attrs={}){this.tag=tag;this.attrs=attrs;this.children=[];this.style={};this.clientWidth=640;this.clientHeight=380;this.classList={add(){},remove(){}}}
+ append(...items){this.children.push(...items)}
+ prepend(...items){this.children.unshift(...items)}
+ setAttribute(k,v){this.attrs[k]=String(v)}
+ getAttribute(k){return this.attrs[k]}
+}
+const svg=(tag,attrs)=>new Element(tag,attrs),node=tag=>new Element(tag),text=()=>node('text');
+const document={createElement:node,createTextNode:()=>node('text')};
+let elements={},lastTrack,currentData,trackContexts=[];
+const byId=id=>elements[id]||(elements[id]=new Element());
+const clear=id=>byId(id).children=[];
+function trackShell(){lastTrack={wrap:node(),plot:node(),empty:node(),legend:node(),tooltip:node(),layers:Object.fromEntries(['phase','grid','day','axis','series','marker','interaction'].map(k=>[k,node()]))};return lastTrack}
+const renderDayBoundaries=()=>{},timeLabel=()=>'',decimals=()=>1,niceStep=()=>1,hideTrackCursors=()=>{};
+const COLORS=['#1565c0'],UNITS={soc:'%'};
+const annotatePoint=p=>({...p});
+""" + helpers + renderer + '\nconst combined=' + json.dumps(combined) + r""";
+const p=(time,extra={})=>({time,display:50,module_serial:'A',...extra});
+function draw(points){
+ elements={};const data={series:{metric:'soc',points},window:{from:'1970-01-01T00:00:00Z',to:'1970-01-01T00:00:01Z'},overlays:[]};
+ if(combined)renderTrack(data.series,data);else render(data);
+ const layer=combined?lastTrack.layers.series:byId('series-layer');
+ return {paths:layer.children.filter(e=>e.tag==='path'),dots:layer.children.filter(e=>e.tag==='circle')};
+}
+function check(points,count,lines){
+ const before=JSON.stringify(points),{paths,dots}=draw(points);
+ assert.equal(dots.length,count);assert.equal(paths.reduce((n,p)=>n+(p.attrs.d.match(/L/g)||[]).length,0),lines);
+ for(const dot of dots){assert.equal(dot.attrs.fill,'#1565c0');assert.ok(Number(dot.attrs.r)>0);assert.ok(Number.isFinite(Number(dot.attrs.cx)));assert.ok(Number.isFinite(Number(dot.attrs.cy)));assert.ok(paths.some(path=>path.attrs.d.includes('M'+dot.attrs.cx+','+dot.attrs.cy)))}
+ assert.equal(JSON.stringify(points),before);
+}
+check([p(100)],1,0);
+check([p(100),p(100)],1,0);
+check([p(100),p(200)],0,1);
+for(const boundary of [{_segment_start:true},{conflict:true},{module_serial:'B'},{position_history_id:'new'},{source:'hycube'}])check([p(100),p(200,boundary)],2,0);
+check([p(100),p(200),p(300,{_segment_start:true})],1,1);
+check([p(100,{display:NaN})],0,0);
+console.log('ok');
+"""
+    assert _run_node(script).strip() == 'ok'

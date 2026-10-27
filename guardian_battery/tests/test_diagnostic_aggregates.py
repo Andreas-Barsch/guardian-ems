@@ -27,7 +27,7 @@ def test_aggregates_survive_restart_with_versions_config_and_identity(tmp_path):
     discharge = [item for item in records if item["phase"] == "discharge" and item["cell"] == 1]
     assert len(discharge) == 3
     assert all(item["physical_module_serial"] == "SN-A" for item in discharge)
-    assert all(item["guardian_version"] == "0.8.1" for item in discharge)
+    assert all(item["guardian_version"] == "0.9.0" for item in discharge)
     assert all(item["diagnostic_engine_version"] == "0.4.12" for item in discharge)
     assert all(item["config_id"] == config_id(diagnostic_parameters(DEFAULTS)) for item in discharge)
     assert [item["median_deviation_mv"] for item in discharge] == [2, 5, 9]
@@ -139,3 +139,52 @@ def test_analysis_cache_invalidates_for_data_config_and_aggregate_changes(tmp_pa
     store.add(sample(200))
     store.analyse(1, changed_options, aggregate_records=aggregate)
     assert calls == 4
+
+
+def test_persistence_snapshot_survives_live_updates_backfill_and_pruning(tmp_path):
+    store = DiagnosticAggregateStore(tmp_path / "aggregates.json", CellDiagnosticStore.phases, 30)
+    store.add(sample(100, delta=2), DEFAULTS)
+    original = store.persistence_payload()
+    frozen = json.loads(json.dumps(original))
+    store.add(sample(101, delta=7), DEFAULTS)
+    current = store.persistence_payload()
+    assert original == frozen
+    assert all(value["sample_count"] == 2 for value in current["records"].values())
+    assert all(value["sample_count"] == 1 for value in original["records"].values())
+    store.merge_backfill_records(original["records"])
+    store.prune_through("1971-01-01")
+    assert not store.records
+    assert original == frozen
+    store.persist_payload(original)
+    assert json.loads(store.path.read_text()) == frozen
+
+
+def test_snapshot_shares_unchanged_records_but_owns_backfill_inputs(tmp_path):
+    store = DiagnosticAggregateStore(tmp_path / "aggregates.json", CellDiagnosticStore.phases)
+    for day in range(40):
+        store.add(sample(day * 86400 + 100), DEFAULTS)
+    first = store.persistence_payload()
+    old_keys = {key for key, value in first["records"].items() if value["day"] != "1970-02-09"}
+    store.add(sample(39 * 86400 + 101, delta=4), DEFAULTS)
+    second = store.persistence_payload()
+    assert all(first["records"][key] is second["records"][key] for key in old_keys)
+    assert all(first["records"][key] is not second["records"][key]
+               for key in first["records"] if key not in old_keys)
+    external = json.loads(json.dumps(first["records"]))
+    store.merge_backfill_records(external)
+    copied = json.loads(json.dumps(store.persistence_payload()))
+    for value in external.values():
+        value["deviation_histogram"]["999"] = 1000
+    assert store.persistence_payload()["records"] == copied["records"]
+
+
+def test_source_markers_do_not_change_published_snapshot(tmp_path):
+    store = DiagnosticAggregateStore(tmp_path / "aggregates.json", CellDiagnosticStore.phases)
+    store.add(sample(100), DEFAULTS)
+    signature = {"cell_history": {"size": 10}}
+    store.mark_source_complete(Path("1970-01-01.jsonl"), signature, "config", set(store.records), {})
+    first = store.persistence_payload()
+    frozen = json.loads(json.dumps(first))
+    signature["cell_history"]["size"] = 20
+    store.mark_source_complete(Path("1970-01-01.jsonl"), signature, "config", set(store.records), {})
+    assert first == frozen
