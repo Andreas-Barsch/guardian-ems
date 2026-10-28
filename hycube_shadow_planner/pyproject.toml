@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hycube-shadow-planner"
+version = "0.5.1"
+description = "Outage reserve planner with bounded source reads and two dedicated HA display states"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+hycube-sim = "hycube_sim.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hycube_sim*"]

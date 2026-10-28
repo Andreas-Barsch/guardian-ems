@@ -1,0 +1,24 @@
+type: markdown
+content: |-
+  ## Aktuelle Notstromreservedauer
+
+  {% set e = 'sensor.hycube_planung_notstromreservedauer' %}
+  **{{ state_attr(e, 'display_value') if states(e) not in ['unknown', 'unavailable'] and now().timestamp() - as_timestamp(state_attr(e, 'observed_at'), 0) < 180 else 'Nicht berechenbar' }}**
+
+  ## Notstrom – für mindestens 24 Stunden
+
+  {% set e = 'sensor.hycube_planung_notstrom_24h' %}
+  **{{ state_attr(e, 'display_value') if states(e) not in ['unknown', 'unavailable'] and now().timestamp() - as_timestamp(state_attr(e, 'observed_at'), 0) < 180 else 'Nicht berechenbar' }}**
+
+
+  ## Solar-Korrekturfaktoren
+
+  {% set e = 'sensor.hycube_planung_notstrom_24h' %}
+  {% set fresh = states(e) not in ['unknown', 'unavailable'] and now().timestamp() - as_timestamp(state_attr(e, 'observed_at'), 0) < 180 %}
+  {% set factors = state_attr(e, 'solar_factors') or {} %}
+  | Anlage | Errechnet | Wirksam |
+  | :--- | ---: | ---: |
+  {% for name in ['AB1', 'AB2'] -%}
+  {% set f = factors.get(name, {}) -%}
+  | {{ name }} | {{ ((f.calculated_percent | round(1) | string | replace('.', ',')) ~ ' %' ~ (' (vorläufig)' if f.get('provisional') else '')) if fresh and f.get('calculated_percent') is not none else ('Noch keine Messstunde' if fresh else 'Nicht verfügbar') }} | {{ ((f.effective_percent | round(1) | string | replace('.', ',')) ~ ' %') if fresh and f.get('effective_percent') is not none else 'Nicht verfügbar' }} |
+  {% endfor %}

@@ -1,0 +1,19 @@
+{
+  "sample_interval_seconds": 60,
+  "module_serials": ["BEISPIEL_PHYSISCHE_SERIENNUMMER"],
+  "frames": [
+    {
+      "at": "2026-10-28T10:00:00+00:00",
+      "pack_soc_percent": 100,
+      "modules": [
+        {
+          "serial": "BEISPIEL_PHYSISCHE_SERIENNUMMER",
+          "cells_mv": [3400,3400,3400,3400,3400,3400,3400,3400,3400,3400,3400,3400,3400,3400,3420],
+          "temperature_ok": true,
+          "protection_clear": true
+        }
+      ]
+    }
+  ],
+  "example_only": "Keine Livebeobachtung. Alle physischen Module aufführen, 15 synchrone Zellen je Modul. Fehlende Alarm-/Temperaturbelege nicht durch true ersetzen. Mindestens zwei Stunden tatsächliche Historie mit Pack-SOC erforderlich. sources.balancing_history={type:file,path:/config/guardian-history.json}; alternativ type:ha_attribute mit entity_id und attribute. Für belegte >14 Tage ohne Vollladung ist eine entsprechend vollständige Historie erforderlich."
+}
