@@ -1,0 +1,127 @@
+{
+  "policy": {
+    "horizon_hours": 72,
+    "outage_hours": 24,
+    "start_window_hours": 24,
+    "step_minutes": 15,
+    "capacity_kwh": 9.5,
+    "standby_kw": 0.04,
+    "charge_efficiency": 0.92,
+    "discharge_efficiency": 0.92,
+    "solar_correction_factor": 0.8,
+    "profile_confirmed": false,
+    "power_limits_confirmed": false
+  },
+  "battery_mapping": {
+    "mode": "soc_estimate",
+    "confirmed": false,
+    "nominal_capacity_kwh": 10,
+    "technical_floor_percent": 5,
+    "soc_observation": "hycube_soc",
+    "floor_observation": "outage_protection_threshold"
+  },
+  "load_profiles": {
+    "minimum_kw": 0.3
+  },
+  "sources": {
+    "home_assistant": {
+      "base_url": "https://homeassistant.example.invalid",
+      "token_env": "HA_TOKEN"
+    },
+    "measurements": {
+      "normal_passive_threshold": {
+        "entity_id": "sensor.replace_normal_passive_threshold",
+        "unit": "%",
+        "scale": 1,
+        "output_unit": "%"
+      },
+      "passive_outage_threshold": {
+        "entity_id": "sensor.replace_passive_outage_threshold",
+        "unit": "%",
+        "scale": 1,
+        "output_unit": "%"
+      },
+      "outage_protection_threshold": {
+        "entity_id": "sensor.replace_outage_protection_threshold",
+        "unit": "%",
+        "scale": 1,
+        "output_unit": "%"
+      }
+    },
+    "forecasts": {
+      "hycube": {
+        "type": "ha_solcast",
+        "site_id": "replace-ab1-site",
+        "entity_ids": [
+          "sensor.replace_forecast_today",
+          "sensor.replace_forecast_tomorrow",
+          "sensor.replace_forecast_day_3"
+        ],
+        "metadata_entity": "sensor.replace_ab1_metadata",
+        "issue_entity": "sensor.replace_forecast_last_poll"
+      },
+      "secondary": {
+        "type": "ha_solcast",
+        "site_id": "replace-ab2-site",
+        "entity_ids": [
+          "sensor.replace_forecast_today",
+          "sensor.replace_forecast_tomorrow",
+          "sensor.replace_forecast_day_3"
+        ],
+        "metadata_entity": "sensor.replace_ab2_metadata",
+        "issue_entity": "sensor.replace_forecast_last_poll"
+      }
+    },
+    "guardian_shared": {
+      "root": "/share/guardian_battery",
+      "cache": "runs/guardian-cache.sqlite",
+      "module_serials": [
+        "replace_module_a",
+        "replace_module_b"
+      ],
+      "byte_budget": 33554432,
+      "time_budget_seconds": 8
+    }
+  },
+  "solar_learning": {
+    "enabled": true,
+    "state_file": "runs/solar-learning.sqlite",
+    "calibration_revision": "1",
+    "window_days": 7,
+    "max_measurement_gap_seconds": 60,
+    "minimum_valid_hours": 24,
+    "minimum_daylight_coverage": 0.9,
+    "minimum_forecast_coverage": 0.95,
+    "minimum_forecast_hour_kwh": 0.02,
+    "minimum_forecast_sum_kwh": 1,
+    "maximum_factor": 2,
+    "measurements": {
+      "hycube": {
+        "type": "guardian_field",
+        "verified": false,
+        "directory": "/share/guardian_battery/hycube_history",
+        "field": "solarPower",
+        "scale_to_kw": 0.001,
+        "max_power_kw": 10
+      },
+      "secondary": {
+        "type": "guardian_field",
+        "verified": false,
+        "directory": "/share/guardian_battery/hycube_history",
+        "field": "ExternalPower",
+        "scale_to_kw": -0.001,
+        "max_power_kw": 10
+      }
+    }
+  },
+  "rolling": {
+    "enabled": true,
+    "poll_seconds": 60,
+    "max_plan_age_seconds": 3600,
+    "deficit_hysteresis_w": 50,
+    "deficit_debounce_seconds": 120
+  },
+  "ha_display": {
+    "enabled": false
+  }
+}
