@@ -1,0 +1,4 @@
+*
+!hycube_sim/
+!hycube_sim/*.py
+!addon_entry.py
